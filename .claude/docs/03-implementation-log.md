@@ -78,7 +78,17 @@ binaries build (GUI with `-H=windowsgui`).
   GitHub API, remote master deleted.
 - CI ran end-to-end on first push: tag v1.0.0 + released installer.
 
-## 10. Saved-query migration (commit 646689e)
+## 10. PDF/print/email removal (2026-07-20, after v1.0.2)
+User requested deletion of everything related to PDF & Email settings; scope
+confirmed as the full subsystem. Deleted: internal/pdf, internal/print,
+internal/email, hasavshevet/pdf_hook.go, cmd GUI pdf_settings.go + its
+button/handler, PDFConfig/SMTPConfig + defaults, app.go hook wiring +
+printer-validation helpers, installer print-binary entries, workflow
+PDFtoPrinter bundling step, docs/printing.md + docs/pdf-email.md.
+go mod tidy dropped chromedp + go-mail. Kept: PostOrderHook interface,
+CustomerEmail DTO field (wire compat). All builds/tests green.
+
+## 11. Saved-query migration (commit 646689e)
 - Real data found at `%APPDATA%\electron-mssql-app\custom_sql_data.json`
   (25 queries) and copied to `%PROGRAMDATA%\digi-erp-connector\queries.json`.
 - Parser initially rejected it: electron stored `"params": []` for

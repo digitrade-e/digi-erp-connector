@@ -22,9 +22,9 @@ go build -trimpath -ldflags "-s -w" -o digi-erp-connectord.exe ./cmd/digi-erp-co
 
 - Remote: https://github.com/digitrade-e/digi-erp-connector (default branch `main`).
 - **Every push to `main` auto-releases**: `auto-tag` bumps the patch version
-  (v1.0.0, v1.0.1, ...) → `release-windows` builds both EXEs, downloads
-  PDFtoPrinter + qpdf29.dll + resource.dat, compiles the Inno Setup
-  installer, publishes a GitHub Release. Don't push half-finished work to main.
+  (v1.0.0, v1.0.1, ...) → `release-windows` builds both EXEs, compiles the
+  Inno Setup installer, publishes a GitHub Release. Don't push half-finished
+  work to main.
 - Installer asset name: `digi-erp-connector-setup-<version>.exe`.
 
 ## Git auth on this machine (important)
@@ -45,7 +45,7 @@ go build -trimpath -ldflags "-s -w" -o digi-erp-connectord.exe ./cmd/digi-erp-co
   elevates the GUI via `launch-admin.vbs`.
 - Data dir: `%PROGRAMDATA%\digi-erp-connector\` — `config.yaml` (0600, bearer
   token in plaintext), `queries.json`, `server.log`, `ui.log`, `secrets\`
-  (DPAPI machine-scope: `db_password_<erp>.bin`, `smtp_password.bin`).
+  (DPAPI machine-scope: `db_password_<erp>.bin`).
 - The old erp-connector (`erp-connectord` service, `%PROGRAMDATA%\erp-connector`)
   can coexist during transition — different service name, dir, installer AppId.
 - Order-number continuity: copy `lastOrderNumber.json` from the old install's

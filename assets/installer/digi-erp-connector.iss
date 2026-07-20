@@ -39,9 +39,6 @@ SetupIconFile={#SourcePath}\icon.ico
 [Files]
 Source: "{#BuildDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\{#ServiceExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\PDFtoPrinter.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\qpdf29.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\resource.dat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\launch-admin.vbs"; DestDir: "{app}"; Flags: ignoreversion
 

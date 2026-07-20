@@ -139,10 +139,6 @@ func newMainForm(cfg config.Config, logSvc logger.LoggerService) (*mainForm, err
 					},
 					PushButton{Text: "Add new folder path", OnClicked: f.onAddFolder},
 
-					// ── PDF & Email Settings (separate window) ───────────
-					HSeparator{},
-					PushButton{Text: "PDF & Email Settings...", OnClicked: f.onOpenPDFSettings},
-
 					// ── Hasavshevet-only section ──────────────────────────
 					Composite{
 						AssignTo: &f.sendOrderSection,
@@ -320,10 +316,6 @@ func (f *mainForm) onBrowseHasBat() {
 	} else if ok {
 		f.hasBatEdit.SetText(dlg.FilePath)
 	}
-}
-
-func (f *mainForm) onOpenPDFSettings() {
-	showPDFSettingsDialog(f.MainWindow, &f.cfg, f.logSvc)
 }
 
 func (f *mainForm) onDocumentation() {

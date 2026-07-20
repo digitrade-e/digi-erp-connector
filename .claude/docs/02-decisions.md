@@ -55,7 +55,19 @@ API, and remote `master` deleted.
 - Committed `rsrc.syso` / `app.manifest` in cmd/digi-erp-connector (inherited
   from erp-connector, needed for the walk GUI manifest).
 
-## 10. New additions beyond both parents
+## 10. PDF/print/email subsystem: fully removed (2026-07-20, user decision)
+After the initial build, the user chose to delete everything PDF/email/print:
+`internal/pdf`, `internal/print`, `internal/email`, the post-order PDF hook,
+the GUI "PDF & Email Settings" dialog, `PDFConfig`/`SMTPConfig`, the
+PDFtoPrinter/qpdf29.dll/resource.dat installer bundling, and the related
+docs. Orders still process (IMOVEIN + has.exe) — there is simply no PDF
+generated afterwards. The generic `PostOrderHook` interface in queue.go was
+kept (part of the queue design). `CustomerEmail` stays in the sendOrder DTO
+for wire compatibility (ignored). If the feature returns, recover from git
+history (last full commit: 6f17999) and re-read erp-connector's
+docs/printing.md for the session-0/WSD constraints.
+
+## 11. New additions beyond both parents
 - Per-IP token-bucket rate limiting (25 rps, burst 50) before auth on all routes.
 - `GET /api/sendOrder/{jobId}` — the OrderQueue job map existed in
   erp-connector but had no HTTP endpoint.

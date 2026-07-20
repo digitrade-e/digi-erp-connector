@@ -53,9 +53,6 @@ internal/
   erp/sap/              ← SAP B1 price/stock query
   files/                ← Path traversal prevention
   logger/               ← LoggerService interface
-  pdf/                  ← headless-Chrome PDF (file:// temp HTML)
-  print/                ← PDFtoPrinter → Acrobat → Sumatra engine chain
-  email/                ← SMTP sender
   platform/             ← autostart (Windows service), paths
   secrets/              ← Windows DPAPI (machine scope)
 ```
@@ -102,14 +99,14 @@ All routes: `middleware/auth.go` validates `Authorization: Bearer <token>` again
 
 1. `OrderQueue.Submit(req)` reserves the order number (`lastOrderNumber.json`, mutex) → 202 + jobId (= order number)
 2. Single worker builds IMOVEIN.doc/.prm (fixed-width 2891-byte records, Windows-1255), writes history copies, runs `has.exe` or `digi.bat`
-3. Post-order hooks: remote-template PDF via headless Chrome → optional print + email (never fail the order)
+3. The queue supports optional PostOrderHook implementations (none registered — the PDF/print/email hook was removed 2026-07-20; hook errors must never fail the order)
 
 **Single-worker constraint:** never make the order queue concurrent — IMOVEIN files are shared.
 
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.
-Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`, `pdf/remote_test.go`.
+Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`.
 
 ## Build
 
@@ -128,17 +125,16 @@ go build -o digi-erp-connector.exe ./cmd/digi-erp-connector # GUI (Windows only)
 - Making the OrderQueue worker concurrent
 - Business logic in `cmd/` — belongs in `internal/`
 
+## Removed features (do not resurrect casually)
+
+The PDF/print/email subsystem (`internal/pdf`, `internal/print`,
+`internal/email`, the post-order PDF hook, the GUI "PDF & Email Settings"
+dialog, `PDFConfig`/`SMTPConfig`, PDFtoPrinter installer bundling) was
+deleted on 2026-07-20 by user decision. If it ever comes back, recover it
+from git history AND read erp-connector's `docs/printing.md` first — the
+print path had hard-won session-0/WSD-port constraints.
+
 ## Known AI Failure Patterns (inherited from erp-connector — do not repeat)
-
-### PDF generation
-- ❌ `data:text/html;base64` navigation URLs — Chrome blocks embedded data: images; always write a temp file and navigate `file://`
-- ❌ Typing a `data:` URI as `string` in html/template — becomes `#ZgotmplZ`; must be `template.URL`
-
-### PDF printing (read `docs/printing.md` first)
-- ❌ Trusting SumatraPDF `-silent` exit code — returns 0 even when nothing prints
-- ❌ Adobe Reader `/t` from a service — hangs in session 0
-- ❌ Printers on `WSD-*` ports from the daemon — jobs vanish; require Standard TCP/IP ports
-- ❌ Removing `PDFtoPrinter.exe` / `qpdf29.dll` / `resource.dat` from installer or release workflow
 
 ### SQL safety
 - ❌ Re-introducing a raw-SQL execution endpoint "for debugging"

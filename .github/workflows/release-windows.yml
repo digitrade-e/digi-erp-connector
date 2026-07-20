@@ -52,25 +52,6 @@ jobs:
           go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/bin/digi-erp-connector.exe" ./cmd/digi-erp-connector
           go build -trimpath -ldflags "-s -w" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
 
-      - name: Bundle PDFtoPrinter
-        shell: bash
-        # PDFtoPrinter is freeware by Edward Mendelson (Columbia U.),
-        # licensed for redistribution. The maintained source / binaries
-        # are at https://github.com/emendelson/pdftoprinter . We bundle
-        # PDFtoPrinter because PDF readers (Adobe Reader, SumatraPDF)
-        # hang or silently fail when invoked from a Windows service
-        # (session 0 has no interactive desktop / window station);
-        # PDFtoPrinter is purpose-built for unattended printing and
-        # works correctly there. Modern PDFtoPrinter requires qpdf29.dll
-        # and resource.dat alongside the EXE.
-        run: |
-          set -euo pipefail
-          base="https://raw.githubusercontent.com/emendelson/pdftoprinter/main"
-          for f in PDFtoPrinter.exe qpdf29.dll resource.dat; do
-            curl -fsSL --retry 3 -o "dist/bin/$f" "$base/$f"
-          done
-          ls -la dist/bin/PDFtoPrinter.exe dist/bin/qpdf29.dll dist/bin/resource.dat
-
       - name: Build installer
         shell: powershell
         env:

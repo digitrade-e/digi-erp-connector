@@ -37,9 +37,6 @@ Responsibilities:
 - `internal/files`: folder registry, file listing, secure file open/stream
 - `internal/erp`: ERP-specific logic (SAP/Hasavshevet)
 - `internal/platform`: autostart helpers and OS paths
-- `internal/pdf`: HTML invoice template + headless-Chrome PDF generator
-- `internal/print`: SumatraPDF silent-print wrapper (Windows / stub)
-- `internal/email`: SMTP sender for invoice PDF attachments
 - `internal/secrets`: OS-level encrypted storage (Windows DPAPI / Unix keyring)
 
 ## Data flow
@@ -70,12 +67,7 @@ HTTP handler → OrderQueue (chan, capacity 64) → single worker goroutine
                                                  ├─ generateDOC / generatePRM (Windows-1255)
                                                  ├─ Write IMOVEIN.doc/.prm  (SendOrderDir)
                                                  ├─ Write history copy       (SendOrderDir/history/<N>/)
-                                                 ├─ exec has.exe             (Windows only)
-                                                 └─ PDFPostOrderHook.AfterOrder()
-                                                      ├─ Generate PDF (headless Chrome, file:// temp HTML)
-                                                      ├─ Save PDF → history/<N>/invoice_<N>.pdf
-                                                      ├─ [printAfterOrder] SumatraPDF silent print
-                                                      └─ [emailAfterOrder] SMTP email with attachment
+                                                 └─ exec has.exe             (Windows only)
 ```
 
 The single-worker model guarantees that `IMOVEIN.doc/.prm` are never written

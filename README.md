@@ -7,7 +7,7 @@ This repo is the successor to **erp-connector** (Go) merged with the data-access
 ## Binaries
 
 - `digi-erp-connectord` — daemon / Windows service running the REST API (default `127.0.0.1:8080`)
-- `digi-erp-connector` — Windows GUI (config, service control, PDF/email settings)
+- `digi-erp-connector` — Windows GUI (config, service control)
 
 ## Quick start (development)
 
@@ -34,4 +34,4 @@ See `PLAN.md` for the migration design and `CLAUDE.md` for hard constraints.
 
 ## Release
 
-Push to `main` → `auto-tag` workflow creates the next patch tag → `release-windows` builds both EXEs, bundles PDFtoPrinter, compiles the Inno Setup installer, and publishes a GitHub Release.
+Push to `main` → `auto-tag` workflow creates the next patch tag → `release-windows` builds both EXEs, compiles the Inno Setup installer, and publishes a GitHub Release.

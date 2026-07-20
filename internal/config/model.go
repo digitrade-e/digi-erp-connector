@@ -21,36 +21,6 @@ type DBConfig struct {
 	Database string   `yaml:"database"`
 }
 
-// PDFConfig holds print/email toggles + remote-template integration. Branding
-// (company name, address, logo, footer) lives entirely in the backend's
-// AppSettings now — the connector fetches pre-rendered HTML and runs only
-// the chromedp HTML→PDF + print/email steps.
-type PDFConfig struct {
-	PrintAfterOrder bool   `yaml:"printAfterOrder"`
-	PrinterName     string `yaml:"printerName"`    // empty = system default
-	EmailAfterOrder bool   `yaml:"emailAfterOrder"`
-
-	ChromePath     string `yaml:"chromePath"`     // auto-detected if empty
-	SumatraPDFPath string `yaml:"sumatraPdfPath"` // auto-detected if empty
-
-	// Remote template — the connector fetches a pre-rendered HTML document
-	// from the backend and converts it to PDF locally via chromedp.
-	RemoteTemplateBaseURL string            `yaml:"remoteTemplateBaseURL"`           // e.g. "https://api.example.com" — no path/api suffix
-	RemoteTokens          map[string]string `yaml:"remoteTokens,omitempty"`          // documentType → token (32-byte hex)
-	UseRemoteTemplate     bool              `yaml:"useRemoteTemplate"`               // master switch; defaults true now that local template is gone
-	RemoteTimeoutSeconds  int               `yaml:"remoteTimeoutSeconds,omitempty"` // 0 → use default (15s)
-}
-
-// SMTPConfig holds SMTP server settings for sending invoice emails.
-// Password is stored separately in secrets/ (never in YAML).
-type SMTPConfig struct {
-	Host        string `yaml:"host"`
-	Port        int    `yaml:"port"` // default: 587
-	User        string `yaml:"user"`
-	FromAddress string `yaml:"fromAddress"`
-	UseTLS      bool   `yaml:"useTLS"` // default: true
-}
-
 // QueriesConfig tunes execution of saved queries (the /api/sqlqueries runner).
 type QueriesConfig struct {
 	TimeoutSeconds int `yaml:"timeoutSeconds,omitempty"` // 0 → default (30s)
@@ -79,8 +49,6 @@ type Config struct {
 	// (e.g. -p"digi.bat") resolve correctly.
 	HasBatFile string        `yaml:"hasBatFile"`
 	DB         DBConfig      `yaml:"db"`
-	PDF        PDFConfig     `yaml:"pdf"`
-	SMTP       SMTPConfig    `yaml:"smtp"`
 	Queries    QueriesConfig `yaml:"queries"`
 }
 
@@ -127,16 +95,6 @@ func Default() Config {
 			Port:     1433,
 			Database: "",
 			User:     "",
-		},
-		PDF: PDFConfig{
-			PrintAfterOrder:      false,
-			EmailAfterOrder:      false,
-			UseRemoteTemplate:    true,
-			RemoteTimeoutSeconds: 15,
-		},
-		SMTP: SMTPConfig{
-			Port:   587,
-			UseTLS: true,
 		},
 		Queries: QueriesConfig{
 			TimeoutSeconds: 30,
