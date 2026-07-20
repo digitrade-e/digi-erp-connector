@@ -1,5 +1,9 @@
 # Agent Guidelines — digi-erp-connector
 
+> Project memory lives in `.claude/docs/` — origin story, decision log,
+> implementation history, operations runbook, and migration records. Read
+> `.claude/docs/README.md` first when picking up this project.
+
 ## What this is
 
 A Go application providing a local HTTP REST API gateway between the main app and ERP systems. It is the merge of two predecessor repos:
