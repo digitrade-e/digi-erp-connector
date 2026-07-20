@@ -1,0 +1,49 @@
+name: auto-tag
+
+on:
+  push:
+    branches:
+      - "main"
+
+permissions:
+  contents: write
+
+jobs:
+  bump-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create next patch tag
+        env:
+          START_TAG: v1.0.0
+        run: |
+          set -euo pipefail
+          if git describe --tags --exact-match >/dev/null 2>&1; then
+            echo "HEAD already tagged; skipping."
+            exit 0
+          fi
+          latest_tag=$(git tag -l "v*.*.*" --sort=-v:refname | head -n 1)
+          if [ -z "$latest_tag" ]; then
+            next_tag="$START_TAG"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<<"$version"
+            if [ -z "${major:-}" ] || [ -z "${minor:-}" ] || [ -z "${patch:-}" ]; then
+              echo "Latest tag is not semver: $latest_tag"
+              exit 1
+            fi
+            patch=$((patch+1))
+            next_tag="v${major}.${minor}.${patch}"
+          fi
+          git tag "$next_tag"
+          git push origin "$next_tag"
+          echo "Created tag $next_tag"

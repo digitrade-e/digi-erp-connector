@@ -1,0 +1,87 @@
+name: release-windows
+
+on:
+  workflow_run:
+    workflows:
+      - "auto-tag"
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          tag=$(git tag --points-at HEAD | head -n 1)
+          if [ -z "$tag" ]; then
+            echo "No tag found on HEAD."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build Windows executables
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin
+          go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/bin/digi-erp-connector.exe" ./cmd/digi-erp-connector
+          go build -trimpath -ldflags "-s -w" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
+
+      - name: Bundle PDFtoPrinter
+        shell: bash
+        # PDFtoPrinter is freeware by Edward Mendelson (Columbia U.),
+        # licensed for redistribution. The maintained source / binaries
+        # are at https://github.com/emendelson/pdftoprinter . We bundle
+        # PDFtoPrinter because PDF readers (Adobe Reader, SumatraPDF)
+        # hang or silently fail when invoked from a Windows service
+        # (session 0 has no interactive desktop / window station);
+        # PDFtoPrinter is purpose-built for unattended printing and
+        # works correctly there. Modern PDFtoPrinter requires qpdf29.dll
+        # and resource.dat alongside the EXE.
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/emendelson/pdftoprinter/main"
+          for f in PDFtoPrinter.exe qpdf29.dll resource.dat; do
+            curl -fsSL --retry 3 -o "dist/bin/$f" "$base/$f"
+          done
+          ls -la dist/bin/PDFtoPrinter.exe dist/bin/qpdf29.dll dist/bin/resource.dat
+
+      - name: Build installer
+        shell: powershell
+        env:
+          VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          $appVersion = $env:VERSION.TrimStart("v")
+          iscc /DAppVersion=$appVersion /DBuildDir="$PWD\\dist\\bin" /DOutputDir="$PWD\\dist" assets\\installer\\digi-erp-connector.iss
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: dist/digi-erp-connector-setup-*.exe
+          generate_release_notes: true

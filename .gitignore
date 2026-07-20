@@ -1,0 +1,72 @@
+# =========================
+# Go build artifacts
+# =========================
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.a
+*.o
+
+# If you build to a bin/ directory
+/bin/
+/dist/
+/build/
+
+# =========================
+# Go workspace / caches
+# =========================
+# If you use Go workspaces
+go.work
+go.work.sum
+
+# Go build cache (usually outside repo, but keep in case)
+.gocache/
+
+# =========================
+# Dependencies / vendor
+# =========================
+# Keep vendor/ ONLY if you don't want to commit vendored deps.
+# If you use "go mod vendor" and want it committed, REMOVE this line.
+vendor/
+
+# =========================
+# Logs and runtime files
+# =========================
+*.log
+*.pid
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+*.local
+
+# Common secret/cert/key patterns (adjust to your repo)
+*.key
+*.pem
+*.p12
+*.crt
+
+# =========================
+# OS / editor / IDE
+# =========================
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =========================
+# Test coverage
+# =========================
+coverage.*
+*.coverprofile
