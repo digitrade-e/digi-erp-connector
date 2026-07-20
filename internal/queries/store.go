@@ -25,6 +25,37 @@ type Definition struct {
 	Params      map[string]any `json:"params"`
 }
 
+// UnmarshalJSON tolerates the legacy electron-mssql-app quirk where "no
+// default params" was stored as [] (JS typeof [] === 'object' let arrays
+// through validation). Arrays and null both become an empty map.
+func (d *Definition) UnmarshalJSON(b []byte) error {
+	type plain struct {
+		Description string          `json:"description"`
+		SQL         string          `json:"sql"`
+		Params      json.RawMessage `json:"params"`
+	}
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	d.Description = p.Description
+	d.SQL = p.SQL
+	d.Params = map[string]any{}
+
+	raw := strings.TrimSpace(string(p.Params))
+	if raw == "" || raw == "null" || strings.HasPrefix(raw, "[") {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(p.Params, &m); err != nil {
+		return err
+	}
+	if m != nil {
+		d.Params = m
+	}
+	return nil
+}
+
 // Named pairs a query name with its definition for list responses.
 type Named struct {
 	Name string `json:"name"`

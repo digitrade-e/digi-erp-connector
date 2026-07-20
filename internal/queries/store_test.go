@@ -113,6 +113,11 @@ func TestStoreReadsElectronFormat(t *testing.T) {
     "description": "stock lookup",
     "sql": "SELECT * FROM dbo.Stock WHERE ItemCode IN (SELECT value FROM STRING_SPLIT(@skuArray, ','))",
     "params": { "skuArray": "", "warehouse": "10" }
+  },
+  "no_params_array": {
+    "description": "electron stored empty defaults as an array",
+    "sql": "SELECT 1",
+    "params": []
   }
 }`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
@@ -143,7 +148,10 @@ func TestStoreReadsElectronFormat(t *testing.T) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("round-trip parse: %v", err)
 	}
-	if len(raw) != 2 || raw["stock_by_sku"].Description != "stock lookup" {
+	if len(raw) != 3 || raw["stock_by_sku"].Description != "stock lookup" {
 		t.Fatalf("round-trip mismatch: %+v", raw)
+	}
+	if arr, ok := s.Get("no_params_array"); !ok || arr.Params == nil || len(arr.Params) != 0 {
+		t.Fatalf("array params should normalize to empty map: %+v", arr)
 	}
 }
