@@ -1,0 +1,56 @@
+name: ci
+
+# Runs on every push and pull request, including branches. Until this existed,
+# nothing ran the test suite: release-windows built and published without ever
+# invoking `go test`, so a broken test could ship.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Windows, not Linux, for two reasons:
+    #  - the walk GUI package is //go:build windows, so `go build ./...` has no
+    #    main function for cmd/digi-erp-connector anywhere else and fails
+    #  - the config and secrets tests exercise the PROGRAMDATA data-dir layout
+    #    and DPAPI, and skip themselves on other platforms
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # .gitattributes pins .go files to LF, so a CRLF checkout can no longer
+      # make every file look unformatted.
+      - name: Check formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-clean:"
+            echo "$unformatted"
+            echo "Run: gofmt -w ./cmd ./internal"
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # -count=1 so a warm build cache can never mask a failure.
+      - name: Test
+        run: go test -count=1 ./...

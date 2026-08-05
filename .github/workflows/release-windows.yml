@@ -39,6 +39,19 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Gate: never publish a release built from code that does not vet or pass
+      # its tests. This job already runs on windows-latest, which is where the
+      # GUI package and the DPAPI/PROGRAMDATA tests can actually run.
+      #
+      # Note the tag is created by auto-tag before this job starts, so a failure
+      # here leaves a tag with no release attached. That is intentional — better
+      # a dangling tag than a published installer nobody tested.
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
