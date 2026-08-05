@@ -199,36 +199,36 @@ const prmTotalRecordLength = 2891
 
 // stockHeader holds per-document header fields repeated on every DOC record.
 type stockHeader struct {
-	AccountKey  string
-	MyID        int64
-	DocumentID  int
-	AccountName string
-	Address     string
-	City        string
-	Asmahta2    string
-	ShortDate   string
-	Agent       string
-	WareHouse   int
+	AccountKey   string
+	MyID         int64
+	DocumentID   int
+	AccountName  string
+	Address      string
+	City         string
+	Asmahta2     string
+	ShortDate    string
+	Agent        string
+	WareHouse    int
 	DiscountPrcR string
-	VatPrc      string
-	Copies      string
-	Currency    string
-	Rate        string
-	Phone       string
-	Remarks     string
-	HProtect    string
-	ExtraText1  string
-	ExtraText2  string
-	ExtraText3  string
-	ExtraText4  string
-	ExtraText5  string
-	ExtraSum1   string
-	ExtraSum2   string
-	ExtraSum3   string
-	ExtraDate1  string
-	ExtraDate2  string
-	ExtraNum1   string
-	ExtraNum2   string
+	VatPrc       string
+	Copies       string
+	Currency     string
+	Rate         string
+	Phone        string
+	Remarks      string
+	HProtect     string
+	ExtraText1   string
+	ExtraText2   string
+	ExtraText3   string
+	ExtraText4   string
+	ExtraText5   string
+	ExtraSum1    string
+	ExtraSum2    string
+	ExtraSum3    string
+	ExtraDate1   string
+	ExtraDate2   string
+	ExtraNum1    string
+	ExtraNum2    string
 }
 
 // stockMove holds per-line item fields for one DOC record.

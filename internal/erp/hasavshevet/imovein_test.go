@@ -48,7 +48,7 @@ func TestPadW1255_Length(t *testing.T) {
 		width int
 	}{
 		{"hello", 10},
-		{"שלום עולם", 20},  // Hebrew characters
+		{"שלום עולם", 20}, // Hebrew characters
 		{"", 5},
 		{"very long string that exceeds the width", 10},
 	}
@@ -133,14 +133,14 @@ func TestBuildDOCRecord_Line33Packs(t *testing.T) {
 // TestGenerateDOC_RowCount verifies generateDOC produces one row per move.
 func TestGenerateDOC_RowCount(t *testing.T) {
 	hdr := stockHeader{
-		MyID:        1,
-		DocumentID:  30,
-		WareHouse:   1,
-		ShortDate:   "01/01/2026",
-		VatPrc:      "18.00",
+		MyID:         1,
+		DocumentID:   30,
+		WareHouse:    1,
+		ShortDate:    "01/01/2026",
+		VatPrc:       "18.00",
 		DiscountPrcR: "0.00",
-		Copies:      "1",
-		Rate:        "1.0000",
+		Copies:       "1",
+		Rate:         "1.0000",
 	}
 	moves := []stockMove{
 		{ItemKey: "A", Quantity: "1.00", Price: "10.00", DiscountPrc: "0.00", Unit: "יח'"},

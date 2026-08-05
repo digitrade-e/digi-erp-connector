@@ -24,14 +24,14 @@ import (
 const windowsServiceName = "digi-erp-connectord"
 
 type serverApp struct {
-	cfg          config.Config
-	logSvc       logger.LoggerService
-	dbConn       *sql.DB
-	srv          *http.Server
-	errCh        chan error
-	dbPassStr    string
-	orderQueue   *hasavshevet.OrderQueue
-	queueCancel  context.CancelFunc
+	cfg         config.Config
+	logSvc      logger.LoggerService
+	dbConn      *sql.DB
+	srv         *http.Server
+	errCh       chan error
+	dbPassStr   string
+	orderQueue  *hasavshevet.OrderQueue
+	queueCancel context.CancelFunc
 }
 
 func (a *serverApp) Start() error {
@@ -155,4 +155,3 @@ func (a *serverApp) Errors() <-chan error {
 func (a *serverApp) Logger() autostart.Logger {
 	return a.logSvc
 }
-
