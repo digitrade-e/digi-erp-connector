@@ -125,13 +125,23 @@ with auto-rollback.
 Only `[UninstallRun]` stops and deletes the service, so a full uninstall does
 lose the hardening.
 
-### Orphaned files in the install directory
+### Orphaned print binaries: removed 2026-08-05
 
-`PDFtoPrinter.exe`, `qpdf29.dll` and `resource.dat` (dated 2026-07-20, ~18 MB)
-are left over from the 1.0.2 installer, which shipped them for the PDF/print
-subsystem deleted that same day. Nothing references them and the current
-installer does not ship them, so they are dead weight and are not tracked by the
-regenerated uninstaller either. Safe to delete.
+`PDFtoPrinter.exe`, `qpdf29.dll` and `resource.dat` were left in the install
+directory by the 1.0.2 installer, which shipped them for the PDF/print subsystem
+deleted that same day. Nothing referenced them (no Go code, no entry in the 1.0.4
+installer's [Files], no config key) and the regenerated uninstaller no longer
+tracked them, so they would have survived an uninstall.
+
+Removed 2026-08-05 17:57, 17.5 MB freed. Copies kept in
+`orphaned-print-binaries-2026-08-05` rather than deleted outright: if printing
+ever returns, erp-connector's `docs/printing.md` documents hard-won constraints
+about these exact binaries (PDFtoPrinter first, WSD ports unusable from session 0,
+Sumatra exit codes not trustworthy). Script:
+`cutover-backup-2026-08-05emove-orphaned-print-binaries.ps1`.
+
+The install directory now holds only what the installer ships: the two exes,
+icon.ico, launch-admin.vbs and the uninstaller.
 
 ### Cutover artefacts and rollback
 
