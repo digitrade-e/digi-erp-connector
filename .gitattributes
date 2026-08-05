@@ -1,0 +1,26 @@
+# Go tooling assumes LF. Without this, core.autocrlf checks the tree out with
+# CRLF on Windows and `gofmt -l` reports every file as unformatted, which hides
+# real formatting problems. Git already stores LF, so this only affects checkout.
+* text=auto eol=lf
+
+*.go    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+
+# Windows-only artefacts. Batch and VBScript files are executed by Windows
+# tooling that expects CRLF; the Inno Setup script is edited by the Windows IDE.
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.vbs      text eol=crlf
+*.ps1      text eol=crlf
+*.iss      text eol=crlf
+*.manifest text eol=crlf
+
+# Never touch these.
+*.ico  binary
+*.syso binary
+*.exe  binary

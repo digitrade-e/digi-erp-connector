@@ -9,32 +9,36 @@ import (
 
 const AppName = "digi-erp-connector"
 
-func ConfigFilePath() (string, error) {
-	switch runtime.GOOS {
-	case "windows":
-		programData := os.Getenv("PROGRAMDATA")
-		if programData == "" {
-			programData = `C:\ProgramData`
-		}
-		return filepath.Join(programData, AppName, "config.yaml"), nil
-	case "linux":
-		return filepath.Join("/etc", AppName, "config.yaml"), nil
-	default:
-		return "", errors.New("unsupported OS for machine-wide config")
-	}
-}
+// defaultProgramData is used only if the environment does not define
+// PROGRAMDATA, which should not happen on a healthy Windows install.
+const defaultProgramData = `C:\ProgramData`
 
-// DataDir returns the application data directory where config, logs, and
-// generated files (e.g. test PDFs) are stored.
+// ErrUnsupportedOS is returned for platforms with no machine-wide config
+// location. The daemon supports Windows and Linux; macOS is not a target.
+var ErrUnsupportedOS = errors.New("unsupported OS for machine-wide config")
+
+// DataDir returns the machine-wide data directory holding config.yaml,
+// queries.json, the logs and the secrets subdirectory.
+//
+// Windows: %PROGRAMDATA%\digi-erp-connector (read from the environment, so
+// tests can redirect it). Linux: /etc/digi-erp-connector.
 func DataDir() string {
-	switch runtime.GOOS {
-	case "windows":
+	if runtime.GOOS == "windows" {
 		programData := os.Getenv("PROGRAMDATA")
 		if programData == "" {
-			programData = `C:\ProgramData`
+			programData = defaultProgramData
 		}
 		return filepath.Join(programData, AppName)
+	}
+	return filepath.Join("/etc", AppName)
+}
+
+// ConfigFilePath returns the path of config.yaml inside DataDir.
+func ConfigFilePath() (string, error) {
+	switch runtime.GOOS {
+	case "windows", "linux":
+		return filepath.Join(DataDir(), "config.yaml"), nil
 	default:
-		return filepath.Join("/etc", AppName)
+		return "", ErrUnsupportedOS
 	}
 }
