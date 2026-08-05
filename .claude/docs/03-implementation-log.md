@@ -136,3 +136,37 @@ produced a completely bogus first test run (every endpoint 401). Pass bodies wit
 - Parser initially rejected it: electron stored `"params": []` for
   "no defaults". Fixed via tolerant UnmarshalJSON; validated all 25 queries
   parse; committed + pushed (auto-released v1.0.1).
+
+## 13. DRY/KISS refactor (2026-08-05, branch refactor/dry-kiss)
+
+Requested straight after the cutover. The directory layout was already close to
+idiomatic Go, so nothing was reshuffled for its own sake; the work went into
+duplication, naming, missing tests and the bugs those turned up.
+
+1. **Baseline commit first** — the exact bits running in production, so the
+   refactor had a rollback point (plus a filesystem snapshot in scratch).
+2. **atomicfile** — `config.Save`, `secrets.Set` and `Store.persistLocked` each
+   had their own temp+sync+rename. Consolidated with tests. Found: `secrets.Set`
+   returned the nil encrypt error on a failed rename (silent failure), and all
+   three removed the target before renaming (window with no file at all).
+3. **Handlers** — seven copies of the same 12-line decode ritual and five
+   identical 1 MiB constants became `decodeJSONBody` + `maxRequestBody`.
+   `internal/api/utils` → `internal/api/respond` (`respond.JSON`/`respond.Error`,
+   69 call sites). `/api/test-connection` stopped comparing `err.Error()` to the
+   string `"EOF"`.
+4. **Tests** — config, db and secrets had none. Data dir resolves through
+   PROGRAMDATA, so `t.Setenv` redirects it and tests can never touch a live
+   install. Notable: the DSN encrypt/trust options added at cutover were
+   completely untested until now.
+5. **Line endings** — git stored LF while `core.autocrlf` checked out CRLF, so
+   `gofmt -l` flagged all 52 files and hid real problems. `.gitattributes` pins
+   LF; with the noise gone exactly 4 files were genuinely misformatted.
+6. **GUI split** — 683-line `main.go` → five files by responsibility. Found two
+   dead-code bugs: `main()` re-checked an already-returned error instead of the
+   config-load error (so a corrupt config.yaml was never shown in the window),
+   and `onStartServer` branched on `runtime.GOOS` inside a `//go:build windows`
+   file. Verified the window reaches its run loop with the data dir sandboxed.
+
+**Not deployed.** Production still runs the binary built at cutover; everything
+here is source-only. Deploying needs the usual build → verify → replace →
+restart (~4s downtime), and the compat layer must be re-verified afterwards.

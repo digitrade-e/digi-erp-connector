@@ -23,7 +23,14 @@ Two binaries:
 ```
 cmd/
   digi-erp-connector/   ← Windows GUI (walk library)
+    main.go             ← entry point only
+    form.go             ← widget declaration + per-widget helpers
+    form_config.go      ← form ↔ config.Config mapping, persistence
+    actions.go          ← configuration button handlers
+    service_control.go  ← service start/stop/restart, daemon discovery
   digi-erp-connectord/  ← Background daemon/service
+  cutover-seed/         ← operator tool: seed config/secret/queries for a
+                          replacement install (not part of the service)
 
 internal/
   api/
@@ -41,7 +48,7 @@ internal/
       auth.go           ← Bearer token validation (constant-time compare)
       ratelimit.go      ← Per-IP token bucket (429 RATE_LIMITED)
       logging.go        ← Request/response logging (no secrets)
-    utils/responses.go  ← WriteJSON / WriteError helpers
+    respond/            ← JSON / Error — the one error envelope (was "utils")
     dto/                ← Request/response structs per endpoint
   queries/              ← Saved-query subsystem (THE data-access model)
     store.go            ← JSON registry (queries.json, atomic writes, mutex)
@@ -53,7 +60,11 @@ internal/
   erp/sap/              ← SAP B1 price/stock query
   files/                ← Path traversal prevention
   logger/               ← LoggerService interface
-  platform/             ← autostart (Windows service), paths
+  legacyauth/           ← HS256 JWT for the electron compat exchange
+  platform/
+    autostart/          ← Windows service registration/control
+    paths/              ← data dir + config path (PROGRAMDATA-based)
+    atomicfile/         ← THE way to write a file: temp + sync + rename
   secrets/              ← Windows DPAPI (machine scope)
 ```
 
@@ -143,6 +154,25 @@ production backend. Covered by `queries/normalize_test.go`:
   `api/status/rowCount/rows/recordsets` **and** legacy `value`/`rowsAffected`
 - `queries.maxRows` is a real functional limit, not just a safety valve — the b4l
   box needs 100000 because a production query returns 16183 rows
+
+## House rules (introduced by the 2026-08-05 refactor)
+
+- **Never hand-roll a file write.** `internal/platform/atomicfile.Write` is the
+  only way config.yaml, queries.json and secrets are written. Three separate
+  temp+rename implementations had drifted apart, and one of them reported
+  success when the rename failed.
+- **Decode request bodies with `decodeJSONBody`** (handlers/json.go): it applies
+  the shared 1 MiB limit, rejects trailing data and keeps numbers exact. Do not
+  reintroduce per-handler decoders or per-handler size constants.
+- **`respond.JSON` / `respond.Error` only** — no direct `json.NewEncoder(w)` in
+  handlers. Legacy compat routes are the documented exception and use
+  `writeLegacyError`.
+- **`readFormConfig` must start from `f.cfg`**, never a zero `config.Config`.
+  Settings with no widget (legacyCompat, queries limits, db.encrypt) would
+  otherwise be wiped by a GUI save — which on the production box means silently
+  switching off the compatibility layer the live backend depends on.
+- **Keep the tree gofmt-clean.** `.gitattributes` pins `.go` to LF; if
+  `gofmt -l ./cmd ./internal` prints anything, fix it rather than adding to it.
 
 ## Prohibited (zero exceptions)
 
