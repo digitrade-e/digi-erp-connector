@@ -88,6 +88,20 @@ the electron-mssql-app connector here on 2026-08-05 16:35.
   autostart entry was removed. It is the rollback path — do not uninstall it
   until the connector has run clean for a while.
 
+### What is deployed
+
+`C:\Program Files\digi-erp-connector\*.exe` are built from branch
+`refactor/dry-kiss` commit **3567157** (deployed 2026-08-05 17:37), NOT from a
+tagged release — the registry still reports the 1.0.2 installer. Consequence:
+**running any installer, including the 1.0.2 one in Downloads, replaces
+production with a build that has no legacy compatibility layer and the backend
+breaks immediately.** Merge to `main` first so CI produces a release that
+contains it, then install that.
+
+To roll back to the previous (cutover) binaries: stop the service, copy
+`deploy-backup-2026-08-05-refactor\*.previous` over the installed exes, start the
+service. `deploy-refactor.ps1` does this automatically if a deploy probe fails.
+
 ### Cutover artefacts and rollback
 
 `C:\ProgramData\digi-erp-connector\cutover-backup-2026-08-05\` contains:

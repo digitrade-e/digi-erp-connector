@@ -167,6 +167,16 @@ duplication, naming, missing tests and the bugs those turned up.
    and `onStartServer` branched on `runtime.GOOS` inside a `//go:build windows`
    file. Verified the window reaches its run loop with the data dir sandboxed.
 
-**Not deployed.** Production still runs the binary built at cutover; everything
-here is source-only. Deploying needs the usual build → verify → replace →
-restart (~4s downtime), and the compat layer must be re-verified afterwards.
+**Deployed 2026-08-05 17:37** (commit 3567157), ~6s downtime, verified by
+before/after response capture rather than by spot checks:
+
+- captured all 25 saved-query responses plus 13 endpoint probes from the running
+  production *before* the deploy, normalised (rows as sorted `key:type=value`)
+- deployed with auto-rollback to the previous binaries on any failed probe
+- captured again and diffed: **37 of 38 byte-identical**. The only difference was
+  `/api/ping`'s `ts`, 85 seconds apart — the gap between the two captures.
+
+That is the right test for a refactor: it proves nothing observable changed,
+which spot-checking endpoints cannot. Scripts: `scratchpad/capture.ps1`,
+`cutover-backup-2026-08-05/deploy-refactor.ps1`; the replaced binaries are kept
+as `deploy-backup-2026-08-05-refactor/*.previous`.
