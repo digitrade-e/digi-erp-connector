@@ -1,82 +1,184 @@
 # Architecture
 
-## Components
+How the connector is put together and why. For the request/response contract see
+[api.md](api.md); for the data-access model see [saved-queries.md](saved-queries.md).
 
-### 1) GUI: `cmd/digi-erp-connector` (walk — native Win32)
-Responsibilities:
-- Let the user select ERP type (SAP or Hasavshevet).
-- Configure DB connection parameters + “Test connection”.
-- Configure REST API port and bearer token.
-- Configure N image folders (dynamic list with folder browser).
-- Hasavshevet only: configure sendOrder output folder and digi.bat path.
-- Hasavshevet only: initialize required DB procedures (`GPRICE_Bulk`, `GetOnHandStockForSkus`) on save if missing.
-- Write config to disk.
-- Start / stop the `digi-erp-connectord` Windows Service.
+## Where it sits
 
-The GUI is built with **walk** (`github.com/lxn/walk`) which uses Win32 GDI native controls.
-No OpenGL or GPU is required; works on any Windows display including Hyper-V and RDP sessions.
-
-Also supports a full **headless / CLI mode** (`--headless`) for environments without any display.
-
-### 2) Daemon: `cmd/digi-erp-connectord`
-Responsibilities:
-- Load config from disk.
-- Start HTTP server on configured port.
-- Enforce auth (Bearer token).
-- Route requests to handlers:
-  - SQL read-only executor
-  - folders/files
-  - ERP handlers
-  - sendOrder (Hasavshevet only)
-
-### 3) Internal packages
-- `internal/config`: config model, validation, persistence
-- `internal/api`: HTTP server + routing + middleware + handlers + DTO
-- `internal/auth`: token validation
-- `internal/db`: DB connections, query execution, SQL validation
-- `internal/files`: folder registry, file listing, secure file open/stream
-- `internal/erp`: ERP-specific logic (SAP/Hasavshevet)
-- `internal/platform`: autostart helpers and OS paths
-- `internal/secrets`: OS-level encrypted storage (Windows DPAPI / Unix keyring)
-
-## Data flow
-
-1. User configures settings in UI → config persisted.
-2. Daemon starts (boot/service) → loads config → starts REST server.
-3. Main app calls REST endpoints with Bearer token.
-4. Daemon validates token:
-   - Reject unauthorized requests.
-5. Daemon executes logic:
-   - SQL: validate SELECT-only → bind params → query → return rows
-   - Files: validate folder allow-list → list/stream
-   - ERP handlers: run ERP-specific DB queries and mapping
-   - sendOrder: validate → enqueue → return 202; worker writes IMOVEIN files + executes has.exe
-
-## sendOrder queue model
-
-`POST /api/sendOrder` enqueues the job and returns immediately.
-A single background goroutine (`OrderQueue`) processes jobs serially:
+The connector runs **on the customer's machine**, next to their ERP database. The
+Digitrade backend never talks to that database directly — it talks HTTP to the
+connector, which owns the SQL and the ERP-specific file formats.
 
 ```
-HTTP handler → OrderQueue (chan, capacity 64) → single worker goroutine
-                                                      │
-                                               Sender.ProcessOrder
-                                                 ├─ OrderNumberStore (mutex + JSON)
-                                                 ├─ DB: Accounts query
-                                                 ├─ DB: Rates query
-                                                 ├─ generateDOC / generatePRM (Windows-1255)
-                                                 ├─ Write IMOVEIN.doc/.prm  (SendOrderDir)
-                                                 ├─ Write history copy       (SendOrderDir/history/<N>/)
-                                                 └─ exec has.exe             (Windows only)
+   Digitrade backend                    customer machine
+   (remote)                             ┌─────────────────────────────────────────┐
+        │                               │                                         │
+        │  HTTPS/HTTP + Bearer token    │  digi-erp-connectord (Windows service)   │
+        └──────────────────────────────►│    ├─ saved-query runner ───────────┐    │
+                                        │    ├─ image folder access           │    │
+                                        │    ├─ price & stock                 ▼    │
+                                        │    └─ order intake ──────────┐   MSSQL   │
+                                        │                              │  (ERP DB) │
+                                        │  digi-erp-connector (GUI)    │           │
+                                        │    edits config, controls    ▼           │
+                                        │    the service          IMOVEIN files    │
+                                        │                         + has.exe        │
+                                        └─────────────────────────────────────────┘
 ```
 
-The single-worker model guarantees that `IMOVEIN.doc/.prm` are never written
-or imported concurrently, preventing file collisions without explicit locking
-on the file path.
+The backend holds no SQL and no ERP file-format knowledge. That is the point: a
+customer's schema quirks stay on the customer's machine.
 
-## Key constraints
+## Two binaries, one config
 
-- Daemon must run without UI.
-- SQL endpoint must be SELECT-only.
-- File access must be restricted to configured folders only.
-- Prefer localhost binding unless explicitly configured otherwise.
+| Binary | Runs as | Does |
+|---|---|---|
+| `digi-erp-connectord` | Windows service (LocalSystem), or a plain process on Linux | The REST API. No UI, no console. |
+| `digi-erp-connector` | Interactive desktop app, elevated | Edits config, tests the DB, installs the Hasavshevet stored procedures, starts/stops the service. Serves no traffic. |
+
+They share `config.yaml` and the data directory but never talk to each other; the
+GUI's "Restart server" goes through the Windows service manager. The split exists
+because the API must survive logout and reboot, while configuration needs a
+desktop session.
+
+## Request lifecycle
+
+Every route is wrapped in the same chain, outermost first
+(`internal/api/server.go`):
+
+```
+request
+  └─ Logging      method, path, status, duration — never the token or DB password
+      └─ RateLimit  per-IP token bucket, 25 rps / burst 50 → 429 RATE_LIMITED
+          └─ Auth     static bearer token, constant-time compare → 401 UNAUTHORIZED
+              └─ handler
+```
+
+Rate limiting sits **before** auth deliberately: an unauthenticated flood is
+exactly what you want to shed cheaply, and it means brute-forcing the token is
+also rate-limited. `POST /auth/token` (legacy compatibility only) is logged and
+rate-limited but not authenticated — it *is* the credential exchange.
+
+Server timeouts are set on `http.Server`: 5s read-header, 10s read, 60s write,
+60s idle. The write timeout is 60s because a saved query may legitimately run for
+`queries.timeoutSeconds` (default 30s).
+
+## Packages
+
+```
+cmd/
+  digi-erp-connectord/   daemon: lifecycle, service integration
+  digi-erp-connector/    GUI: form.go, form_config.go, actions.go, service_control.go
+  cutover-seed/          operator tool: seed config/secret/queries for a new install
+
+internal/
+  api/                   HTTP server, route table, middleware chain
+    handlers/            one file per endpoint group; json.go holds the shared decoder
+    middleware/          auth (+ optional legacy JWT), rate limit, logging
+    respond/             the single JSON error envelope
+    dto/                 request/response structs, incl. the legacy shapes
+  queries/               THE data-access model: store, binder, runner, read-only validator
+  erp/
+    hasavshevet/         order pipeline (IMOVEIN, queue, order numbers), price/stock procs
+    sap/                 SAP B1 price/stock (one large CTE)
+    types.go             the ERP-neutral price/stock request and result
+  config/                config model + atomic YAML load/save
+  db/                    MSSQL DSN construction, pool, ping
+  files/                 allow-list + traversal defence for image folders
+  secrets/               DB password at rest (Windows DPAPI machine scope)
+  legacyauth/            HS256 JWT for the electron compatibility exchange
+  logger/                file-first logger used by the daemon and GUI
+  platform/
+    autostart/           Windows service registration and control
+    paths/               data dir and config path resolution
+    atomicfile/          the only way this app writes a file
+```
+
+Two rules keep this map honest: business logic never lives in `cmd/`, and every
+file write goes through `platform/atomicfile`.
+
+## The four subsystems
+
+**1. Saved queries** (`internal/queries`) — the only SQL entry point. SQL text is
+stored on the connector by name and executed with bound parameters. Full detail in
+[saved-queries.md](saved-queries.md).
+
+**2. Image folders** (`internal/files`) — serves files from an operator-configured
+allow-list. Each request is canonicalised, checked against the list, re-checked
+after symlink resolution, and rejected on any traversal. See
+[security.md](security.md).
+
+**3. Order intake** (`internal/erp/hasavshevet`) — asynchronous, single-worker.
+Detail in [hasavshevet-send-order.md](hasavshevet-send-order.md):
+
+```
+POST /api/sendOrder
+  └─ validate → OrderNumberStore.Next() reserves the number (mutex + JSON file)
+      └─ enqueue (buffered channel, capacity 64) → 202 Accepted + jobId
+          └─ single worker goroutine, strictly serial:
+               ├─ DB: account details + currency rate
+               ├─ build IMOVEIN.doc/.prm (fixed-width 2891-byte records, Windows-1255)
+               ├─ write to sendOrderDir + a history copy under history/<orderNumber>/
+               └─ run digi.bat (or has.exe) to import
+GET /api/sendOrder/{jobId} polls the outcome.
+```
+
+The worker **must stay single-threaded**: `IMOVEIN.doc`/`.prm` are fixed filenames
+in one directory, so two concurrent orders would corrupt each other's import. The
+queue is the lock.
+
+**4. Price & stock** (`internal/erp/*`) — one endpoint, dispatched on the
+configured ERP. See [price-and-stock.md](price-and-stock.md).
+
+## State on disk
+
+Everything lives in one directory — `%PROGRAMDATA%\digi-erp-connector\` on
+Windows, `/etc/digi-erp-connector/` on Linux:
+
+| File | Written by | Notes |
+|---|---|---|
+| `config.yaml` | GUI, cutover-seed | 0600; holds the bearer token in plaintext |
+| `queries.json` | the CRUD endpoints | drop-in compatible with electron-mssql-app |
+| `secrets/db_password_<erp>.bin` | GUI, cutover-seed | DPAPI machine scope |
+| `server.log`, `ui.log` | daemon, GUI | no secrets, ever |
+
+`lastOrderNumber.json` is the exception: it lives in `sendOrderDir`, beside the
+IMOVEIN files, so an order-number sequence travels with the files it numbers.
+
+All four are rewritten while the service is live, so all four go through
+`atomicfile.Write` (temp file → fsync → rename). A half-written `config.yaml`
+would stop the daemon from starting at all.
+
+## Concurrency
+
+- **Order queue** — one worker, by design (above).
+- **Query store** — `sync.RWMutex`; reads are concurrent, mutations serialise and
+  persist while holding the lock.
+- **Order numbers** — mutex plus a JSON file; reserved in the HTTP handler, not
+  the worker, so a caller gets its number in the 202 response.
+- **Rate limiter** — per-IP buckets, capped at 4096 entries with idle eviction
+  after 10 minutes, so a scan of spoofed source IPs cannot grow it without bound.
+- **DB pool** — 10 open / 10 idle, 30-minute connection lifetime.
+
+## Failure behaviour
+
+- **No database at startup → the daemon exits.** `db.Open` failure aborts
+  `Start()`. This is why the service needs a dependency on the SQL Server service
+  plus restart-on-failure (see [operations.md](operations.md)); otherwise a
+  reboot where SQL Server is ready late leaves the API dead.
+- **Database lost while running** → the affected request fails closed:
+  `ErrNoDatabase` → `503 DB_UNAVAILABLE`. It never panics on a nil handle.
+- **Driver errors are never returned to callers** — they are logged, and the
+  caller gets a generic code. A DB error message can name schemas, users and
+  hosts.
+- **Order hook errors never fail an order.** `PostOrderHook` exists in the queue
+  design with no implementations registered.
+
+## Deliberately absent
+
+| Not here | Why |
+|---|---|
+| A raw-SQL endpoint (by default) | Replaced by saved queries. The config-gated `POST /api/query` exists only for electron compatibility — see [legacy-compat.md](legacy-compat.md). |
+| PDF generation, printing, SMTP email | Removed 2026-07-20. Recoverable from git history; read the old repo's `docs/printing.md` first — the print path had session-0 and WSD-port constraints that are not obvious. |
+| Priority ERP | Selectable in the GUI, not implemented. |
+| A `--headless` GUI mode | Never existed, despite an earlier version of this document claiming otherwise. Configure headless installs with `cmd/cutover-seed` or by editing `config.yaml`. |

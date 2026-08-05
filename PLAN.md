@@ -1,5 +1,13 @@
 # digi-erp-connector — Research Summary & Migration Plan
 
+> **Historical.** This is the plan written before the code existed (2026-07-20),
+> kept for provenance. Several things were decided differently during
+> implementation — notably PDF/print/email were removed entirely, and a legacy
+> compatibility layer was added for the production cutover. Where this document
+> disagrees with [docs/](docs/README.md) or [.claude/docs/02-decisions.md](.claude/docs/02-decisions.md),
+> those are right and this is not.
+
+
 Goal: create **digi-erp-connector** (Go) as the merge of two existing repos:
 
 - **erp-connector** (Go, new-gen) → provides the architecture, service model, and all ERP features. This is the codebase we replicate.
