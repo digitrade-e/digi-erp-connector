@@ -83,10 +83,11 @@ the electron-mssql-app connector here on 2026-08-05 16:35.
   the daemon **aborts if the DB is unreachable at startup** (app.go), unlike the
   electron app which started anyway, so without the dependency + recovery a
   reboot where SQL Server is ready late would leave the API dead.
-- The electron app is still **installed** (per-user, at
-  `%LOCALAPPDATA%\Programs\electron-mssql-app`) but stopped, and its HKCU Run
-  autostart entry was removed. It is the rollback path — do not uninstall it
-  until the connector has run clean for a while.
+- The electron app was **uninstalled** on 2026-08-05 after the connector ran
+  clean, and no installer for it exists on this box. It is therefore no longer a
+  rollback path; its config and all 25 saved queries are preserved under
+  `cutover-backup-2026-08-05\`. Rolling back to it would mean sourcing the old
+  installer from whoever built it.
 
 ### What is deployed
 
@@ -138,7 +139,7 @@ Removed 2026-08-05 17:57, 17.5 MB freed. Copies kept in
 ever returns, erp-connector's `docs/printing.md` documents hard-won constraints
 about these exact binaries (PDFtoPrinter first, WSD ports unusable from session 0,
 Sumatra exit codes not trustworthy). Script:
-`cutover-backup-2026-08-05emove-orphaned-print-binaries.ps1`.
+`cutover-backup-2026-08-05\emove-orphaned-print-binaries.ps1`.
 
 The install directory now holds only what the installer ships: the two exes,
 icon.ico, launch-admin.vbs and the uninstaller.
