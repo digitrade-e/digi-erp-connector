@@ -3,8 +3,10 @@ package queries
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,6 +19,10 @@ const (
 var (
 	ErrEmptyQuery = errors.New("query sql is empty")
 	ErrRowLimit   = errors.New("row limit exceeded")
+	// ErrNoDatabase is returned when the runner has no database handle — the
+	// daemon starts even if the initial connection failed, so every execution
+	// path must fail closed rather than dereference a nil *sql.DB.
+	ErrNoDatabase = errors.New("no database connection")
 )
 
 // Result holds the outcome of executing a saved query.
@@ -56,6 +62,9 @@ func NewRunner(db *sql.DB, timeout time.Duration, maxRows int) *Runner {
 
 // Run executes query with the given parameters and collects all recordsets.
 func (r *Runner) Run(ctx context.Context, query string, params map[string]any) (*Result, error) {
+	if r == nil || r.db == nil {
+		return nil, ErrNoDatabase
+	}
 	if strings.TrimSpace(query) == "" {
 		return nil, ErrEmptyQuery
 	}
@@ -118,7 +127,7 @@ func isPlainDML(query string) bool {
 
 var outputClauseRe = regexp.MustCompile(`\boutput\b`)
 
-// stripStringLiterals removes '...' literals (with '' escapes) so keyword
+// stripStringLiterals removes '...' literals (with ” escapes) so keyword
 // detection never triggers on literal values.
 func stripStringLiterals(s string) string {
 	var b strings.Builder
@@ -147,6 +156,62 @@ func stripStringLiterals(s string) string {
 	return b.String()
 }
 
+// legacyTimeLayout renders datetimes exactly as the Node connector did
+// (JS Date.toJSON: UTC, always three fractional digits). Go's default
+// time.Time marshalling drops a zero fraction and emits
+// "2026-03-08T00:00:00Z" where the old app sent "2026-03-08T00:00:00.000Z";
+// backends parsing that string strictly would break on the difference.
+const legacyTimeLayout = "2006-01-02T15:04:05.000Z"
+
+// isNumericTypeName lists the SQL Server types the MSSQL driver hands back as
+// raw bytes. Left as-is they marshal to JSON *strings*, whereas the Node driver
+// reported them as JSON *numbers* — arithmetic on the backend would silently
+// change meaning (JS "0.00" + 1 === "0.001").
+func isNumericTypeName(name string) bool {
+	switch strings.ToUpper(name) {
+	case "DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY":
+		return true
+	}
+	return false
+}
+
+func columnTypeName(colTypes []*sql.ColumnType, i int) string {
+	if i < 0 || i >= len(colTypes) || colTypes[i] == nil {
+		return ""
+	}
+	return colTypes[i].DatabaseTypeName()
+}
+
+// normalizeScanned converts a scanned driver value into the JSON shape the
+// electron-mssql-app connector produced, so responses stay wire-compatible.
+func normalizeScanned(v any, typeName string) any {
+	switch t := v.(type) {
+	case []byte:
+		s := string(t)
+		if isNumericTypeName(typeName) {
+			// Only emit a bare number when it really is one; anything else
+			// stays a string rather than producing invalid JSON.
+			//
+			// The digits are re-formatted to the shortest representation that
+			// round-trips through float64, because that is precisely what the
+			// Node connector emitted: its driver produced a JS number and
+			// JSON.stringify printed 13085, not the server's 13085.00. Keeping
+			// the raw scale would change int-vs-float typing for backends that
+			// care (PHP json_decode gives int for 0, float for 0.00). Float64
+			// is also exactly the precision the old connector had, so this is
+			// no worse than what production serves today.
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return json.Number(strconv.FormatFloat(f, 'f', -1, 64))
+			}
+		}
+		return s
+	case time.Time:
+		return t.UTC().Format(legacyTimeLayout)
+	default:
+		return v
+	}
+}
+
 func collectRecordsets(rows *sql.Rows, maxRows int) ([][]map[string]any, error) {
 	recordsets := make([][]map[string]any, 0, 1)
 	total := 0
@@ -155,6 +220,12 @@ func collectRecordsets(rows *sql.Rows, maxRows int) ([][]map[string]any, error) 
 		cols, err := rows.Columns()
 		if err != nil {
 			return nil, err
+		}
+		// Column types drive the numeric normalisation below. Failure is not
+		// fatal: without them values fall back to their raw representation.
+		colTypes, ctErr := rows.ColumnTypes()
+		if ctErr != nil {
+			colTypes = nil
 		}
 
 		set := make([]map[string]any, 0)
@@ -175,12 +246,7 @@ func collectRecordsets(rows *sql.Rows, maxRows int) ([][]map[string]any, error) 
 
 			row := make(map[string]any, len(cols))
 			for i, col := range cols {
-				v := values[i]
-				if b, ok := v.([]byte); ok {
-					row[col] = string(b)
-					continue
-				}
-				row[col] = v
+				row[col] = normalizeScanned(values[i], columnTypeName(colTypes, i))
 			}
 			set = append(set, row)
 			total++

@@ -37,3 +37,24 @@ See `saved-queries.md` for the full model.
 ## Price & stock
 
 `POST /api/priceAndStockHandler` → routed by config `erp` to Hasavshevet (`GPRICE_Bulk` + `GetOnHandStockForSkus`) or SAP B1 (12s timeout).
+
+## Legacy compatibility routes (only when `legacyCompat.enabled`)
+
+Absent by default. These reproduce electron-mssql-app so an unmigrated backend
+keeps working; they answer errors in the **old shape** — `{"error":"not_found"}`,
+not the `{error, code, details}` envelope above. See `legacy-compat.md`.
+
+| Route | Method | Response |
+|---|---|---|
+| `/auth/token` | POST | `{access_token, token_type:"Bearer", expires_in}`; `401 {"error":"invalid_credentials"}`. **Unauthenticated** (rate-limited). The returned JWT is accepted on every route, as is the static bearer token. |
+| `/api/ping` | GET | `{"ok":true,"ts":<epoch ms>}` — no DB access |
+| `/api/test-connection` | POST | `{mssql:{server,database,user,password,port,encrypt,trustServerCertificate}}` → `{"ok":true}` \| `400 {"ok":false,"error":"connection_failed"}` |
+| `/api/customers` | GET | `?limit=N` (default 50, max 200) → bare array of `dbo.Items` rows |
+| `/api/orders/{id}` | GET | one `dbo.Items` row; `400 invalid_id`, `404 not_found` |
+| `/api/query` | POST | **`allowRawSQL` only.** `{sql, params}` → `{value, rowsAffected}`; `400 sql_required` \| `only_select_allowed`, `500 query_failed` |
+
+### Value formatting (all query routes)
+
+Matches the old Node driver, deliberately: datetimes are
+`2026-03-08T00:00:00.000Z`; `DECIMAL`/`NUMERIC`/`MONEY` are JSON numbers in
+shortest form (`13085`, not `"13085.00"`).

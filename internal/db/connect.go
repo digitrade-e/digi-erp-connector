@@ -89,6 +89,14 @@ func buildDSN(cfg config.Config, password string) (driverName string, dsn string
 		if dbName != "" {
 			q.Set("database", dbName)
 		}
+		// Only emit the TLS options when explicitly enabled so existing
+		// installs keep the driver defaults they were commissioned with.
+		if cfg.DB.Encrypt {
+			q.Set("encrypt", "true")
+		}
+		if cfg.DB.TrustServerCertificate {
+			q.Set("TrustServerCertificate", "true")
+		}
 		u.RawQuery = q.Encode()
 
 		return "sqlserver", u.String(), nil

@@ -75,9 +75,24 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
 
+### Legacy compatibility routes (only when `legacyCompat.enabled`)
+
+Off by default. Present so a backend written against the old Node connector works
+unchanged during migration; all reply in the **old app's error shape**
+(`{"error":"snake_case"}`). Full detail: `docs/legacy-compat.md`.
+
+| Route | Method | What it does |
+|-------|--------|--------------|
+| `/auth/token` | POST | Credentials → HS256 JWT (unauthenticated, rate-limited). Auth then accepts that JWT **or** the static bearer token everywhere. |
+| `/api/ping` | GET | `{"ok":true,"ts":<ms>}`, no DB touch |
+| `/api/test-connection` | POST | Try supplied `{mssql:{...}}` settings |
+| `/api/customers` | GET | Old sample route over `dbo.Items` |
+| `/api/orders/{id}` | GET | Old sample route over `dbo.Items` |
+| `/api/query` | POST | Ad-hoc read-only SQL — **only** with `allowRawSQL: true` |
+
 ## Saved-query model — hard constraints, NEVER bypass
 
-- **There is NO raw-SQL endpoint.** The legacy `POST /api/sql` was deliberately deleted; never add an endpoint that accepts SQL text for immediate execution. SQL enters the system only through the CRUD store.
+- **There is NO raw-SQL endpoint by default.** The legacy `POST /api/sql` was deliberately deleted; never add an endpoint that accepts SQL text for immediate execution. SQL enters the system only through the CRUD store. The **one** exception is `POST /api/query`, which exists solely for electron-mssql-app compatibility, is absent unless `legacyCompat.allowRawSQL` is true, is read-only validated (`queries.ValidateReadOnly`), fully parameter-bound and logged on every call — see `docs/legacy-compat.md`. Do not widen it, and do not add a second one.
 - **Param binding only** — every request value binds via `sql.Named()` in `internal/queries/binder.go`; no string concatenation into SQL, ever.
 - **Forced-string params:** `skuArray`, `warehouse`, `sku`, `syncKey` always bind as strings (never coerced to numbers) — SAP WhsCodes and SKUs can look numeric.
 - **Type inference** for query-string values (electron compat): all-digits → int64, decimal → float64, `YYYY-MM-DD…` → datetime, else string. Integer hints from `TOP(@x)`/`OFFSET @x ROWS`/`FETCH NEXT @x ROWS`.
@@ -115,9 +130,25 @@ go build -o digi-erp-connectord ./cmd/digi-erp-connectord   # daemon (cross-plat
 go build -o digi-erp-connector.exe ./cmd/digi-erp-connector # GUI (Windows only)
 ```
 
+## Wire-compatibility constraints (a live backend depends on these)
+
+`internal/queries/runner.go` deliberately reshapes scanned values to match the old
+Node driver's JSON. These are not stylistic choices — changing them breaks a
+production backend. Covered by `queries/normalize_test.go`:
+
+- datetimes render as `2026-03-08T00:00:00.000Z` (UTC, three fractional digits)
+- `DECIMAL`/`NUMERIC`/`MONEY`/`SMALLMONEY` render as JSON **numbers** in shortest
+  form (`13085`, never `"13085.00"`)
+- the saved-query response carries both envelopes: native
+  `api/status/rowCount/rows/recordsets` **and** legacy `value`/`rowsAffected`
+- `queries.maxRows` is a real functional limit, not just a safety valve — the b4l
+  box needs 100000 because a production query returns 16183 rows
+
 ## Prohibited (zero exceptions)
 
-- Adding any endpoint that executes SQL text straight from a request body
+- Adding any endpoint that executes SQL text straight from a request body (the
+  config-gated, read-only-validated `POST /api/query` compat route is the sole
+  pre-existing exception — do not add another, do not widen it)
 - Storing secrets in logs (DB password, bearer token, credentials)
 - Disabling auth or rate limiting "for testing" on any route
 - Returning raw DB driver errors to API clients

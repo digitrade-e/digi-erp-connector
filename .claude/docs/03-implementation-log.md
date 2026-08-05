@@ -88,6 +88,48 @@ PDFtoPrinter bundling step, docs/printing.md + docs/pdf-email.md.
 go mod tidy dropped chromedp + go-mail. Kept: PostOrderHook interface,
 CustomerEmail DTO field (wire compat). All builds/tests green.
 
+## 12. Production cutover on the b4l box (2026-08-05)
+
+Replaced the still-running electron-mssql-app connector with digi-erp-connectord
+on this machine. Full detail in `04-operations.md`; sequence and findings:
+
+1. **Merge audit first.** Diffed every erp-connector `.go` file against this repo:
+   31 identical bar import paths, 3 differing only by the documented PDF/print/email
+   removal, missing files exactly the deliberate deletions. All electron logic
+   present except `/api/ping`, `/api/test-connection`, the two sample routes and
+   `POST /api/query`.
+2. **Discovered the real deployment**, which contradicted assumptions: the live API
+   was on **port 8082** (not 3001), bound to all interfaces with a firewall rule
+   opening it to the LAN, authenticated by **JWT** — and digi had no `config.yaml`
+   at all, so its service had never started.
+3. **Built the compat layer** (see decision 10b) — `internal/legacyauth` (hand-rolled
+   HS256, no new dependency), `AuthWithLegacy`, the five legacy handlers,
+   `queries.ValidateReadOnly`, config `legacyCompat` + `db.encrypt`/
+   `trustServerCertificate`. New tests: `legacyauth/jwt_test.go`,
+   `queries/readonly_test.go`, `queries/normalize_test.go`,
+   `api/legacy_compat_test.go`.
+4. **Ran both connectors side by side** (old on 8082, new on 8092) and diffed the
+   response of all 25 saved queries. That comparison is what found the row cap,
+   datetime and decimal problems (decision 10c) — none were visible from reading
+   code. `Lable Recommended` appeared to differ until an old-vs-old run at the same
+   instant proved it was live data changing (a sale between calls).
+5. **Cut over** with an auto-rollback script: deploy binaries, switch `apiListen`
+   to `[::]:8082`, stop electron, remove its HKCU Run entry, start the service,
+   probe `/auth/token` + `/api/health`, roll back to electron on any failure.
+   Downtime 16:35:05 → 16:35:09, **~4 seconds**.
+6. **Hardened the service**: `depend= MSSQL$WIZSOFT2017` and restart-on-failure,
+   because the daemon aborts when the DB is unreachable at startup whereas the
+   electron app did not (decision in 04-operations).
+
+Toolchain note: `cmd/cutover-seed` was added to write config.yaml, store the DB
+password through DPAPI and import queries using the app's own code paths, so the
+on-disk formats could not drift from what the daemon reads.
+
+Gotcha worth remembering: PowerShell 5.1 strips double quotes when passing a
+string to a native exe, so `curl -d '{"a":1}'` silently sends invalid JSON. This
+produced a completely bogus first test run (every endpoint 401). Pass bodies with
+`--data-binary "@file"`.
+
 ## 11. Saved-query migration (commit 646689e)
 - Real data found at `%APPDATA%\electron-mssql-app\custom_sql_data.json`
   (25 queries) and copied to `%PROGRAMDATA%\digi-erp-connector\queries.json`.

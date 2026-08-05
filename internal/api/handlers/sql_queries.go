@@ -48,6 +48,8 @@ func NewRunSavedQueryHandler(store *queries.Store, runner *queries.Runner) http.
 		result, err := runner.Run(r.Context(), def.SQL, merged)
 		if err != nil {
 			switch {
+			case errors.Is(err, queries.ErrNoDatabase):
+				utils.WriteError(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
 			case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
 				utils.WriteError(w, http.StatusGatewayTimeout, "Query timeout", "SQL_TIMEOUT", nil)
 			case errors.Is(err, queries.ErrRowLimit):
