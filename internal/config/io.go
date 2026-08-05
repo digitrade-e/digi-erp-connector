@@ -1,13 +1,14 @@
 package config
 
 import (
-	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"errors"
-	"io"
+	"fmt"
 	"os"
-	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
 var ErrNotFound = errors.New("config not found")
@@ -18,30 +19,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	f, err := os.Open(p)
-
+	b, err := os.ReadFile(p)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return Config{}, ErrNotFound
 		}
-		return Config{}, err
-	}
-	defer f.Close()
-
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("read config %s: %w", p, err)
 	}
 
 	var cfg Config
-	errYaml := yaml.Unmarshal(b, &cfg)
-
-	if errYaml != nil {
-		return Config{}, errYaml
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %w", p, err)
 	}
-
 	return cfg, nil
-
 }
 
 func LoadOrDefault() (Config, error) {
@@ -58,59 +48,17 @@ func LoadOrDefault() (Config, error) {
 	return Config{}, err
 }
 
+// Save writes the config atomically with 0600 permissions: it holds the bearer
+// token in plaintext, and a half-written config would stop the daemon starting.
 func Save(cfg Config) error {
 	p, err := paths.ConfigFilePath()
 	if err != nil {
 		return err
 	}
 
-	dir := filepath.Dir(p)
-	errDir := os.MkdirAll(dir, 0o755)
-
-	if errDir != nil {
-		return errDir
-	}
-
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal config: %w", err)
 	}
-
-	tmp, err := os.CreateTemp(dir, "config-*.tmp")
-	if err != nil {
-		return err
-	}
-
-	tmpName := tmp.Name()
-
-	_ = tmp.Chmod(0o600)
-
-	_, writeErr := tmp.Write(out)
-
-	syncErr := tmp.Sync()
-
-	closeErr := tmp.Close()
-
-	if writeErr != nil || syncErr != nil || closeErr != nil {
-		_ = os.Remove(tmpName)
-		if writeErr != nil {
-			return writeErr
-		}
-		if syncErr != nil {
-			return syncErr
-		}
-		return closeErr
-	}
-
-	_ = os.Remove(p)
-
-	errRename := os.Rename(tmpName, p)
-
-	if errRename != nil {
-		_ = os.Remove(tmpName)
-		return errRename
-	}
-
-	return nil
-
+	return atomicfile.Write(p, out, 0o600)
 }

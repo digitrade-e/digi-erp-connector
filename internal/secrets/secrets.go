@@ -1,12 +1,15 @@
 package secrets
 
 import (
-	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
 var ErrNotFound = errors.New("secret not found")
@@ -21,100 +24,51 @@ func sanitizeKey(key string) string {
 	return key
 }
 
+// secretFilePath maps a key to secrets/<key>.bin next to the config file.
 func secretFilePath(key string) (string, error) {
 	cfgPath, err := paths.ConfigFilePath()
 	if err != nil {
 		return "", err
 	}
-
-	baseDir := filepath.Dir(cfgPath)
-
-	safe := sanitizeKey(key)
-
-	return filepath.Join(baseDir, "secrets", safe+".bin"), nil
-
+	return filepath.Join(filepath.Dir(cfgPath), "secrets", sanitizeKey(key)+".bin"), nil
 }
 
+// Set encrypts value with the OS keystore and stores it atomically.
+//
+// Note the previous implementation returned the (nil) encrypt error when the
+// final rename failed, so a failed secret write reported success and the daemon
+// later started with a stale or absent DB password.
 func Set(key string, value []byte) error {
 	p, err := secretFilePath(key)
 	if err != nil {
 		return err
 	}
 
-	errFi := os.MkdirAll(filepath.Dir(p), 0o755)
-
-	if errFi != nil {
-		return errFi
-	}
-
 	enc, err := encrypt(value)
-
 	if err != nil {
-		return err
+		return fmt.Errorf("encrypt secret %q: %w", key, err)
 	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(p), "secret-*.tmp")
-
-	if err != nil {
-		return err
-	}
-
-	tmpName := tmp.Name()
-	_ = tmp.Chmod(0o600)
-
-	_, errWrite := tmp.Write(enc)
-
-	if errWrite != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return errWrite
-	}
-
-	errSync := tmp.Sync()
-
-	if errSync != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return errSync
-	}
-
-	errC := tmp.Close()
-
-	if errC != nil {
-		_ = os.Remove(tmpName)
-		return errC
-	}
-
-	_ = os.Remove(p)
-
-	errRename := os.Rename(tmpName, p)
-
-	if errRename != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-
-	return nil
+	return atomicfile.Write(p, enc, 0o600)
 }
 
+// Get returns the decrypted secret, or ErrNotFound if it was never stored.
 func Get(key string) ([]byte, error) {
 	p, err := secretFilePath(key)
-
 	if err != nil {
 		return nil, err
 	}
 
 	b, err := os.ReadFile(p)
-
 	if err != nil {
-		return nil, err
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("secret %q: %w", key, ErrNotFound)
+		}
+		return nil, fmt.Errorf("read secret %q: %w", key, err)
 	}
 
 	dec, err := decrypt(b)
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decrypt secret %q: %w", key, err)
 	}
-
 	return dec, nil
 }

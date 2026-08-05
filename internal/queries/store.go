@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 )
 
 // Definition is a single saved SQL query. The on-disk JSON format is
@@ -207,42 +209,11 @@ func (s *Store) Delete(name string) error {
 	return s.persistLocked()
 }
 
+// persistLocked writes the registry to disk. Callers must hold s.mu.
 func (s *Store) persistLocked() error {
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
 	out, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal queries: %w", err)
 	}
-
-	tmp, err := os.CreateTemp(dir, "queries-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	_ = tmp.Chmod(0o600)
-
-	_, writeErr := tmp.Write(out)
-	syncErr := tmp.Sync()
-	closeErr := tmp.Close()
-	if writeErr != nil || syncErr != nil || closeErr != nil {
-		_ = os.Remove(tmpName)
-		if writeErr != nil {
-			return writeErr
-		}
-		if syncErr != nil {
-			return syncErr
-		}
-		return closeErr
-	}
-
-	_ = os.Remove(s.path)
-	if err := os.Rename(tmpName, s.path); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+	return atomicfile.Write(s.path, out, 0o600)
 }
