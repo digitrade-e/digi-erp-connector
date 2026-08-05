@@ -12,7 +12,7 @@ import (
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/handlers"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/middleware"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/legacyauth"
@@ -179,5 +179,5 @@ func validateListenAddr(addr string) error {
 }
 
 func NotFound(w http.ResponseWriter, r *http.Request) {
-	utils.WriteError(w, http.StatusNotFound, "Not found", "NOT_FOUND", nil)
+	respond.Error(w, http.StatusNotFound, "Not found", "NOT_FOUND", nil)
 }

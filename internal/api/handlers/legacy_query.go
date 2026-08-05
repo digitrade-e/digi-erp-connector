@@ -2,13 +2,12 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 )
@@ -34,18 +33,8 @@ func NewLegacyQueryHandler(runner *queries.Runner, log logger.LoggerService) htt
 			return
 		}
 
-		r.Body = http.MaxBytesReader(w, r.Body, legacyBodyLimit)
-		defer r.Body.Close()
-
 		var req dto.LegacyQueryRequest
-		dec := json.NewDecoder(r.Body)
-		// UseNumber keeps large integers exact; the binder understands json.Number.
-		dec.UseNumber()
-		if err := dec.Decode(&req); err != nil {
-			writeLegacyError(w, http.StatusBadRequest, "sql_required")
-			return
-		}
-		if err := ensureEOF(dec); err != nil {
+		if err := decodeJSONBody(w, r, &req); err != nil {
 			writeLegacyError(w, http.StatusBadRequest, "sql_required")
 			return
 		}
@@ -90,7 +79,7 @@ func NewLegacyQueryHandler(runner *queries.Runner, log logger.LoggerService) htt
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusOK, dto.LegacyQueryResponse{
+		respond.JSON(w, http.StatusOK, dto.LegacyQueryResponse{
 			Value:        result.Rows(),
 			RowsAffected: result.RowsAffected,
 		})

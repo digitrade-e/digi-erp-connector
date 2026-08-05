@@ -1,13 +1,14 @@
 package logger
 
 import (
-	"github.com/digitrade-e/digi-erp-connector/internal/config"
-	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
 type LoggerService interface {

@@ -3,13 +3,12 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
@@ -17,28 +16,19 @@ import (
 )
 
 const (
-	priceStockTimeout  = 12 * time.Second
-	priceStockMaxBytes = 1 << 20
+	priceStockTimeout = 12 * time.Second
 )
 
 func NewPriceAndStockHandler(cfg config.Config, dbConn *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if dbConn == nil {
-			utils.WriteError(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
+			respond.Error(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
 			return
 		}
-
-		r.Body = http.MaxBytesReader(w, r.Body, priceStockMaxBytes)
-		defer r.Body.Close()
 
 		var req dto.PriceStockRequest
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&req); err != nil {
-			utils.WriteError(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON", nil)
-			return
-		}
-		if err := ensureEOF(dec); err != nil {
-			utils.WriteError(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON", nil)
+		if err := decodeJSONBody(w, r, &req); err != nil {
+			badJSONRequest(w)
 			return
 		}
 
@@ -65,16 +55,16 @@ func NewPriceAndStockHandler(cfg config.Config, dbConn *sql.DB) http.HandlerFunc
 		case config.ERPSAP:
 			result, err = sap.FetchPriceAndStock(ctx, dbConn, cfg, erpReq)
 		default:
-			utils.WriteError(w, http.StatusBadRequest, "Unsupported ERP type", "ERP_NOT_SUPPORTED", nil)
+			respond.Error(w, http.StatusBadRequest, "Unsupported ERP type", "ERP_NOT_SUPPORTED", nil)
 			return
 		}
 
 		if err != nil {
 			if errors.Is(err, sap.ErrNotImplemented) {
-				utils.WriteError(w, http.StatusNotImplemented, "Price/stock not implemented", "NOT_IMPLEMENTED", nil)
+				respond.Error(w, http.StatusNotImplemented, "Price/stock not implemented", "NOT_IMPLEMENTED", nil)
 				return
 			}
-			utils.WriteError(w, http.StatusInternalServerError, "Failed to load price and stock", "PRICE_STOCK_FAILED", nil)
+			respond.Error(w, http.StatusInternalServerError, "Failed to load price and stock", "PRICE_STOCK_FAILED", nil)
 			return
 		}
 
@@ -88,7 +78,7 @@ func NewPriceAndStockHandler(cfg config.Config, dbConn *sql.DB) http.HandlerFunc
 			})
 		}
 
-		utils.WriteJSON(w, http.StatusOK, dto.PriceStockResponse{
+		respond.JSON(w, http.StatusOK, dto.PriceStockResponse{
 			Items: items,
 			Meta: dto.PriceStockMeta{
 				DurationMs: time.Since(start).Milliseconds(),

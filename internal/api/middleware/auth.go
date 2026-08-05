@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 )
 
 // LegacyTokenVerifier validates a bearer credential that is not the static
@@ -28,7 +28,7 @@ func AuthWithLegacy(token string, verifyLegacy LegacyTokenVerifier, next http.Ha
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Fields(r.Header.Get("Authorization"))
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			utils.WriteError(w, http.StatusUnauthorized, "Unauthorized", "UNAUTHORIZED", nil)
+			respond.Error(w, http.StatusUnauthorized, "Unauthorized", "UNAUTHORIZED", nil)
 			return
 		}
 
@@ -43,6 +43,6 @@ func AuthWithLegacy(token string, verifyLegacy LegacyTokenVerifier, next http.Ha
 			return
 		}
 
-		utils.WriteError(w, http.StatusUnauthorized, "Unauthorized", "UNAUTHORIZED", nil)
+		respond.Error(w, http.StatusUnauthorized, "Unauthorized", "UNAUTHORIZED", nil)
 	})
 }

@@ -3,11 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
-	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"errors"
 	"fmt"
 	"net/url"
 	"time"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
 
 type Options struct {

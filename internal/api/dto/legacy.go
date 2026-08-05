@@ -28,7 +28,7 @@ type LegacyPingResponse struct {
 
 // LegacyErrorResponse is the old app's error body: a single snake_case code in
 // the "error" field, e.g. {"error":"not_found"}. This differs from
-// utils.ErrorResponse on purpose — legacy routes answer in the legacy shape.
+// respond.ErrorResponse on purpose — legacy routes answer in the legacy shape.
 type LegacyErrorResponse struct {
 	Error string `json:"error"`
 }

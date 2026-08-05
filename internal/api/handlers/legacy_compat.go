@@ -11,15 +11,15 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/legacyauth"
@@ -27,11 +27,9 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 )
 
-const legacyBodyLimit = 1 << 20 // 1 MiB, same as the saved-query CRUD routes
-
 // writeLegacyError answers in the old app's shape: {"error":"snake_case_code"}.
 func writeLegacyError(w http.ResponseWriter, status int, code string) {
-	utils.WriteJSON(w, status, dto.LegacyErrorResponse{Error: code})
+	respond.JSON(w, status, dto.LegacyErrorResponse{Error: code})
 }
 
 func logLegacyHit(log logger.LoggerService, route string) {
@@ -49,12 +47,8 @@ func NewLegacyTokenHandler(cfg config.LegacyCompatConfig, signer *legacyauth.Sig
 	return func(w http.ResponseWriter, r *http.Request) {
 		logLegacyHit(log, "POST /auth/token")
 
-		r.Body = http.MaxBytesReader(w, r.Body, legacyBodyLimit)
-		defer r.Body.Close()
-
 		var req dto.LegacyTokenRequest
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&req); err != nil {
+		if err := decodeJSONBody(w, r, &req); err != nil {
 			writeLegacyError(w, http.StatusUnauthorized, "invalid_credentials")
 			return
 		}
@@ -77,7 +71,7 @@ func NewLegacyTokenHandler(cfg config.LegacyCompatConfig, signer *legacyauth.Sig
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusOK, dto.LegacyTokenResponse{
+		respond.JSON(w, http.StatusOK, dto.LegacyTokenResponse{
 			AccessToken: token,
 			TokenType:   "Bearer",
 			ExpiresIn:   int(ttl.Seconds()),
@@ -90,7 +84,7 @@ func NewLegacyTokenHandler(cfg config.LegacyCompatConfig, signer *legacyauth.Sig
 func NewLegacyPingHandler(log logger.LoggerService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logLegacyHit(log, "GET /api/ping")
-		utils.WriteJSON(w, http.StatusOK, dto.LegacyPingResponse{
+		respond.JSON(w, http.StatusOK, dto.LegacyPingResponse{
 			OK: true,
 			TS: time.Now().UnixMilli(),
 		})
@@ -108,13 +102,12 @@ func NewLegacyTestConnectionHandler(cfg config.Config, dbPassword string, log lo
 	return func(w http.ResponseWriter, r *http.Request) {
 		logLegacyHit(log, "POST /api/test-connection")
 
-		r.Body = http.MaxBytesReader(w, r.Body, legacyBodyLimit)
-		defer r.Body.Close()
-
+		// An empty body is allowed and means "test the running configuration",
+		// which is how the old app behaved. (It compared err.Error() to the
+		// string "EOF"; errors.Is is the same check without the fragility.)
 		var req dto.LegacyTestConnectionRequest
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&req); err != nil && err.Error() != "EOF" {
-			utils.WriteJSON(w, http.StatusBadRequest, dto.LegacyTestConnectionResponse{
+		if err := decodeJSONBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+			respond.JSON(w, http.StatusBadRequest, dto.LegacyTestConnectionResponse{
 				OK:    false,
 				Error: "invalid_json",
 			})
@@ -155,14 +148,14 @@ func NewLegacyTestConnectionHandler(cfg config.Config, dbPassword string, log lo
 				log.Warn(fmt.Sprintf("legacy /api/test-connection failed: host=%s db=%s user=%s err=%v",
 					candidate.DB.Host, candidate.DB.Database, candidate.DB.User, err))
 			}
-			utils.WriteJSON(w, http.StatusBadRequest, dto.LegacyTestConnectionResponse{
+			respond.JSON(w, http.StatusBadRequest, dto.LegacyTestConnectionResponse{
 				OK:    false,
 				Error: "connection_failed",
 			})
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusOK, dto.LegacyTestConnectionResponse{OK: true})
+		respond.JSON(w, http.StatusOK, dto.LegacyTestConnectionResponse{OK: true})
 	}
 }
 
@@ -205,7 +198,7 @@ func NewLegacyCustomersHandler(runner *queries.Runner, log logger.LoggerService)
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusOK, result.Rows())
+		respond.JSON(w, http.StatusOK, result.Rows())
 	}
 }
 
@@ -246,6 +239,6 @@ func NewLegacyOrderHandler(runner *queries.Runner, log logger.LoggerService) htt
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusOK, rows[0])
+		respond.JSON(w, http.StatusOK, rows[0])
 	}
 }

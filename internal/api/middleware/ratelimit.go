@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 )
 
 const (
@@ -45,7 +45,7 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 			key = r.RemoteAddr
 		}
 		if !l.allow(key, time.Now()) {
-			utils.WriteError(w, http.StatusTooManyRequests, "Too many requests", "RATE_LIMITED", nil)
+			respond.Error(w, http.StatusTooManyRequests, "Too many requests", "RATE_LIMITED", nil)
 			return
 		}
 		next.ServeHTTP(w, r)

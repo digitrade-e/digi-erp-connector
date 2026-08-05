@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 )
 
@@ -19,14 +19,14 @@ import (
 func NewRunSavedQueryHandler(store *queries.Store, runner *queries.Runner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if runner == nil {
-			utils.WriteError(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
+			respond.Error(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
 			return
 		}
 
 		name := r.PathValue("name")
 		def, ok := store.Get(name)
 		if !ok {
-			utils.WriteError(w, http.StatusNotFound, "Query not found", "NOT_FOUND", nil)
+			respond.Error(w, http.StatusNotFound, "Query not found", "NOT_FOUND", nil)
 			return
 		}
 
@@ -49,21 +49,21 @@ func NewRunSavedQueryHandler(store *queries.Store, runner *queries.Runner) http.
 		if err != nil {
 			switch {
 			case errors.Is(err, queries.ErrNoDatabase):
-				utils.WriteError(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
+				respond.Error(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
 			case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
-				utils.WriteError(w, http.StatusGatewayTimeout, "Query timeout", "SQL_TIMEOUT", nil)
+				respond.Error(w, http.StatusGatewayTimeout, "Query timeout", "SQL_TIMEOUT", nil)
 			case errors.Is(err, queries.ErrRowLimit):
-				utils.WriteError(w, http.StatusRequestEntityTooLarge, "Row limit exceeded", "SQL_ROW_LIMIT", nil)
+				respond.Error(w, http.StatusRequestEntityTooLarge, "Row limit exceeded", "SQL_ROW_LIMIT", nil)
 			case errors.Is(err, queries.ErrEmptyQuery):
-				utils.WriteError(w, http.StatusBadRequest, "Query sql is required", "SQL_REQUIRED", nil)
+				respond.Error(w, http.StatusBadRequest, "Query sql is required", "SQL_REQUIRED", nil)
 			default:
-				utils.WriteError(w, http.StatusInternalServerError, "Query execution failed", "DB_ERROR", nil)
+				respond.Error(w, http.StatusInternalServerError, "Query execution failed", "DB_ERROR", nil)
 			}
 			return
 		}
 
 		rows := result.Rows()
-		utils.WriteJSON(w, http.StatusOK, dto.RunSavedQueryResponse{
+		respond.JSON(w, http.StatusOK, dto.RunSavedQueryResponse{
 			API:          r.URL.Path,
 			Status:       "success",
 			Name:         name,

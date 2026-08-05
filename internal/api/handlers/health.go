@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 )
@@ -16,10 +16,10 @@ func NewHealthHandler(cfg config.Config, dbPassword string) http.HandlerFunc {
 		defer cancel()
 
 		if err := db.TestConnection(ctx, cfg, dbPassword); err != nil {
-			utils.WriteError(w, http.StatusServiceUnavailable, "Database connection failed", "DB_UNAVAILABLE", nil)
+			respond.Error(w, http.StatusServiceUnavailable, "Database connection failed", "DB_UNAVAILABLE", nil)
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		respond.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }

@@ -1,16 +1,13 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 )
-
-const sendOrderMaxBytes = 1 << 20 // 1 MiB
 
 // NewSendOrderHandler returns a handler that validates an order request,
 // enqueues it on the Hasavshevet single-worker queue, and returns 202 Accepted
@@ -22,17 +19,9 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		r.Body = http.MaxBytesReader(w, r.Body, sendOrderMaxBytes)
-		defer r.Body.Close()
-
 		var req dto.SendOrderRequest
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&req); err != nil {
-			utils.WriteError(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON", nil)
-			return
-		}
-		if err := ensureEOF(dec); err != nil {
-			utils.WriteError(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON", nil)
+		if err := decodeJSONBody(w, r, &req); err != nil {
+			badJSONRequest(w)
 			return
 		}
 
@@ -63,7 +52,7 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 			missing = append(missing, "details (must be non-empty array)")
 		}
 		if len(missing) > 0 {
-			utils.WriteError(w, http.StatusBadRequest,
+			respond.Error(w, http.StatusBadRequest,
 				"Missing required fields: "+joinStrings(missing), "VALIDATION_ERROR", nil)
 			return
 		}
@@ -72,7 +61,7 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 		switch req.DocumentType {
 		case "ORDER", "QUOATE", "RETURN":
 		default:
-			utils.WriteError(w, http.StatusBadRequest,
+			respond.Error(w, http.StatusBadRequest,
 				"Invalid documentType; allowed: ORDER, QUOATE, RETURN", "VALIDATION_ERROR", nil)
 			return
 		}
@@ -89,7 +78,7 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 			if item.Quantity == nil {
 				itemMissing = append(itemMissing, "quantity")
 			} else if *item.Quantity == 0 {
-				utils.WriteError(w, http.StatusBadRequest,
+				respond.Error(w, http.StatusBadRequest,
 					"details["+itoa(i)+"]: quantity cannot be zero (Hasavshevet spec line23)",
 					"VALIDATION_ERROR", nil)
 				return
@@ -107,7 +96,7 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 				itemMissing = append(itemMissing, "discount")
 			}
 			if len(itemMissing) > 0 {
-				utils.WriteError(w, http.StatusBadRequest,
+				respond.Error(w, http.StatusBadRequest,
 					"Missing fields in details["+itoa(i)+"]: "+joinStrings(itemMissing),
 					"VALIDATION_ERROR", nil)
 				return
@@ -149,12 +138,12 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 
 		lastOrderNumber, err := queue.Submit(orderReq)
 		if err != nil {
-			utils.WriteError(w, http.StatusServiceUnavailable,
+			respond.Error(w, http.StatusServiceUnavailable,
 				"Order queue full; try again later", "QUEUE_FULL", nil)
 			return
 		}
 
-		utils.WriteJSON(w, http.StatusAccepted, dto.SendOrderAccepted{
+		respond.JSON(w, http.StatusAccepted, dto.SendOrderAccepted{
 			Status: "queued",
 			JobID:  lastOrderNumber,
 			Meta:   dto.SendOrderMeta{DurationMs: time.Since(start).Milliseconds()},

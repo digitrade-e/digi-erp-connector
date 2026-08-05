@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
-	"github.com/digitrade-e/digi-erp-connector/internal/api/utils"
+	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 )
 
@@ -13,14 +13,14 @@ import (
 func NewSendOrderStatusHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if queue == nil {
-			utils.WriteError(w, http.StatusServiceUnavailable, "Order queue unavailable", "QUEUE_UNAVAILABLE", nil)
+			respond.Error(w, http.StatusServiceUnavailable, "Order queue unavailable", "QUEUE_UNAVAILABLE", nil)
 			return
 		}
 
 		jobID := r.PathValue("jobId")
 		result, ok := queue.Status(jobID)
 		if !ok {
-			utils.WriteError(w, http.StatusNotFound, "Job not found", "NOT_FOUND", nil)
+			respond.Error(w, http.StatusNotFound, "Job not found", "NOT_FOUND", nil)
 			return
 		}
 
@@ -34,6 +34,6 @@ func NewSendOrderStatusHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 			// Generic message only — raw processing errors may embed SQL or paths.
 			resp.Error = "order processing failed"
 		}
-		utils.WriteJSON(w, http.StatusOK, resp)
+		respond.JSON(w, http.StatusOK, resp)
 	}
 }
