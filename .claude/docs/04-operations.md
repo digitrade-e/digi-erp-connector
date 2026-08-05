@@ -90,17 +90,48 @@ the electron-mssql-app connector here on 2026-08-05 16:35.
 
 ### What is deployed
 
-`C:\Program Files\digi-erp-connector\*.exe` are built from branch
-`refactor/dry-kiss` commit **3567157** (deployed 2026-08-05 17:37), NOT from a
-tagged release — the registry still reports the 1.0.2 installer. Consequence:
-**running any installer, including the 1.0.2 one in Downloads, replaces
-production with a build that has no legacy compatibility layer and the backend
-breaks immediately.** Merge to `main` first so CI produces a release that
-contains it, then install that.
+**Release v1.0.4** (commit `18ecd0b` on `main`), installed from
+`digi-erp-connector-setup-1.0.4.exe` on 2026-08-05 17:52. The registry reports
+1.0.4 and the binaries are the CI-built ones, so installed version, tag, `main`
+and the running code all agree — no drift.
 
-To roll back to the previous (cutover) binaries: stop the service, copy
-`deploy-backup-2026-08-05-refactor\*.previous` over the installed exes, start the
-service. `deploy-refactor.ps1` does this automatically if a deploy probe fails.
+Order of that day's changes: cutover (locally built) → refactor deployed by hand
+(17:37) → replaced by the released installer (17:52). Each step was verified by
+capturing all 25 saved-query responses plus 13 endpoint probes before and after
+and diffing them; every time, 37 of 38 were byte-identical with `/api/ping`'s
+timestamp the only difference.
+
+Rollback options, in order of preference:
+
+1. re-install a previous release (`gh release download v1.0.3 …`) — but note
+   v1.0.3 and earlier have **no legacy compatibility layer**, so the backend
+   would immediately get 401s. Only useful with the backend migrated.
+2. `install-backup-1.0.4\*.before-1.0.4` — the binaries running before the
+   installer (same code, locally built)
+3. `deploy-backup-2026-08-05-refactor\*.previous` — the cutover build
+4. `cutover-backup-2026-08-05\ROLLBACK.ps1` — back to the electron app, which is
+   now uninstalled, so this needs its installer sourced first
+
+### Installing a new release over a running install
+
+The installer does NOT stop the service (`[Run]` only does `sc create` /
+`sc start`), so **stop the service first** or the running exe cannot be replaced.
+`sc create` fails harmlessly on an existing service, which means the service
+definition — including `depend=` and the recovery actions — **survives** an
+upgrade install. Re-running the hardening afterwards is still worth it as a
+cheap idempotent check; `install-1.0.4-and-harden.ps1` does the whole sequence
+with auto-rollback.
+
+Only `[UninstallRun]` stops and deletes the service, so a full uninstall does
+lose the hardening.
+
+### Orphaned files in the install directory
+
+`PDFtoPrinter.exe`, `qpdf29.dll` and `resource.dat` (dated 2026-07-20, ~18 MB)
+are left over from the 1.0.2 installer, which shipped them for the PDF/print
+subsystem deleted that same day. Nothing references them and the current
+installer does not ship them, so they are dead weight and are not tracked by the
+regenerated uninstaller either. Safe to delete.
 
 ### Cutover artefacts and rollback
 
