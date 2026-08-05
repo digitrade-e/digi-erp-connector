@@ -1,0 +1,152 @@
+//go:build windows
+
+package main
+
+// Configuration button handlers. All of these run on the UI thread; anything
+// that blocks (a DB round-trip, a file write) is moved to a goroutine and hands
+// its result back through Synchronize.
+
+import (
+	"context"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/lxn/walk"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/db"
+)
+
+// dbTestTimeout bounds the Test connection / Test user probes.
+const dbTestTimeout = 8 * time.Second
+
+const documentationURL = "https://drive.google.com/file/d/1wWlVuB6Gyab6_SGN11e3TIl-14JVQ2Zz/view?usp=sharing"
+
+func (f *mainForm) onERPChanged() {
+	f.updateSendOrderVisibility(config.ERPType(comboValue(f.erpCombo, config.ErpOption())))
+}
+
+func (f *mainForm) onGenerateToken() {
+	token, err := newBearerToken()
+	if err != nil {
+		f.setStatus("Failed to generate key: " + err.Error())
+		return
+	}
+	f.bearerTokenEdit.SetText(token)
+}
+
+func (f *mainForm) onAddFolder() {
+	f.addFolderRow("")
+}
+
+func (f *mainForm) onBrowseSendOrder() {
+	f.browseFolderInto(f.sendOrderEdit, "Select send order folder")
+}
+
+func (f *mainForm) onBrowseHasBat() {
+	dlg := &walk.FileDialog{
+		Title:  "Select Hasavshevet BAT file",
+		Filter: "BAT Files (*.bat)|*.bat|All Files (*.*)|*.*",
+	}
+	if ok, err := dlg.ShowOpen(f.MainWindow); err != nil {
+		f.setStatus("File selection error: " + err.Error())
+	} else if ok {
+		f.hasBatEdit.SetText(dlg.FilePath)
+	}
+}
+
+func (f *mainForm) onDocumentation() {
+	if err := exec.Command("cmd", "/c", "start", documentationURL).Start(); err != nil {
+		f.setStatus("Failed to open documentation: " + err.Error())
+	}
+}
+
+// onTestUser checks that the configured ERP user exists in the customer's USERS
+// table, which is the usual cause of a working DB connection but failing orders.
+func (f *mainForm) onTestUser() {
+	loginName := strings.TrimSpace(f.erpUserEdit.Text())
+	if loginName == "" {
+		f.setStatus("ERP user is required")
+		return
+	}
+	cfg, password, ok := f.dbConfigFromForm()
+	if !ok {
+		f.setStatus("Invalid DB Port")
+		return
+	}
+
+	f.setStatus("Testing user...")
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dbTestTimeout)
+		defer cancel()
+
+		dbConn, err := db.Open(cfg, password, db.DefaultOptions())
+		if err != nil {
+			f.Synchronize(func() { f.setStatus("Connection failed: " + err.Error()) })
+			return
+		}
+		defer dbConn.Close()
+
+		var found string
+		err = dbConn.QueryRowContext(ctx,
+			"SELECT LoginName FROM USERS WHERE LoginName = @p1", loginName).Scan(&found)
+		f.Synchronize(func() {
+			if err != nil {
+				f.setStatus("User not found: " + loginName)
+				return
+			}
+			f.setStatus("User OK: " + found)
+		})
+	}()
+}
+
+func (f *mainForm) onTestConnection() {
+	cfg, password, ok := f.dbConfigFromForm()
+	if !ok {
+		f.setStatus("Invalid DB Port")
+		return
+	}
+	cfg.ERP = config.ERPType(comboValue(f.erpCombo, config.ErpOption()))
+	cfg.APIListen = f.apiListenEdit.Text()
+
+	f.setStatus("Testing connection...")
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dbTestTimeout)
+		defer cancel()
+
+		err := db.TestConnection(ctx, cfg, password)
+		f.Synchronize(func() {
+			if err != nil {
+				f.setStatus("Connection failed: " + err.Error())
+				return
+			}
+			f.setStatus("Connection OK")
+		})
+	}()
+}
+
+func (f *mainForm) onSave() {
+	if f.busy {
+		return
+	}
+	cfg, password, err := f.readFormConfig()
+	if err != nil {
+		f.setStatus(err.Error())
+		return
+	}
+
+	f.busy = true
+	f.setStatus("Saving...")
+	go func() {
+		err := persistConfig(cfg, password, f.logSvc)
+		f.Synchronize(func() {
+			if err != nil {
+				f.finish(err.Error())
+				return
+			}
+			f.cfg = cfg
+			f.finish("נשמר בהצלחה.")
+		})
+	}()
+}
