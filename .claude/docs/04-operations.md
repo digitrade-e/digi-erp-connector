@@ -139,7 +139,7 @@ Removed 2026-08-05 17:57, 17.5 MB freed. Copies kept in
 ever returns, erp-connector's `docs/printing.md` documents hard-won constraints
 about these exact binaries (PDFtoPrinter first, WSD ports unusable from session 0,
 Sumatra exit codes not trustworthy). Script:
-`cutover-backup-2026-08-05\emove-orphaned-print-binaries.ps1`.
+`cutover-backup-2026-08-05\remove-orphaned-print-binaries.ps1`.
 
 The install directory now holds only what the installer ships: the two exes,
 icon.ico, launch-admin.vbs and the uninstaller.
