@@ -8,16 +8,29 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 )
 
-// Auth accepts the installation's static bearer token and nothing else.
+// TokenVerifier validates a bearer credential that is not the static token — in
+// practice a token issued by POST /auth/token. It returns nil when the
+// credential is acceptable.
 //
-// The comparison is constant-time, so a wrong token cannot be discovered by
-// measuring how long the rejection takes. Every failure is a flat 401: missing,
-// malformed and incorrect are deliberately indistinguishable to a caller.
+// AuthWithExchange calls it only after the constant-time static comparison
+// fails, and only when the exchange is enabled. A nil verifier means "static
+// token only".
+type TokenVerifier func(credential string) error
+
+// AuthWithExchange accepts either the static bearer token or, when verify is
+// non-nil, a credential that verify accepts — the two credentials described in
+// docs/authentication.md.
 //
-// An expired or invalid credential must produce exactly 401 — backends treat
-// that status as "re-authenticate", and any other code turns a recoverable
-// hiccup into a broken integration.
-func Auth(token string, next http.Handler) http.Handler {
+// The static comparison runs first and is constant-time, so a wrong token cannot
+// be discovered by timing and enabling the exchange cannot weaken or slow down
+// the primary path.
+//
+// Every failure is a flat 401: missing, malformed and incorrect are deliberately
+// indistinguishable. That status is also a contract — callers treat exactly 401
+// as "re-authenticate and retry once". A 403 or a 500 for an expired token turns
+// a self-healing hiccup into an integration that stays broken until somebody
+// clears a cached credential by hand.
+func AuthWithExchange(token string, verify TokenVerifier, next http.Handler) http.Handler {
 	expected := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Fields(r.Header.Get("Authorization"))
@@ -26,11 +39,17 @@ func Auth(token string, next http.Handler) http.Handler {
 			return
 		}
 
-		if subtle.ConstantTimeCompare([]byte(parts[1]), expected) != 1 {
-			respond.Error(w, http.StatusUnauthorized, "Unauthorized", "UNAUTHORIZED", nil)
+		credential := parts[1]
+		if subtle.ConstantTimeCompare([]byte(credential), expected) == 1 {
+			next.ServeHTTP(w, r)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		if verify != nil && verify(credential) == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		respond.Error(w, http.StatusUnauthorized, "Unauthorized", "UNAUTHORIZED", nil)
 	})
 }

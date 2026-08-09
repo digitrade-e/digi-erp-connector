@@ -180,3 +180,40 @@ That is the right test for a refactor: it proves nothing observable changed,
 which spot-checking endpoints cannot. Scripts: `scratchpad/capture.ps1`,
 `cutover-backup-2026-08-05/deploy-refactor.ps1`; the replaced binaries are kept
 as `deploy-backup-2026-08-05-refactor/*.previous`.
+
+## 2026-08-09 — credential exchange restored as a feature (`feature/auth-exchange`)
+
+Same day as the legacy deletion, and a direct consequence of it: erp-manager
+replied that it cannot drop the login/password fields
+(`docs/connector-adaptation-plan.md`), so the connector implements §3 and §4 of
+that plan. Decision and rationale: `.claude/docs/02-decisions.md` §15.
+
+What was built:
+
+- `internal/auth` — the HS256 signer recovered from `949f4fc^:internal/legacyauth/jwt.go`,
+  renamed and re-documented as a supported package, plus `NewSecret()` (32 random
+  bytes, hex) and `NewPassword()` (18 bytes, base64url).
+- `config.AuthConfig` with `Validate()` and `TTL()`. `Validate` is called by both
+  `api.NewServer` and the GUI's `readFormConfig`, so the two cannot drift.
+- `handlers.NewTokenHandler` (`POST /auth/token`, registered only when enabled)
+  and `handlers.NewPingHandler` (`GET /api/ping`, always registered, no DB touch).
+- `middleware.AuthWithExchange` — static compare first, then signature. `Auth`
+  remains as the single-credential wrapper.
+- First-run secret generation in the daemon: if `auth.enabled` and the secret is
+  blank, generate and `config.Save`. Logged as having happened, never with the
+  value.
+- GUI: a **Credential exchange** section with generate buttons for the password
+  and the secret, and a show/hide toggle; `cutover-seed -auth-user/-auth-password/-auth-ttl`
+  for headless provisioning, which prints the credentials to hand to the backend.
+
+Verified on a sandboxed instance (`PROGRAMDATA` redirected to a scratch dir,
+port 18099, production on 8082 untouched): exchange → 200 with `access_token`;
+`digitrade`/`123456` → 401; issued token and static token both → 200 on
+`/api/custom_sql`, which is still a bare array; wrong token → 401; ping → 200
+with both credentials and 401 with none; `POST /api/query` → 404. Then the secret
+was blanked and the daemon restarted: it generated a new one, persisted it with
+the rest of the config intact, issued against it, and rejected the token from
+before the regeneration.
+
+Not deployed. b4l stays on 1.0.4 until erp-manager updates ClientConnection rows
+67 and 76 — see `.claude/docs/04-operations.md`.

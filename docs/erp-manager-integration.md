@@ -1,11 +1,13 @@
 # erp-manager integration — what the backend sends and expects
 
-> **Superseded in part (2026-08-09).** The connector no longer has a
-> `/auth/token` route: the legacy compatibility layer was deleted. Sections 3 and
-> 4 below describe how the integration works *today, before the migration*, and
-> are kept because they explain what has to change. The plan for changing it is
-> [erp-manager-migration-plan.md](erp-manager-migration-plan.md). Sections 5 and 6
-> — the routes and the response shapes — are unchanged and still authoritative.
+> **Current as of 2026-08-09.** The credential exchange erp-manager uses was
+> briefly deleted along with the rest of the legacy compatibility layer, then
+> restored as a first-class feature after erp-manager showed that the credential
+> fields it would have had to drop are shared with four other ERP services
+> ([connector-adaptation-plan.md](connector-adaptation-plan.md)). What changed
+> permanently: the credentials are now per installation, and the signing secret
+> is generated on the box instead of living in the old app's source. See
+> [authentication.md](authentication.md). `POST /api/query` stayed deleted.
 
 This connector has one production client: **erp-manager**, the Symfony/API-Platform
 service that sits between the customer-facing apps and every ERP. When you develop
@@ -18,7 +20,7 @@ relative to `erp-manager-backend/api/` in the `erp-manager` repo.
 
 The connector-side counterpart of every statement is in
 [api.md](api.md) (routes), [saved-queries.md](saved-queries.md) (the data model)
-and [erp-manager-migration-plan.md](erp-manager-migration-plan.md) (the auth exchange).
+and [authentication.md](authentication.md) (the credential exchange).
 
 ---
 
@@ -48,10 +50,10 @@ Table `client_connection`, entity `src/Entity/ClientConnection.php`, exposed as
 | ClientConnection field | Meaning for this connector | Must match |
 |---|---|---|
 | `baseUrl` | Prefix for every data call, e.g. `http://<host>:8082/api` | your `apiListen` host/port + the literal `/api` |
-| `authEndpoint` (`auth_endpoint`) | Where the credential exchange is POSTed, e.g. `http://<host>:8082/auth/token` | the `/auth/token` route, which exists **only** when `legacyCompat.enabled` |
-| `authLogin` | Sent as JSON `username` | `legacyCompat.jwtUser` |
-| `authPassword` | Sent as JSON `password` | `legacyCompat.jwtPassword` |
-| `token` | Cache of the last issued JWT (written by erp-manager, plaintext) | signed by `legacyCompat.jwtSecret` |
+| `authEndpoint` (`auth_endpoint`) | Where the credential exchange is POSTed, e.g. `http://<host>:8082/auth/token` | the `/auth/token` route, which exists **only** when `auth.enabled` |
+| `authLogin` | Sent as JSON `username` | `auth.username` on that box |
+| `authPassword` | Sent as JSON `password` | `auth.password` on that box |
+| `token` | Cache of the last issued JWT (written by erp-manager, plaintext) | signed by `auth.secret`, which is unique per install |
 | `connectionType` | `2` = `DIGITRADE_MSSQL` → this connector | — |
 | `erp` | FK to an `Erp` row; **ignored** when `connectionType = 2` | — |
 | `company` | Label only — how the connection appears in the UI | — |
@@ -93,23 +95,27 @@ Authorization: Bearer <that JWT>
 Content-Type: application/json
 ```
 
-On this side, `POST /auth/token` is a legacy-compat route
-(`internal/api/handlers/legacy_compat.go:42-77`): it compares the credentials
-against `legacyCompat.jwtUser` / `jwtPassword`, signs an HS256 token with
-`jwtSecret`, and answers `{access_token, token_type:"Bearer", expires_in}`
-(`internal/api/dto/legacy.go:16-21`). `middleware.AuthWithLegacy`
-(`internal/api/middleware/auth.go:26-47`) then accepts **either** the static
-bearer token **or** that JWT on every route — the constant-time static comparison
-runs first and fails, the signature check succeeds.
+On this side, `POST /auth/token` is served by
+`internal/api/handlers/auth.go`: it compares the credentials against
+`auth.username` / `auth.password`, signs an HS256 token with `auth.secret`, and
+answers `{access_token, token_type:"Bearer", expires_in}`.
+`middleware.AuthWithExchange` then accepts **either** the static bearer token
+**or** that token on every route — the constant-time static comparison runs first
+and fails, the signature check succeeds.
 
-Two consequences for development:
+Three consequences for development:
 
-- **`legacyCompat.enabled: false` cuts erp-manager off completely.** `/auth/token`
-  stops existing, so `login()` gets a 404 and every call fails. There is no
-  fallback: erp-manager has no static-token mode (see §8).
-- **Changing `jwtSecret` invalidates the cached token** in the database. The next
-  call gets a 401, which erp-manager handles (§4) — so this self-heals, but the
-  first request after the change fails if anything upstream does not retry.
+- **`auth.enabled: false` cuts erp-manager off completely.** `/auth/token` stops
+  existing, so `login()` gets a 404 and every call fails. There is no fallback:
+  erp-manager has no static-token mode (see §8).
+- **The credentials are per installation now.** `authLogin`/`authPassword` on the
+  ClientConnection row must match what the operator set on that box. The old
+  `digitrade`/`123456` works nowhere, and a row still carrying it gets a 401.
+  Update the row **before** the connector is deployed — see the rollout order in
+  [authentication.md](authentication.md).
+- **Changing `auth.secret` invalidates the cached token** in the database. The
+  next call gets a 401, which erp-manager handles (§4) — so this self-heals, but
+  the first request after the change fails if anything upstream does not retry.
 
 The static bearer token is still worth keeping correct: it is what *you* use for
 curl probes (§7), and it is the credential the integration should eventually move
@@ -134,9 +140,9 @@ somebody clears `token` in the database by hand. The current middleware is
 correct here — it answers `401` with code `UNAUTHORIZED` for a missing header, a
 malformed header, and a bad credential alike.
 
-`jwtExpiryMinutes` is therefore invisible to erp-manager except as *how often a
-request pays for one extra round-trip*. 30 minutes (the electron default) means
-roughly one re-login every half hour of traffic.
+`auth.tokenTTL` is therefore invisible to erp-manager except as *how often a
+request pays for one extra round-trip*. 30 minutes (the default, and what the
+electron app used) means roughly one re-login every half hour of traffic.
 
 ## 5. The six calls erp-manager makes
 
@@ -188,9 +194,6 @@ So the division of labour is: erp-manager *manages* saved queries, the B2B backe
 service is the more evolved of the two — it handles a pre-provisioned static token
 and fails with an explicit message naming both options when neither a token nor an
 `authEndpoint` is configured (`:31-36`). erp-manager has no such branch.
-
-`allowRawSQL` is on in production, so assume `POST /api/query` has a caller until
-`server.log` says otherwise for a full business cycle.
 
 ## 6. Response shapes — the trap that fails silently
 
@@ -252,9 +255,12 @@ Things that will cost you an hour if you meet them cold:
 - **No static-token mode.** `process()` is `getToken() ?? login()`. Pasting the
   connector's `bearerToken` straight into `ClientConnection.token` does work — it
   never expires, so the 401 branch never fires — but any transient 401 sends
-  erp-manager to `/auth/token` and it stays broken. Retiring `legacyCompat`
+  erp-manager to `/auth/token` and it stays broken. Moving off the exchange
   properly needs a real branch in `DigitradeMssqlService`, which does not exist
-  yet.
+  yet — that is exactly what
+  [erp-manager-migration-plan.md](erp-manager-migration-plan.md) asked for and
+  what [connector-adaptation-plan.md](connector-adaptation-plan.md) declined for
+  now.
 - **`getCustomQuery()` returns the wrong thing.** At
   `DigitradeMssqlService.php:244-252` the guard is inverted: it returns `[]` when
   the response is **non-empty** and returns the empty response otherwise. Called
@@ -291,23 +297,32 @@ curl.exe -s "$b/sqlqueries/IndividualProductList?top=5" -H "Authorization: Beare
 ```
 
 To reproduce the auth exchange exactly as erp-manager performs it — this is the
-check that tells you whether `legacyCompat` is configured correctly:
+check that tells you whether the credentials on the two sides agree:
 
 ```powershell
-'{"username":"digitrade","password":"123456"}' | Set-Content -Encoding ascii $env:TEMP\b.json
+'{"username":"<auth.username>","password":"<auth.password>"}' |
+  Set-Content -Encoding ascii $env:TEMP\b.json
 curl.exe -s -X POST http://127.0.0.1:8082/auth/token `
   -H "Content-Type: application/json" --data-binary "@$env:TEMP\b.json"
 # → {"access_token":"eyJ...","token_type":"Bearer","expires_in":1800}
 
-# then prove the issued JWT is accepted everywhere the static token is
+# then prove the issued token is accepted everywhere the static token is
 curl.exe -s $b/custom_sql -H "Authorization: Bearer eyJ..."
 ```
 
-A 404 on `/auth/token` means `legacyCompat.enabled` is off — check the
-**Legacy compatibility** section of the GUI, which is where those credentials now
-live. `jwtUser`/`jwtPassword` shown there must equal `authLogin`/`authPassword` on
-the ClientConnection row, or the exchange returns the old app's error shape and
-erp-manager reports a login failure.
+Use `--data-binary "@file"`, not an inline `-d`: PowerShell 5.1 strips the double
+quotes out of a JSON argument passed to a native executable, and the request comes
+back 401 for reasons that have nothing to do with the credentials.
+
+A 404 on `/auth/token` means `auth.enabled` is off — check the **Credential
+exchange** section of the GUI, which is where those credentials live. The
+username and password shown there must equal `authLogin`/`authPassword` on the
+ClientConnection row, or the exchange answers 401 and erp-manager reports a login
+failure.
+
+`GET /api/ping` (with either credential) is the quickest way to separate "the
+service is down" from "the credential is wrong": it answers 200 without touching
+the database.
 
 For the full end-to-end loop, erp-manager runs locally on **:8004**
 (`docker compose up -d` in its repo) and you can point a ClientConnection row's
@@ -319,9 +334,11 @@ Connector side:
 
 | Concern | File |
 |---|---|
-| Bearer / legacy JWT acceptance | `internal/api/middleware/auth.go:26-47` |
-| `/auth/token` | `internal/api/handlers/legacy_compat.go:42-77` |
-| compat config + validation | `internal/config/model.go:42-56`, `internal/api/server.go:53-67` |
+| static token / issued token acceptance | `internal/api/middleware/auth.go` |
+| `/auth/token`, `/api/ping` | `internal/api/handlers/auth.go` |
+| token signing and verification | `internal/auth/token.go` |
+| auth config + validation | `internal/config/model.go` (`AuthConfig`), `internal/api/server.go` |
+| the contract, pinned by tests | `internal/api/auth_exchange_test.go` |
 | saved-query CRUD handlers | `internal/api/handlers/custom_sql.go` |
 | saved-query runner + envelopes | `internal/queries/runner.go`, `internal/api/dto/queries.go:43-52` |
 | parameter binding | `internal/queries/binder.go` |

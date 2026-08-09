@@ -48,6 +48,26 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.DB.Database = f.dbNameEdit.Text()
 	cfg.ERPUser = strings.TrimSpace(f.erpUserEdit.Text())
 
+	cfg.Auth = config.AuthConfig{
+		Enabled:  f.authEnabledCheck.Checked(),
+		Username: strings.TrimSpace(f.authUserEdit.Text()),
+		Password: strings.TrimSpace(f.authPassEdit.Text()),
+		Secret:   strings.TrimSpace(f.authSecretEdit.Text()),
+		TokenTTL: strings.TrimSpace(f.authTTLEdit.Text()),
+	}
+	// The daemon refuses to start on a half-configured exchange, so the GUI must
+	// refuse to save one — otherwise the box is left holding a config its own
+	// service will not start on.
+	if err := cfg.Auth.Validate(); err != nil {
+		return config.Config{}, "", fmt.Errorf(
+			"credential exchange: set both a username and a password, or untick Enabled (%w)", err)
+	}
+	if !cfg.Auth.TokenTTLValid() {
+		return config.Config{}, "", fmt.Errorf(
+			"credential exchange: token lifetime %q is not a duration — use a value like 30m or 1h, or leave it blank",
+			cfg.Auth.TokenTTL)
+	}
+
 	// The database is optional. A connector deployed only to write order files
 	// may have no database of its own, and refusing to save left such a node
 	// impossible to configure at all. Whether orders can actually be built is

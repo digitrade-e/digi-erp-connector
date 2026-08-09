@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api"
+	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
@@ -52,6 +54,25 @@ func (a *serverApp) Start() error {
 	}
 	a.cfg = cfg
 	bootstrapLog.Info(fmt.Sprintf("config loaded: erp=%s apiListen=%s sendOrderDir=%q", cfg.ERP, cfg.APIListen, cfg.SendOrderDir))
+
+	// Generate this installation's signing secret if it has none. Doing it here
+	// rather than shipping a default is the whole point: a constant compiled into
+	// the binary would let anyone with the source mint tokens accepted by every
+	// deployment. Persisted so tokens survive a restart.
+	if cfg.Auth.Enabled && strings.TrimSpace(cfg.Auth.Secret) == "" {
+		secret, secErr := auth.NewSecret()
+		if secErr != nil {
+			bootstrapLog.Error("could not generate an auth signing secret", secErr)
+			return secErr
+		}
+		cfg.Auth.Secret = secret
+		if saveErr := config.Save(cfg); saveErr != nil {
+			bootstrapLog.Error("could not persist the generated auth signing secret", saveErr)
+			return saveErr
+		}
+		a.cfg = cfg
+		bootstrapLog.Info("generated this installation's auth signing secret and saved it to config.yaml")
+	}
 
 	bootstrapLog.Info("calling logger.New(cfg)")
 	logSvc, err := logger.New(cfg)

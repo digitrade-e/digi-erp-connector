@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
@@ -37,6 +38,9 @@ func main() {
 	encrypt := flag.Bool("encrypt", false, "set db.encrypt")
 	trust := flag.Bool("trust", false, "set db.trustServerCertificate")
 	queriesFrom := flag.String("queries-from", "", "import saved queries from this file")
+	authUser := flag.String("auth-user", "", "enable POST /auth/token with this username (see -auth-password)")
+	authPassword := flag.String("auth-password", "", "password for the credential exchange; blank generates one and prints it")
+	authTTL := flag.String("auth-ttl", "", "issued token lifetime (e.g. 30m); blank uses the default")
 	flag.Parse()
 
 	cfg, err := config.LoadOrDefault()
@@ -76,6 +80,43 @@ func main() {
 		fmt.Println("generated a new bearerToken")
 	}
 
+	// The credential exchange, for backends that authenticate with a username and
+	// password rather than a static token. Off unless -auth-user is given.
+	//
+	// Everything is generated here rather than left for the daemon so the operator
+	// walks away with the exact values to hand the calling backend; the daemon
+	// would otherwise mint the secret silently on first start.
+	if *authUser != "" {
+		cfg.Auth.Enabled = true
+		cfg.Auth.Username = *authUser
+		cfg.Auth.TokenTTL = *authTTL
+
+		cfg.Auth.Password = *authPassword
+		if cfg.Auth.Password == "" {
+			pw, err := auth.NewPassword()
+			if err != nil {
+				fail("generate auth password", err)
+			}
+			cfg.Auth.Password = pw
+		}
+		// Never regenerate an existing secret: tokens already issued verify
+		// against it.
+		if cfg.Auth.Secret == "" {
+			secret, err := auth.NewSecret()
+			if err != nil {
+				fail("generate auth signing secret", err)
+			}
+			cfg.Auth.Secret = secret
+			fmt.Println("generated this installation's auth signing secret")
+		}
+		if err := cfg.Auth.Validate(); err != nil {
+			fail("auth settings", err)
+		}
+		if !cfg.Auth.TokenTTLValid() {
+			fail("auth settings", fmt.Errorf("-auth-ttl %q is not a positive duration", *authTTL))
+		}
+	}
+
 	if err := config.Save(cfg); err != nil {
 		fail("save config", err)
 	}
@@ -85,6 +126,11 @@ func main() {
 		cfg.APIListen, cfg.ERP, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database, cfg.DB.User,
 		cfg.DB.Encrypt, cfg.DB.TrustServerCertificate)
 	fmt.Printf("  bearerToken=%s\n", cfg.BearerToken)
+	if cfg.Auth.Enabled {
+		fmt.Println("credential exchange enabled at POST /auth/token — give the calling backend:")
+		fmt.Printf("  username=%s\n", cfg.Auth.Username)
+		fmt.Printf("  password=%s\n", cfg.Auth.Password)
+	}
 
 	if *dbPassword != "" {
 		key := "db_password_" + string(cfg.ERP)

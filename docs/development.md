@@ -47,7 +47,7 @@ Where the suites are, and what they actually protect:
 | Package | Protects |
 |---|---|
 | `internal/queries` | Parameter binding and type inference; the JSON shape of scanned values (datetime and decimal formatting — **a wire contract with a live backend**) |
-| `internal/api` | The route table (`http.ServeMux` panics on conflicting patterns, so constructing the server is itself a test), the auth matrix, and that the deleted legacy routes stay deleted |
+| `internal/api` | The route table (`http.ServeMux` panics on conflicting patterns, so constructing the server is itself a test), the auth matrix (static token, issued token, dual acceptance, exactly-401), the `POST /auth/token` contract, and that the deleted legacy routes — `POST /api/query` above all — stay deleted |
 | `internal/api/handlers` | Saved-query CRUD over `httptest`, send-order validation |
 | `internal/erp/hasavshevet` | The 2891-byte IMOVEIN record layout, Windows-1255 encoding, sequential order numbers |
 | `internal/files` | Traversal rejection and allow-list enforcement |

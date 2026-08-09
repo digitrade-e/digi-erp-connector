@@ -14,6 +14,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api/handlers"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/middleware"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
+	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
@@ -50,10 +51,38 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		return nil, errors.New("query store is required")
 	}
 
+	// The credential exchange (POST /auth/token). Optional, and when enabled the
+	// tokens it issues are accepted alongside the static bearer token.
+	//
+	// Refuse to start on a half-configured block rather than exposing an exchange
+	// that accepts blank credentials — the same reasoning as the TLS pair below.
+	var signer *auth.Signer
+	if cfg.Auth.Enabled {
+		if err := cfg.Auth.Validate(); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(cfg.Auth.Secret) == "" {
+			return nil, errors.New("auth.enabled requires auth.secret (the daemon generates one on first run; " +
+				"if you see this, generation failed or the value was cleared by hand)")
+		}
+		s, err := auth.NewSigner(cfg.Auth.Secret)
+		if err != nil {
+			return nil, err
+		}
+		signer = s
+	}
+
 	mux := http.NewServeMux()
 	limiter := middleware.NewRateLimiter(rateLimitPerSecond, rateLimitBurst)
+	var verifyIssued middleware.TokenVerifier
+	if signer != nil {
+		verifyIssued = func(credential string) error {
+			_, err := signer.Verify(credential)
+			return err
+		}
+	}
 	withAuth := func(h http.Handler) http.Handler {
-		return middleware.Auth(token, h)
+		return middleware.AuthWithExchange(token, verifyIssued, h)
 	}
 	withLog := func(h http.Handler) http.Handler {
 		return middleware.Logging(deps.Logger, cfg.Debug, h)
@@ -82,6 +111,18 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	runQueryHandler := handlers.NewRunSavedQueryHandler(deps.QueryStore, queryRunner)
 
 	mux.Handle("GET /api/health", wrap(healthHandler))
+
+	// "Is the service up and is my credential good" — deliberately no database
+	// touch, unlike /api/health. Always registered: an operator checking a
+	// connection needs it whichever credential they use.
+	mux.Handle("GET /api/ping", wrap(handlers.NewPingHandler()))
+
+	if signer != nil {
+		// The credential exchange cannot itself require a credential. It is
+		// still logged and rate-limited.
+		mux.Handle("POST /auth/token", withLog(limiter.Middleware(
+			handlers.NewTokenHandler(cfg.Auth, signer, deps.Logger))))
+	}
 
 	// Saved queries: the only SQL entry point. The backend registers queries
 	// via CRUD and executes them by name — raw SQL is never accepted.

@@ -63,16 +63,16 @@ func mustServer(t *testing.T, cfg config.Config) *http.Server {
 	return srv
 }
 
-// The legacy compatibility surface is gone: these routes must not exist, and a
-// request to one has to 404 rather than reach a handler.
+// Most of the legacy compatibility surface stays gone. `/auth/token` and
+// `/api/ping` came back as supported features (auth_exchange_test.go); these did
+// not, and `/api/query` in particular must never return — the backend team asked
+// for that explicitly.
 func TestLegacyRoutesAreGone(t *testing.T) {
 	cfg := config.Default()
 	cfg.BearerToken = testStaticToken
 	h := mustServer(t, cfg).Handler
 
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodPost, "/auth/token"},
-		{http.MethodGet, "/api/ping"},
 		{http.MethodPost, "/api/test-connection"},
 		{http.MethodGet, "/api/customers"},
 		{http.MethodGet, "/api/orders/1"},
@@ -90,8 +90,8 @@ func TestLegacyRoutesAreGone(t *testing.T) {
 	}
 }
 
-// Only the static token authenticates now. Anything that merely looks like a JWT
-// must be rejected like any other wrong credential.
+// With the exchange disabled, only the static token authenticates. Anything that
+// merely looks like a JWT must be rejected like any other wrong credential.
 func TestOnlyTheStaticTokenAuthenticates(t *testing.T) {
 	cfg := config.Default()
 	cfg.BearerToken = testStaticToken

@@ -15,6 +15,7 @@ import (
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
@@ -34,6 +35,14 @@ type mainForm struct {
 	apiListenEdit   *walk.LineEdit
 	debugCheck      *walk.CheckBox
 	bearerTokenEdit *walk.LineEdit
+
+	authEnabledCheck *walk.CheckBox
+	authFields       *walk.Composite
+	authUserEdit     *walk.LineEdit
+	authPassEdit     *walk.LineEdit
+	authSecretEdit   *walk.LineEdit
+	authTTLEdit      *walk.LineEdit
+	authShowCheck    *walk.CheckBox
 
 	driverCombo *walk.ComboBox
 	hostEdit    *walk.LineEdit
@@ -87,6 +96,57 @@ func newMainForm(cfg config.Config, logSvc logger.LoggerService) (*mainForm, err
 						Children: []Widget{
 							LineEdit{AssignTo: &f.bearerTokenEdit},
 							PushButton{Text: "Generate key", OnClicked: f.onGenerateToken},
+						},
+					},
+
+					// ── Credential exchange ───────────────────────────────
+					// A second, optional credential: callers POST a username
+					// and password to /auth/token and get a short-lived token
+					// back. Backends that authenticate this way share those
+					// fields with other integrations and cannot simply be
+					// repointed at the bearer token above.
+					//
+					// The credentials are set here, per installation. Nothing
+					// is shipped: the predecessor's fixed password and
+					// source-embedded signing secret are exactly what this
+					// replaces.
+					HSeparator{},
+					Label{Text: "Credential exchange (POST /auth/token)"},
+					CheckBox{
+						AssignTo:         &f.authEnabledCheck,
+						Text:             "Enabled — also issue tokens in exchange for a username and password",
+						OnCheckedChanged: f.onAuthEnabledChanged,
+					},
+					Composite{
+						AssignTo: &f.authFields,
+						Layout:   VBox{MarginsZero: true},
+						Children: []Widget{
+							Label{Text: "These must match what the calling backend is configured with:"},
+							Label{Text: "Username"},
+							LineEdit{AssignTo: &f.authUserEdit},
+							Label{Text: "Password"},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									LineEdit{AssignTo: &f.authPassEdit, PasswordMode: true},
+									PushButton{Text: "Generate", OnClicked: f.onGenerateAuthPassword},
+								},
+							},
+							Label{Text: "Signing secret (unique to this install; changing it invalidates issued tokens)"},
+							Composite{
+								Layout: HBox{MarginsZero: true},
+								Children: []Widget{
+									LineEdit{AssignTo: &f.authSecretEdit, PasswordMode: true},
+									PushButton{Text: "Regenerate", OnClicked: f.onGenerateAuthSecret},
+								},
+							},
+							Label{Text: "Token lifetime (e.g. 30m, 1h; blank = 30m)"},
+							LineEdit{AssignTo: &f.authTTLEdit},
+							CheckBox{
+								AssignTo:         &f.authShowCheck,
+								Text:             "Show password and secret",
+								OnCheckedChanged: f.onAuthShowChanged,
+							},
 						},
 					},
 
@@ -207,6 +267,7 @@ func (f *mainForm) populateFromConfig(cfg config.Config) {
 		}
 	}
 
+	f.populateAuth(cfg.Auth)
 	f.updateSendOrderVisibility(cfg.ERP)
 }
 
@@ -285,4 +346,63 @@ func (f *mainForm) setStatus(text string) {
 func (f *mainForm) finish(text string) {
 	f.busy = false
 	f.setStatus(text)
+}
+
+// populateAuth fills the credential-exchange widgets.
+//
+// The password and secret live in config.yaml in the clear, so showing them
+// reveals nothing that opening the file would not — and being able to read them
+// back is how an operator confirms the calling backend was given the right
+// values. They start masked all the same, because this window is often open on a
+// shared screen.
+func (f *mainForm) populateAuth(a config.AuthConfig) {
+	f.authEnabledCheck.SetChecked(a.Enabled)
+	f.authUserEdit.SetText(a.Username)
+	f.authPassEdit.SetText(a.Password)
+	f.authSecretEdit.SetText(a.Secret)
+	f.authTTLEdit.SetText(a.TokenTTL)
+	f.authShowCheck.SetChecked(false)
+	f.onAuthShowChanged()
+	f.updateAuthFieldsEnabled(a.Enabled)
+}
+
+// onAuthEnabledChanged greys the fields out when the exchange is off, so
+// credentials that are configured but inactive cannot read as active ones.
+func (f *mainForm) onAuthEnabledChanged() {
+	f.updateAuthFieldsEnabled(f.authEnabledCheck.Checked())
+}
+
+func (f *mainForm) updateAuthFieldsEnabled(enabled bool) {
+	f.authFields.SetEnabled(enabled)
+}
+
+func (f *mainForm) onAuthShowChanged() {
+	masked := !f.authShowCheck.Checked()
+	f.authPassEdit.SetPasswordMode(masked)
+	f.authSecretEdit.SetPasswordMode(masked)
+}
+
+// onGenerateAuthPassword produces a random password rather than letting an
+// operator invent one — installations that pick their own tend to pick the same.
+func (f *mainForm) onGenerateAuthPassword() {
+	pw, err := auth.NewPassword()
+	if err != nil {
+		f.setStatus("Failed to generate a password: " + err.Error())
+		return
+	}
+	f.authPassEdit.SetText(pw)
+	f.setStatus("New password generated — give it to the calling backend before restarting the service.")
+}
+
+// onGenerateAuthSecret replaces this installation's signing secret. Every token
+// already issued stops verifying, which callers recover from by re-authenticating
+// on the 401 — so it is safe, but it is not silent.
+func (f *mainForm) onGenerateAuthSecret() {
+	secret, err := auth.NewSecret()
+	if err != nil {
+		f.setStatus("Failed to generate a signing secret: " + err.Error())
+		return
+	}
+	f.authSecretEdit.SetText(secret)
+	f.setStatus("New signing secret generated — tokens already issued will be rejected until callers re-authenticate.")
 }

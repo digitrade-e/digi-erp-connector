@@ -41,13 +41,21 @@ db:
     database: BFL
     encrypt: true
     trustServerCertificate: true
+auth:
+    enabled: true
+    username: bfl-reads
+    password: <operator-set>
+    secret: <64 hex chars, generated on first start>
+    tokenTTL: 30m
 queries:
     timeoutSeconds: 30
     maxRows: 100000
 ```
 
 A fresh install is much smaller: `erp`, `apiListen`, `bearerToken`, the `db`
-block, and nothing else.
+block, and nothing else. The `auth` block is shown because BFL's backend
+authenticates with a username and password — it is what that box will run once
+the exchange ships; leave it out unless a caller needs it.
 
 ## Top level
 
@@ -132,6 +140,38 @@ the minimum version.
 
 Configure this whenever `apiListen` is not a loopback address; see
 [security.md](security.md#tls) for generating a certificate.
+
+## `auth`
+
+The optional credential exchange at `POST /auth/token`, for backends that
+authenticate with a username and password rather than a static token. Absent or
+`enabled: false` means the route does not exist and only `bearerToken`
+authenticates. Full description in [authentication.md](authentication.md).
+
+```yaml
+auth:
+    enabled: true
+    username: bfl-reads
+    password: <operator-set; generate it>
+    secret: <64 hex chars; the daemon writes this on first start>
+    tokenTTL: 30m
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Register `POST /auth/token`. Tokens it issues are accepted alongside `bearerToken`. |
+| `username` | — | **Required when enabled.** Operator-set; there is exactly one account. |
+| `password` | — | **Required when enabled.** Operator-set — use the GUI's *Generate*, or `cutover-seed -auth-user`. |
+| `secret` | generated | HS256 signing key, 32 random bytes hex. Written by the daemon on first start if blank. Changing it invalidates every issued token. |
+| `tokenTTL` | `30m` | Go duration. A malformed value falls back to the default rather than failing startup; the GUI refuses to save one. |
+
+`enabled: true` with a blank `username` or `password` **stops the service** — the
+same reasoning as the `tls` pair above. An exchange that accepts blanks is worse
+than no exchange.
+
+The password and the secret sit in `config.yaml` in the clear, protected only by
+its 0600 mode. That is deliberate: the operator has to read the password back to
+give it to the calling backend.
 
 ## `queries`
 

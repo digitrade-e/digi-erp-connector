@@ -1,6 +1,10 @@
 package config
 
-import "strings"
+import (
+	"errors"
+	"strings"
+	"time"
+)
 
 type ERPType string
 type DBDriver string
@@ -49,6 +53,85 @@ func (t TLSConfig) Enabled() bool {
 	return strings.TrimSpace(t.CertFile) != "" || strings.TrimSpace(t.KeyFile) != ""
 }
 
+// AuthConfig enables the credential exchange at POST /auth/token: a caller
+// posts a username and password and receives a short-lived HS256 token, which it
+// then presents as a bearer token like any other.
+//
+// This exists because backends that predate the static token authenticate this
+// way, and their credential fields are shared with other integrations, so they
+// cannot simply be repointed. It is a supported feature, not a compatibility
+// shim — but the static bearer token remains the simpler credential and the one
+// to prefer for anything new.
+//
+// The two weaknesses of the scheme it replaces are fixed here:
+//   - Secret is generated per installation and never has a default. A constant
+//     compiled into the binary would let anyone with the source mint tokens.
+//   - Username and Password are set by the operator, not shipped.
+type AuthConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	// Secret signs issued tokens. Generated on first run if empty; changing it
+	// invalidates every token already issued, which callers recover from by
+	// re-authenticating on the 401.
+	Secret string `yaml:"secret"`
+	// TokenTTL is a Go duration ("30m", "1h"). Empty means DefaultTokenTTL.
+	TokenTTL string `yaml:"tokenTTL,omitempty"`
+}
+
+// Validate reports why this block cannot be used, so the daemon refuses to start
+// and the GUI refuses to save rather than exposing an exchange that accepts
+// blank credentials.
+//
+// Both callers share this one function: a check that lives in only one of them
+// is a check the other can walk past.
+//
+// Secret is not required here — the daemon generates one on first run — but the
+// server checks it separately, because by the time it builds a signer a missing
+// secret means generation failed.
+func (a AuthConfig) Validate() error {
+	if !a.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(a.Username) == "" || strings.TrimSpace(a.Password) == "" {
+		return errors.New("auth.enabled requires auth.username and auth.password")
+	}
+	return nil
+}
+
+// TokenTTLValid reports whether TokenTTL parses. TTL falls back silently on a
+// malformed value so a typo cannot take a running installation offline; this
+// exists for the GUI, where the same typo can be pointed at while the operator
+// is still in front of the field.
+func (a AuthConfig) TokenTTLValid() bool {
+	t := strings.TrimSpace(a.TokenTTL)
+	if t == "" {
+		return true
+	}
+	d, err := time.ParseDuration(t)
+	return err == nil && d > 0
+}
+
+// DefaultTokenTTL matches what callers of this exchange have historically
+// assumed. Note a caller may cache the token past its expiry and only
+// re-authenticate when a request is rejected, so this bounds damage rather than
+// controlling refresh timing.
+const DefaultTokenTTL = 30 * time.Minute
+
+// TTL returns the configured token lifetime, or the default when unset or
+// unparseable. Malformed values fall back rather than failing startup: a typo
+// here must not take an installation offline.
+func (a AuthConfig) TTL() time.Duration {
+	if strings.TrimSpace(a.TokenTTL) == "" {
+		return DefaultTokenTTL
+	}
+	d, err := time.ParseDuration(a.TokenTTL)
+	if err != nil || d <= 0 {
+		return DefaultTokenTTL
+	}
+	return d
+}
+
 // QueriesConfig tunes execution of saved queries (the /api/sqlqueries runner).
 type QueriesConfig struct {
 	TimeoutSeconds int `yaml:"timeoutSeconds,omitempty"` // 0 → default (30s)
@@ -78,6 +161,7 @@ type Config struct {
 	HasBatFile string        `yaml:"hasBatFile"`
 	DB         DBConfig      `yaml:"db"`
 	TLS        TLSConfig     `yaml:"tls"`
+	Auth       AuthConfig    `yaml:"auth"`
 	Queries    QueriesConfig `yaml:"queries"`
 }
 

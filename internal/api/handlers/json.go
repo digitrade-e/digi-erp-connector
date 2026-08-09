@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -56,4 +57,11 @@ func ensureEOF(dec *json.Decoder) error {
 // badJSONRequest reports an unparseable body in the native error shape.
 func badJSONRequest(w http.ResponseWriter) {
 	respond.Error(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON", nil)
+}
+
+// constantTimeEqual compares two credential strings without leaking their
+// contents through timing. Length differs first, which is unavoidable and not
+// sensitive here.
+func constantTimeEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }

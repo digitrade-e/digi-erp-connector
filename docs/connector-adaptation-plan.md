@@ -5,6 +5,13 @@
 **Status:** reply to [erp-manager-migration-plan.md](erp-manager-migration-plan.md), which asked
 erp-manager to move to a static API token. We are not doing that in this window.
 
+> **Connector side: §3 and §4 are implemented** on branch `feature/auth-exchange`
+> (2026-08-09). R1–R6 are covered and pinned by `internal/api/auth_exchange_test.go`;
+> `POST /api/query` was not reintroduced. The resulting feature is documented in
+> [authentication.md](authentication.md). Still open: the §6 rollout — new credentials
+> generated on the box, sent out of band, and ClientConnection rows 67 and 76 updated —
+> and only then a release and a deploy. b4l stays on 1.0.4 until all of that is done.
+
 **The answer in one line:** the wire protocol was never the problem — the *credentials* were.
 Keep `POST /auth/token` and make it a first-class feature with per-install, operator-generated
 credentials and a per-install signing secret. Same protocol, both real weaknesses gone, and

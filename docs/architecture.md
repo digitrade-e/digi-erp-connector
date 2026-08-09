@@ -50,9 +50,15 @@ Every route is wrapped in the same chain, outermost first
 request
   └─ Logging      method, path, status, duration — never the token or DB password
       └─ RateLimit  per-IP token bucket, 25 rps / burst 50 → 429 RATE_LIMITED
-          └─ Auth     static bearer token, constant-time compare → 401 UNAUTHORIZED
+          └─ Auth     static bearer token OR an issued token → 401 UNAUTHORIZED
               └─ handler
 ```
+
+`POST /auth/token` is the one route outside the Auth step — it *is* the
+credential check — but it keeps Logging and RateLimit. The Auth step compares the
+presented credential against `bearerToken` in constant time and, if the exchange
+is enabled, verifies it as an HS256 token; either match authenticates, and every
+failure is the same flat 401.
 
 Rate limiting sits **before** auth deliberately: an unauthenticated flood is
 exactly what you want to shed cheaply, and it means brute-forcing the token is
@@ -73,7 +79,7 @@ cmd/
 internal/
   api/                   HTTP server, route table, middleware chain
     handlers/            one file per endpoint group; json.go holds the shared decoder
-    middleware/          auth (static bearer token), rate limit, logging
+    middleware/          auth (static token or issued token), rate limit, logging
     respond/             the single JSON error envelope
     dto/                 request/response structs per endpoint
   queries/               THE data-access model: store, binder, runner
@@ -81,6 +87,7 @@ internal/
     hasavshevet/         order pipeline (IMOVEIN, queue, order numbers), price/stock procs
     sap/                 SAP B1 price/stock (one large CTE)
     types.go             the ERP-neutral price/stock request and result
+  auth/                  HS256 sign/verify for the credential exchange, no deps
   config/                config model + atomic YAML load/save
   db/                    MSSQL DSN construction, pool, ping
   files/                 allow-list + traversal defence for image folders

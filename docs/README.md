@@ -17,6 +17,7 @@
 | run the database and the ERP folder on different servers | [deployment-topologies.md](deployment-topologies.md) |
 | understand price/stock per ERP | [price-and-stock.md](price-and-stock.md) |
 | send orders into Hasavshevet | [hasavshevet-send-order.md](hasavshevet-send-order.md) |
+| set up or debug the API credentials | [authentication.md](authentication.md) |
 | review the security posture | [security.md](security.md) |
 | lock down the SQL login the connector uses | [../scripts/sql/](../scripts/sql/) + [security.md](security.md) |
 | set up service auto-start | [autostart.md](autostart.md) |
@@ -27,6 +28,7 @@
 
 - [api.md](api.md) — routes, request/response bodies, the complete error-code table
 - [erp-manager-integration.md](erp-manager-integration.md) — the backend contract: the six calls erp-manager makes, the credentials it sends, the response shapes it depends on, and what fails silently
+- [authentication.md](authentication.md) — the two credentials, the `POST /auth/token` exchange, the `auth:` block, rollout order and verification
 - [configuration.md](configuration.md) — every `config.yaml` key, defaults, secrets, file layout
 - [saved-queries.md](saved-queries.md) — the data-access model: CRUD, parameter binding, execution limits, trust model
 - [price-and-stock.md](price-and-stock.md) — `POST /api/priceAndStockHandler` per ERP

@@ -146,7 +146,9 @@ each other's `IMOVEIN.doc`. Only the write node gets a `sendOrderDir`.
 **Send every order to the same node.** The single-worker queue serialises orders
 within a process; it cannot serialise across machines.
 
-**Each node gets its own bearer token.** They are separate installations.
+**Each node gets its own credentials.** They are separate installations, so the
+bearer token and any credential-exchange username/password/secret differ per
+node. On BFL that is two ClientConnection rows with two sets of values.
 
 **Only the write node needs the stored procedures**… actually it does not: the
 procedures serve price/stock, which the read node handles. The GUI attempts to

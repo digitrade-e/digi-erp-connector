@@ -14,7 +14,8 @@ func okHandler() http.Handler {
 }
 
 func TestAuth(t *testing.T) {
-	h := Auth("secret-token", okHandler())
+	// A nil verifier is the static-token-only configuration: the exchange is off.
+	h := AuthWithExchange("secret-token", nil, okHandler())
 
 	tests := []struct {
 		name   string

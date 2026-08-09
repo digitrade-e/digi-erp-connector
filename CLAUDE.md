@@ -37,6 +37,7 @@ internal/
     server.go           ← HTTP mux, route registration, rate limiter, timeouts
     handlers/           ← One handler per endpoint
       health.go         ← GET /api/health
+      auth.go           ← POST /auth/token (credential exchange), GET /api/ping
       custom_sql.go     ← Saved-query CRUD (/api/custom_sql...)
       sql_queries.go    ← GET /api/sqlqueries/{name} (saved-query runner)
       folders.go        ← GET /api/folders/list
@@ -45,16 +46,17 @@ internal/
       send_order.go     ← POST /api/sendOrder (async queue)
       send_order_status.go ← GET /api/sendOrder/{jobId}
     middleware/
-      auth.go           ← Bearer token validation (constant-time compare)
+      auth.go           ← Bearer credential validation: static token (constant-time)
+                          or a token issued by the exchange
       ratelimit.go      ← Per-IP token bucket (429 RATE_LIMITED)
       logging.go        ← Request/response logging (no secrets)
     respond/            ← JSON / Error — the one error envelope
-    middleware/auth.go  ← static bearer token only (constant-time compare)
     dto/                ← Request/response structs per endpoint
   queries/              ← Saved-query subsystem (THE data-access model)
     store.go            ← JSON registry (queries.json, atomic writes, mutex)
     binder.go           ← Param binding: forced strings, type inference, int hints
     runner.go           ← Execution: timeout, row cap, multi-recordset, DML exec
+  auth/                 ← HS256 sign/verify + secret/password generation (no deps)
   config/               ← YAML config (atomic write, 0o600)
   db/                   ← MSSQL pool
   erp/hasavshevet/      ← Complete order pipeline (IMOVEIN, queue, GPRICE)
@@ -70,11 +72,13 @@ internal/
 
 Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/). Linux: `/etc/digi-erp-connector/`.
 
-## API endpoints (all require `Authorization: Bearer <token>`; all rate-limited)
+## API endpoints (all `/api/*` require `Authorization: Bearer <credential>`; all rate-limited)
 
 | Route | Method | What it does |
 |-------|--------|--------------|
+| `/auth/token` | POST | **Unauthenticated** (it is the credential check). Username+password → short-lived token. Only registered when `auth.enabled`. |
 | `/api/health` | GET | Pings DB; `{"status":"ok"}` or 503 |
+| `/api/ping` | GET | Liveness + credential check; **no DB touch**. `{"ok":true,"ts":<epoch ms>}` |
 | `/api/custom_sql` | POST | Create saved query `{name, description, sql, params}` (409 on duplicate) |
 | `/api/create_custom_sql` | POST | Legacy alias of the above (electron-mssql-app compat) |
 | `/api/custom_sql` | GET | List saved queries |
@@ -104,7 +108,16 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 
 ## Authentication
 
-All routes: `middleware/auth.go` validates `Authorization: Bearer <token>` against config `BearerToken` using `subtle.ConstantTimeCompare`. Token never logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
+Two credentials, both presented as `Authorization: Bearer <credential>`, both granting the same access. `middleware/auth.go` compares against config `BearerToken` with `subtle.ConstantTimeCompare` first, then — when the exchange is enabled — verifies the credential as a token this installation signed. Every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
+
+`POST /auth/token` (config block `auth:`) exchanges a username and password for a short-lived HS256 token. It is optional and off by default; when disabled the route does not exist. Hard rules:
+
+- **No credential may ever have a default.** Username and password are operator-set; the signing secret is 32 random bytes generated on first run and saved to config.yaml. The Node app this replaced shipped `digitrade`/`123456` and a secret in its source — a test asserts those exact credentials are rejected.
+- **Rejections are exactly 401**, never 403 and never 500. erp-manager re-authenticates on 401 and on nothing else; any other status turns a self-healing hiccup into a dead connection.
+- **Success is exactly 200 with `access_token` present.** A caller treats anything else as failure, and stores a missing `access_token` as null.
+- `auth.enabled` with a blank username or password **stops the daemon and is refused by the GUI** (`config.AuthConfig.Validate`, called from both).
+
+Full details: `docs/authentication.md`. The contract is pinned by `internal/api/auth_exchange_test.go` — those tests exist because a live backend breaks in production when any of it drifts.
 
 ## Hasavshevet send-order flow
 
@@ -117,7 +130,7 @@ All routes: `middleware/auth.go` validates `Authorization: Bearer <token>` again
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.
-Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`, `cmd/digi-erp-connector/form_config_test.go` (the GUI's save-time guards — `//go:build windows`, so it runs in CI and on a Windows box, not on Linux).
+Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`, `internal/api/auth_exchange_test.go` (the credential-exchange contract: 200-with-access_token, dual acceptance, exactly-401, shipped defaults rejected, ping, and that `/api/query` stays 404), `internal/config/auth_test.go` (the shared save-time/startup guard).
 
 ## Build
 
@@ -163,10 +176,13 @@ production backend. Covered by `queries/normalize_test.go`:
 
 ## Prohibited (zero exceptions)
 
-- Adding any endpoint that executes SQL text straight from a request body (the
-  config-gated, read-only-validated `POST /api/query` compat route is the sole
-  pre-existing exception — do not add another, do not widen it)
-- Storing secrets in logs (DB password, bearer token, credentials)
+- Adding any endpoint that executes SQL text straight from a request body. There
+  is no longer an exception: `POST /api/query` was deleted on 2026-08-09 and the
+  backend team explicitly asked that it not come back. A test asserts it 404s.
+- Shipping a default for any credential — username, password, or signing secret.
+  Generate them; never compile one in.
+- Storing secrets in logs (DB password, bearer token, exchange credentials, token
+  contents)
 - Disabling auth or rate limiting "for testing" on any route
 - Returning raw DB driver errors to API clients
 - Absolute-path `fileName` values in the file endpoint

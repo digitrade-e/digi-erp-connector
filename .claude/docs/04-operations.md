@@ -73,11 +73,25 @@ the electron-mssql-app connector here on 2026-08-05 16:35.
 - DB: `localhost:1433/BFL`, user `sa`, `encrypt: true` +
   `trustServerCertificate: true` (local self-signed cert — both are required,
   they mirror the old app's connection settings).
-- The legacy compatibility layer (/auth/token, /api/ping, /api/query and the two
-  sample routes) was deleted from the codebase on 2026-08-09. The box still runs
-  an older build that has it; the new build must not be deployed until
-  erp-manager sends the static bearer token. Handover:
-  `docs/erp-manager-migration-plan.md`.
+- **Auth status (2026-08-09, read this before deploying anything here).** The
+  legacy compatibility layer was deleted from the codebase that morning; later
+  the same day erp-manager declined the static-token migration, and `/auth/token`
+  and `/api/ping` were restored on branch `feature/auth-exchange` as a
+  first-class `auth:` config block — per-install credentials, per-install signing
+  secret. `/api/query` and the sample routes stayed deleted.
+
+  The box still runs **1.0.4**, which has the old layer with the shipped
+  `digitrade`/`123456`. Keep it there. Nothing newer may be installed until:
+  1. the exchange branch is merged and released, **and**
+  2. the operator has generated this box's credentials and sent them out of
+     band, **and**
+  3. erp-manager has updated ClientConnection rows 67 (`:8082`) and 76 (`:8083`,
+     BFL-SendOrders) with them.
+
+  Deploying before step 3 gives BFL blank screens — the backend authenticates
+  with the old fixed credentials and gets 401. Releases v1.0.5–v1.0.10 have no
+  `/auth/token` at all and would break the box outright.
+  Background: `docs/connector-adaptation-plan.md`, `docs/authentication.md`.
 - `queries.maxRows: 100000`, not the 10000 default: the `IndividualProductList`
   saved query legitimately returns 16183 rows and the old connector had no cap.
   Lowering it back to 10000 will make that query fail with 413.
@@ -109,10 +123,13 @@ timestamp the only difference.
 
 Rollback options, in order of preference:
 
-1. re-install a previous release. Note the direction changed on 2026-08-09:
-   releases from v1.0.4 to v1.0.10 CONTAIN the legacy layer, and anything after it
-   does not. Before the backend migrates, roll back to one that has it; after the
-   backend migrates, roll forward only.
+1. re-install a previous release. Mind which era it comes from:
+   - **up to v1.0.4** — has `/auth/token` with the old shipped credentials. This
+     is what the box runs and the only safe target today.
+   - **v1.0.5 – v1.0.10** — no `/auth/token` at all. Installing one of these
+     breaks BFL immediately. Do not use them as a rollback target.
+   - **after the exchange ships** — has `/auth/token` with per-install
+     credentials. Safe only once the ClientConnection rows carry them.
 2. `install-backup-1.0.4\*.before-1.0.4` — the binaries running before the
    installer (same code, locally built)
 3. `deploy-backup-2026-08-05-refactor\*.previous` — the cutover build
@@ -174,11 +191,14 @@ Saved queries were re-imported from the live `custom_sql_data.json` at cutover
 ```powershell
 # who serves 8082
 Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 8082
-# legacy JWT flow + health (JSON bodies must go through a file: PowerShell 5.1
+# credential exchange + health (JSON bodies must go through a file: PowerShell 5.1
 # strips double quotes when passing strings to native exes)
+# on 1.0.4 the credentials are still digitrade/123456; after the exchange ships
+# they are whatever this box was provisioned with.
 '{"username":"digitrade","password":"123456"}' | Set-Content "$env:TEMP\b.json" -Encoding ascii -NoNewline
 curl.exe -s -X POST http://127.0.0.1:8082/auth/token -H 'Content-Type: application/json' --data-binary "@$env:TEMP\b.json"
-curl.exe -s http://127.0.0.1:8082/api/health -H "Authorization: Bearer <token>"
-# is the backend still using the legacy surface?
-Select-String -Path C:\ProgramData\digi-erp-connector\server.log -Pattern 'legacy-compat route used'
+curl.exe -s http://127.0.0.1:8082/api/ping   -H "Authorization: Bearer <token>"   # no DB touch
+curl.exe -s http://127.0.0.1:8082/api/health -H "Authorization: Bearer <token>"   # pings the DB
+# who is failing to authenticate, and with which username
+Select-String -Path C:\ProgramData\digi-erp-connector\server.log -Pattern 'rejected /auth/token'
 ```

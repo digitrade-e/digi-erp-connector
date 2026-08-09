@@ -5,9 +5,13 @@ Base URL: `http(s)://<apiListen>` (default `127.0.0.1:8080`). HTTP by default;
 whenever the backend is on another machine — see
 [configuration.md](configuration.md#tls) and [security.md](security.md).
 
-Every `/api/*` route requires `Authorization: Bearer <token>` and is rate-limited
-per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate limiting is applied
-**before** authentication.
+Every `/api/*` route requires `Authorization: Bearer <credential>` and is
+rate-limited per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate
+limiting is applied **before** authentication.
+
+Two credentials are accepted and behave identically: the static `bearerToken`,
+and a token obtained from `POST /auth/token` when the credential exchange is
+enabled. See [authentication.md](authentication.md).
 
 Errors are always `{ "error": "<message>", "code": "<CODE>", "details": {} }`.
 Branch on `code`, not on the message — messages may be reworded, codes are stable.
@@ -17,13 +21,27 @@ is rejected), and driver errors are never returned to callers.
 
 ## Contents
 
-- [Health](#health) · [Saved queries](#saved-queries) · [Files](#files) ·
+- [Authentication](#authentication) · [Health](#health) ·
+  [Saved queries](#saved-queries) · [Files](#files) ·
   [Orders](#orders-hasavshevet) · [Price & stock](#price--stock) ·
   [Error codes](#error-code-reference)
 
+## Authentication
+
+`POST /auth/token` → `200 {"access_token":"…","token_type":"Bearer","expires_in":1800}`
+
+Body `{"username","password"}`. Registered only when `auth.enabled` is true —
+otherwise `404`. Unauthenticated (it is the credential check) but rate-limited.
+Anything wrong is `401 INVALID_CREDENTIALS`; a malformed body is not
+distinguished from wrong credentials.
+
 ## Health
 
-`GET /api/health` → `{"status":"ok"}` | `503 DB_UNAVAILABLE`
+`GET /api/health` → `{"status":"ok"}` | `503 DB_UNAVAILABLE` — pings the database.
+
+`GET /api/ping` → `{"ok":true,"ts":1786283101465}` — **no database touch**. Use it
+to check that the service is up and a credential is valid; use `/api/health` when
+you also want the database checked. `ts` is epoch milliseconds.
 
 ## Saved queries
 
@@ -66,7 +84,9 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 
 | Code | Status | Meaning |
 |---|---|---|
-| `UNAUTHORIZED` | 401 | Missing, malformed or wrong bearer token. No distinction between the cases, by design. |
+| `UNAUTHORIZED` | 401 | Missing, malformed, wrong or expired credential. No distinction between the cases, by design. |
+| `INVALID_CREDENTIALS` | 401 | `POST /auth/token` refused the username/password, or could not parse the body. |
+| `TOKEN_ISSUE_FAILED` | 500 | Credentials were right but signing the token failed. No known trigger. |
 | `RATE_LIMITED` | 429 | Per-IP bucket exhausted. Applied before auth. |
 | `NOT_FOUND` | 404 | Unknown route, saved query, or job id. |
 | `INVALID_JSON` | 400 | Unparseable body, or trailing data after the JSON document. |

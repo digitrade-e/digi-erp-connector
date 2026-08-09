@@ -257,3 +257,51 @@ production, so "no log lines" was never evidence of "no callers"; the source
 review was.
 
 Handover for the backend developer: `docs/erp-manager-migration-plan.md`.
+
+## 15. The credential exchange came back as a first-class feature (2026-08-09)
+
+erp-manager declined the static-token migration proposed in decision 14, and the
+reason was good: the `authLogin`/`authPassword`/`authEndpoint` fields on
+`ClientConnection` are shared with four other ERP integrations, so deleting them
+is not a change to one code path. Their reply is `docs/connector-adaptation-plan.md`;
+the connector adapts instead.
+
+`POST /auth/token` and `GET /api/ping` are therefore back — but not as the
+compatibility layer that was deleted. What was actually wrong with the old
+implementation was never the protocol:
+
+| Old (electron / legacyCompat) | Now |
+|---|---|
+| `digitrade` / `123456` shipped in source | operator-set, per install; the old pair is rejected and a test says so |
+| signing secret constant in source | 32 random bytes generated on first start, saved to config.yaml |
+| a "legacy compatibility" section in the GUI | a **Credential exchange** section, documented as supported |
+| enabled by default for compat | off by default; when off the route does not exist |
+
+So the deletion in decision 14 was still right — it removed the credentials.
+Restoring the protocol without them costs about 200 lines and closes the actual
+hole: one leaked copy of the old source minted tokens for every customer.
+
+Three choices worth recording:
+
+**Dual acceptance stays.** The static bearer token and an issued token both
+authenticate every route. That is what makes the eventual static-token migration
+a configuration change on erp-manager's side rather than a synchronised deploy.
+
+**Exactly 401, exactly 200.** erp-manager re-authenticates on 401 and on nothing
+else, and treats any non-200 from the exchange as a login failure. Both are
+pinned by tests in `internal/api/auth_exchange_test.go`, with the failure mode
+written next to each assertion, because they read like style preferences and are
+not.
+
+**One validation function for two callers.** `config.AuthConfig.Validate` is
+called by `api.NewServer` and by the GUI's `readFormConfig`. The house rule says
+the GUI must not be able to save a config the daemon refuses to start on; a check
+duplicated in both places is a check that will drift.
+
+`POST /api/query` stayed deleted — the backend team asked for that explicitly.
+
+Rollout has an order that matters: the operator sets the credentials, sends them
+out of band, erp-manager updates ClientConnection rows 67 (`:8082`) and 76
+(`:8083`, BFL-SendOrders), **and only then** is the connector deployed. Reversed,
+BFL's screens go blank until the rows catch up. Until it ships, b4l stays on
+1.0.4 — an installer without `/auth/token` breaks that box.
