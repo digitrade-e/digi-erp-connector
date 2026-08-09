@@ -13,6 +13,7 @@
 | work out why something is broken | [troubleshooting.md](troubleshooting.md) |
 | change the code | [development.md](development.md) + [../CLAUDE.md](../CLAUDE.md) |
 | migrate the backend off the old login/password auth | [erp-manager-migration-plan.md](erp-manager-migration-plan.md) |
+| know what the backend needs back before a release can ship | [connector-adaptation-plan.md](connector-adaptation-plan.md) |
 | run the database and the ERP folder on different servers | [deployment-topologies.md](deployment-topologies.md) |
 | understand price/stock per ERP | [price-and-stock.md](price-and-stock.md) |
 | send orders into Hasavshevet | [hasavshevet-send-order.md](hasavshevet-send-order.md) |
@@ -44,6 +45,7 @@
 - [troubleshooting.md](troubleshooting.md) — symptom → cause → fix, and where the logs are
 - [autostart.md](autostart.md) — Windows service registration
 - [erp-manager-migration-plan.md](erp-manager-migration-plan.md) — handover for the backend developer: switching to the static API token
+- [connector-adaptation-plan.md](connector-adaptation-plan.md) — the backend's reply: what this connector must restore before a build is deployable, and how to fix the credentials without deleting the protocol
 - [erp-manager-integration.md](erp-manager-integration.md) — how the live backend calls this connector
 
 ## Project history and decisions

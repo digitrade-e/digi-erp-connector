@@ -1,5 +1,13 @@
 # Migration plan for the erp-manager developer
 
+> **Answered, and declined for this window (2026-08-09).** erp-manager is not moving to a
+> static API token yet: §4 asks for the removal of `ClientConnection` fields that four other
+> ERP services share, so it has to be additive, which makes it a cross-plane project rather
+> than a same-day change. The reply — what the connector must restore before any build is
+> deployable, and how to fix the credentials without deleting the protocol — is
+> [connector-adaptation-plan.md](connector-adaptation-plan.md). Read that first. §7's
+> verification checklist and §8's "what is NOT changing" list remain valid.
+
 **Audience:** whoever maintains erp-manager (and the client-instance B2B backend).
 **Goal:** stop authenticating with a login and password, start sending a static
 API token, over HTTPS.
