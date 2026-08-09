@@ -6,6 +6,7 @@
 |---|---|
 | understand how the whole thing works | [architecture.md](architecture.md) |
 | call the API from the backend | [api.md](api.md), then [saved-queries.md](saved-queries.md) |
+| know what erp-manager actually sends and expects | [erp-manager-integration.md](erp-manager-integration.md) |
 | register or change a SQL query | [saved-queries.md](saved-queries.md) |
 | install, upgrade or roll back a customer machine | [operations.md](operations.md) |
 | configure a machine (every key explained) | [configuration.md](configuration.md) |
@@ -23,6 +24,7 @@
 **Reference**
 
 - [api.md](api.md) — routes, request/response bodies, the complete error-code table
+- [erp-manager-integration.md](erp-manager-integration.md) — the backend contract: the six calls erp-manager makes, the credentials it sends, the response shapes it depends on, and what fails silently
 - [configuration.md](configuration.md) — every `config.yaml` key, defaults, secrets, file layout
 - [saved-queries.md](saved-queries.md) — the data-access model: CRUD, parameter binding, execution limits, trust model
 - [price-and-stock.md](price-and-stock.md) — `POST /api/priceAndStockHandler` per ERP

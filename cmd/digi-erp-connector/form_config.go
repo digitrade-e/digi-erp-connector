@@ -28,9 +28,10 @@ const procedureSetupTimeout = 12 * time.Second
 // password. Must be called from the UI goroutine.
 //
 // It starts from f.cfg rather than a zero Config, so settings with no widget —
-// legacyCompat, queries limits, db.encrypt, hasExePath — survive a save from the
-// GUI. Dropping that would silently disable the compatibility layer on a
-// production box.
+// queries limits, db.encrypt, hasExePath — survive a save from the GUI. Dropping
+// that would silently reset them on a production box. legacyCompat used to be in
+// that list and now has widgets of its own; readLegacyCompat keeps the same
+// habit and validates the block before it can reach disk.
 func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	port, ok := f.parsePort()
 	if !ok {
@@ -48,6 +49,12 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.DB.User = f.userEdit.Text()
 	cfg.DB.Database = f.dbNameEdit.Text()
 	cfg.ERPUser = strings.TrimSpace(f.erpUserEdit.Text())
+
+	legacy, err := f.readLegacyCompat()
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	cfg.LegacyCompat = legacy
 
 	// The database is optional. A connector deployed only to write order files
 	// may have no database of its own, and refusing to save left such a node
@@ -71,6 +78,82 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	}
 
 	return cfg, f.passEdit.Text(), nil
+}
+
+// readLegacyCompat maps the compatibility widgets onto the config block. UI
+// thread only.
+//
+// Like readFormConfig it starts from f.cfg, so a field that loses its widget
+// later keeps its stored value instead of being silently zeroed. The policy it
+// enforces lives in validateLegacyCompat, which needs no widgets and is tested.
+func (f *mainForm) readLegacyCompat() (config.LegacyCompatConfig, error) {
+	legacy := f.cfg.LegacyCompat
+	legacy.Enabled = f.legacyEnabledCheck.Checked()
+	legacy.JWTUser = strings.TrimSpace(f.legacyUserEdit.Text())
+	// Password and secret are stored verbatim: they are compared byte-for-byte
+	// against what the backend sends and against already-issued signatures, so
+	// trimming them here would silently break a credential that works today.
+	legacy.JWTPassword = f.legacyPassEdit.Text()
+	legacy.JWTSecret = f.legacySecretEdit.Text()
+	legacy.AllowRawSQL = f.legacyRawSQLCheck.Checked()
+
+	expiry, ok := parseOptionalMinutes(f.legacyExpiryEdit.Text())
+	if !ok {
+		return config.LegacyCompatConfig{}, fmt.Errorf("legacy token expiry must be a whole number of minutes between 1 and 1440, or left empty for the default 30")
+	}
+	legacy.JWTExpiryMinutes = expiry
+
+	if err := validateLegacyCompat(legacy); err != nil {
+		return config.LegacyCompatConfig{}, err
+	}
+	return legacy, nil
+}
+
+// validateLegacyCompat refuses the one combination the daemon rejects at startup:
+// NewServer errors with "legacyCompat.enabled requires jwtSecret, jwtUser and
+// jwtPassword" and the service never comes up. Catching it at save time means the
+// GUI cannot leave a production box holding a config its own service will not
+// start on — which, now that the block is editable, is a click away.
+//
+// It names every missing field at once rather than the first one, so filling the
+// block in takes one pass instead of three saves.
+func validateLegacyCompat(legacy config.LegacyCompatConfig) error {
+	if !legacy.Enabled {
+		return nil
+	}
+
+	var missing []string
+	if strings.TrimSpace(legacy.JWTUser) == "" {
+		missing = append(missing, "JWT user")
+	}
+	if strings.TrimSpace(legacy.JWTPassword) == "" {
+		missing = append(missing, "JWT password")
+	}
+	if strings.TrimSpace(legacy.JWTSecret) == "" {
+		missing = append(missing, "JWT secret")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"legacy compatibility is enabled, so %s must be filled in — the service refuses to start otherwise",
+		strings.Join(missing, ", "))
+}
+
+// parseOptionalMinutes reads an optional minutes field. Empty is valid and means
+// "use the default", which config.LegacyJWTExpiry resolves to 30 — so it yields
+// 0 rather than an error, the same way an empty DB port means "no database".
+func parseOptionalMinutes(text string) (int, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return 0, true
+	}
+	m, err := strconv.Atoi(trimmed)
+	if err != nil || m <= 0 || m > 1440 {
+		return 0, false
+	}
+	return m, true
 }
 
 // parsePort reads the DB port field. UI thread only.

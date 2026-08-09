@@ -151,13 +151,25 @@ retirement procedure in [legacy-compat.md](legacy-compat.md).
 
 `enabled: true` with any of `jwtSecret`/`jwtUser`/`jwtPassword` empty is a
 **startup error** — the daemon refuses to run rather than expose a credential
-exchange that accepts blanks.
+exchange that accepts blanks. Since 2026-08-09 the GUI refuses that combination at
+save time too, so the config on disk can no longer describe a service that will not
+start.
+
+The whole block is editable in the GUI's **Legacy compatibility** section. It is
+there because `jwtUser`/`jwtPassword` are the credentials the live backend actually
+sends — see [erp-manager-integration.md](erp-manager-integration.md) — and while
+only `bearerToken` had a widget, the GUI showed a credential nothing used and hid
+the one in use.
 
 ## Editing safely
 
 - **The GUI preserves keys it does not show.** `readFormConfig` starts from the
-  loaded config, so `legacyCompat`, `queries`, `db.encrypt` and `hasParamFile`
-  survive a GUI save. This is a hard constraint — see [../CLAUDE.md](../CLAUDE.md).
+  loaded config, so `queries`, `db.encrypt` and `hasParamFile` survive a GUI save.
+  This is a hard constraint — see [../CLAUDE.md](../CLAUDE.md). `legacyCompat` used
+  to rely on the same rule and now has widgets of its own; `readLegacyCompat` keeps
+  the habit and starts from the loaded block regardless.
+- **Switching `legacyCompat.enabled` off in the GUI asks first.** It is the one
+  setting whose change cuts the backend off on the next restart.
 - **Hand-editing is fine**, but the daemon must be restarted, and a syntax error
   stops it starting (`server.log` will say so).
 - **Do not reduce `maxRows`** on a migrated install without checking the largest

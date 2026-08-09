@@ -92,6 +92,13 @@ Off by default. Present so a backend written against the old Node connector work
 unchanged during migration; all reply in the **old app's error shape**
 (`{"error":"snake_case"}`). Full detail: `docs/legacy-compat.md`.
 
+The live backend is **erp-manager**, and it authenticates through `/auth/token`
+rather than the static bearer token — so `legacyCompat.enabled: false` cuts it off.
+What it sends, the six routes it calls, the response keys it depends on (`value` on
+saved queries, a bare array on `custom_sql`) and its 401-triggered re-login are
+documented in `docs/erp-manager-integration.md`. Read that before changing any
+response shape.
+
 | Route | Method | What it does |
 |-------|--------|--------------|
 | `/auth/token` | POST | Credentials → HS256 JWT (unauthenticated, rate-limited). Auth then accepts that JWT **or** the static bearer token everywhere. |
@@ -132,7 +139,7 @@ All routes: `middleware/auth.go` validates `Authorization: Bearer <token>` again
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.
-Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`.
+Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`, `cmd/digi-erp-connector/form_config_test.go` (the GUI's save-time guards — `//go:build windows`, so it runs in CI and on a Windows box, not on Linux).
 
 ## Build
 
@@ -168,9 +175,16 @@ production backend. Covered by `queries/normalize_test.go`:
   handlers. Legacy compat routes are the documented exception and use
   `writeLegacyError`.
 - **`readFormConfig` must start from `f.cfg`**, never a zero `config.Config`.
-  Settings with no widget (legacyCompat, queries limits, db.encrypt) would
-  otherwise be wiped by a GUI save — which on the production box means silently
-  switching off the compatibility layer the live backend depends on.
+  Settings with no widget (queries limits, db.encrypt, hasExePath) would
+  otherwise be wiped by a GUI save. `legacyCompat` was the reason this rule
+  exists; it now has widgets of its own, and `readLegacyCompat` starts from the
+  loaded block for the same reason.
+- **The GUI must not be able to save a config the daemon refuses to start on.**
+  `validateLegacyCompat` mirrors the `api.NewServer` precondition (enabled needs
+  jwtSecret + jwtUser + jwtPassword) at save time, and `confirmLegacyDisable`
+  prompts before the compat layer is switched off, because that single click cuts
+  erp-manager off on the next restart. Any new startup precondition that a widget
+  can violate needs the same treatment.
 - **Keep the tree gofmt-clean.** `.gitattributes` pins `.go` to LF; if
   `gofmt -l ./cmd ./internal` prints anything, fix it rather than adding to it.
 

@@ -29,6 +29,33 @@ can be retired before the rest.
 Credentials live in config, never in the binary. Setting `enabled: false` (or
 removing the block) instantly removes every route below and stops accepting JWTs.
 
+## Where this appears in the GUI
+
+The configuration window has a **Legacy compatibility (electron-mssql-app)**
+section directly under the bearer token: an *Enabled* checkbox, JWT user,
+password, secret, token expiry and the raw-SQL switch. Password and secret are
+masked, with a *Show password and secret* box for comparing them against the
+backend's stored credentials; the fields grey out when the block is disabled.
+
+Until 2026-08-09 the block had no widgets at all, so the GUI showed the static
+bearer token — which the backend does not send — and hid the login and password it
+does. Anyone comparing the two sides concluded the backend was using Basic auth,
+or that the wrong credential was configured. Both credentials are now visible in
+one place.
+
+Two guards come with the editing:
+
+- Saving an **enabled** block with a blank user, password or secret is refused in
+  the form, with every missing field named at once. That combination is a startup
+  error for the daemon, so without the guard a save could leave a box holding a
+  config its own service will not start on.
+- **Unchecking *Enabled* asks for confirmation.** It is the one click in the GUI
+  that silently cuts a production backend off — see below.
+
+`jwtSecret`, `jwtUser` and `jwtPassword` are the only widgets that read *and*
+write config values which no other screen shows; everything else in that block
+mirrors a key documented above.
+
 ## What it adds
 
 | Route | Behaviour |
@@ -109,3 +136,12 @@ the only difference.
    for a full business cycle, nothing depends on this any more.
 3. Set `allowRawSQL: false`, restart, confirm still quiet.
 4. Set `enabled: false`, restart. The routes and the JWT path are gone.
+
+Step 1 is the blocker in practice, and it is not a configuration change. The live
+backend is **erp-manager**, whose `DigitradeMssqlService::process()` is
+`getToken() ?? login()` — it has no static-token mode, so it cannot be pointed at
+`bearerToken` without a code change on that side. Pasting the static token into
+`ClientConnection.token` appears to work (the token never expires, so the re-login
+branch never fires) but the first transient 401 sends it to `/auth/token` and it
+stays broken. What the backend sends, expects and does on a 401 is documented in
+[erp-manager-integration.md](erp-manager-integration.md).

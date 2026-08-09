@@ -35,6 +35,15 @@ type mainForm struct {
 	debugCheck      *walk.CheckBox
 	bearerTokenEdit *walk.LineEdit
 
+	legacyEnabledCheck *walk.CheckBox
+	legacyFields       *walk.Composite
+	legacyUserEdit     *walk.LineEdit
+	legacyPassEdit     *walk.LineEdit
+	legacySecretEdit   *walk.LineEdit
+	legacyExpiryEdit   *walk.LineEdit
+	legacyShowCheck    *walk.CheckBox
+	legacyRawSQLCheck  *walk.CheckBox
+
 	driverCombo *walk.ComboBox
 	hostEdit    *walk.LineEdit
 	portEdit    *walk.LineEdit
@@ -87,6 +96,46 @@ func newMainForm(cfg config.Config, logSvc logger.LoggerService) (*mainForm, err
 						Children: []Widget{
 							LineEdit{AssignTo: &f.bearerTokenEdit},
 							PushButton{Text: "Generate key", OnClicked: f.onGenerateToken},
+						},
+					},
+
+					// ── Legacy compatibility ─────────────────────────────
+					// The bearer token above is not the only accepted
+					// credential, and on a migrated box it is usually not the
+					// one in use: a backend written against electron-mssql-app
+					// trades a login and password for a JWT at POST /auth/token
+					// and sends that instead. Both live in config.yaml, but only
+					// the token had a widget, so the GUI showed a credential the
+					// backend never sends and hid the one it does.
+					HSeparator{},
+					Label{Text: "Legacy compatibility (electron-mssql-app)"},
+					CheckBox{
+						AssignTo:         &f.legacyEnabledCheck,
+						Text:             "Enabled — also accept the POST /auth/token login/password exchange",
+						OnCheckedChanged: f.onLegacyEnabledChanged,
+					},
+					Composite{
+						AssignTo: &f.legacyFields,
+						Layout:   VBox{MarginsZero: true},
+						Children: []Widget{
+							Label{Text: "These must match the ClientConnection row in erp-manager:"},
+							Label{Text: "JWT user (= authLogin there)"},
+							LineEdit{AssignTo: &f.legacyUserEdit},
+							Label{Text: "JWT password (= authPassword there)"},
+							LineEdit{AssignTo: &f.legacyPassEdit, PasswordMode: true},
+							Label{Text: "JWT secret (signs issued tokens — changing it invalidates live ones)"},
+							LineEdit{AssignTo: &f.legacySecretEdit, PasswordMode: true},
+							Label{Text: "Token expiry (minutes, blank = 30)"},
+							LineEdit{AssignTo: &f.legacyExpiryEdit},
+							CheckBox{
+								AssignTo:         &f.legacyShowCheck,
+								Text:             "Show password and secret",
+								OnCheckedChanged: f.onLegacyShowChanged,
+							},
+							CheckBox{
+								AssignTo: &f.legacyRawSQLCheck,
+								Text:     "Allow raw SQL (POST /api/query, SELECT only)",
+							},
 						},
 					},
 
@@ -189,6 +238,7 @@ func (f *mainForm) populateFromConfig(cfg config.Config) {
 	f.apiListenEdit.SetText(cfg.APIListen)
 	f.debugCheck.SetChecked(cfg.Debug)
 	f.bearerTokenEdit.SetText(cfg.BearerToken)
+	f.populateLegacyCompat(cfg.LegacyCompat)
 	f.setComboByValue(f.driverCombo, config.DBDriverOptions(), string(cfg.DB.Driver))
 	f.hostEdit.SetText(cfg.DB.Host)
 	f.portEdit.SetText(strconv.Itoa(cfg.DB.Port))
@@ -208,6 +258,44 @@ func (f *mainForm) populateFromConfig(cfg config.Config) {
 	}
 
 	f.updateSendOrderVisibility(cfg.ERP)
+}
+
+// populateLegacyCompat fills the compatibility widgets. Unlike the DB password —
+// which lives in DPAPI and is deliberately never shown — jwtPassword and
+// jwtSecret are stored in config.yaml, so displaying them reveals nothing that
+// reading the file would not. They start masked; the Show box unmasks them.
+func (f *mainForm) populateLegacyCompat(legacy config.LegacyCompatConfig) {
+	f.legacyEnabledCheck.SetChecked(legacy.Enabled)
+	f.legacyUserEdit.SetText(legacy.JWTUser)
+	f.legacyPassEdit.SetText(legacy.JWTPassword)
+	f.legacySecretEdit.SetText(legacy.JWTSecret)
+	if legacy.JWTExpiryMinutes > 0 {
+		f.legacyExpiryEdit.SetText(strconv.Itoa(legacy.JWTExpiryMinutes))
+	} else {
+		f.legacyExpiryEdit.SetText("")
+	}
+	f.legacyShowCheck.SetChecked(false)
+	f.onLegacyShowChanged()
+	f.legacyRawSQLCheck.SetChecked(legacy.AllowRawSQL)
+	f.updateLegacyFieldsEnabled(legacy.Enabled)
+}
+
+// onLegacyEnabledChanged greys the compat fields out when the exchange is off,
+// so credentials that are configured but inactive cannot read as active ones.
+func (f *mainForm) onLegacyEnabledChanged() {
+	f.updateLegacyFieldsEnabled(f.legacyEnabledCheck.Checked())
+}
+
+func (f *mainForm) updateLegacyFieldsEnabled(enabled bool) {
+	f.legacyFields.SetEnabled(enabled)
+}
+
+// onLegacyShowChanged unmasks the password and secret, so they can be compared
+// against the ClientConnection row in erp-manager without opening config.yaml.
+func (f *mainForm) onLegacyShowChanged() {
+	masked := !f.legacyShowCheck.Checked()
+	f.legacyPassEdit.SetPasswordMode(masked)
+	f.legacySecretEdit.SetPasswordMode(masked)
 }
 
 // setComboByValue selects the combo box item matching value; falls back to index 0.

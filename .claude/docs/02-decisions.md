@@ -154,3 +154,41 @@ Constraint that must hold: **exactly one node owns `sendOrderDir`**.
 `lastOrderNumber.json` is guarded by a process-local mutex, so two connectors
 sharing that folder would issue duplicate order numbers and overwrite each
 other's `IMOVEIN.doc`.
+
+## 13. The legacy credentials are visible and editable in the GUI (2026-08-09)
+
+The configuration window showed `bearerToken` and nothing else about
+authentication, while `legacyCompat.jwtUser` / `jwtPassword` / `jwtSecret` existed
+only in `config.yaml`. On a migrated box that inverts reality: the backend
+(erp-manager) trades a login and password for a JWT at `POST /auth/token` and never
+sends the static token, so the GUI advertised the unused credential and hid the
+used one. Comparing the connector UI against the `ClientConnection` row in
+erp-manager therefore led to the conclusion that the backend used Basic auth — it
+does not; both sides are Bearer, and the login/password are a JSON body, not a
+header.
+
+The block is now a GUI section, editable rather than read-only, because the point
+is to keep the two sides *in sync* — a read-only display would show the mismatch
+without letting anyone fix it.
+
+Making it editable removed the protection that decision 10b relied on (the
+"settings with no widget survive a save" rule), so two guards replace it:
+
+- `validateLegacyCompat` mirrors the `api.NewServer` precondition at save time and
+  names every missing field at once. Without it, one save could leave a production
+  box holding a config its own service refuses to start on.
+- `confirmLegacyDisable` prompts before *Enabled* is switched off. It is the only
+  confirmation dialog in the GUI, because it is the only click that silently cuts
+  the backend off at the next restart.
+
+Both are widget-free functions, so `cmd/digi-erp-connector/form_config_test.go`
+covers them; CI runs on `windows-latest`, so a `//go:build windows` test executes
+there.
+
+Also written: `docs/erp-manager-integration.md`, the backend contract from this
+side — the six routes erp-manager calls, the credentials it sends, its
+401-triggered re-login, and the two response shapes whose loss fails silently
+(`value` on saved queries, a bare array on `custom_sql`). It exists so Windows-side
+development does not need the erp-manager repo open to know what the caller
+expects. Retiring legacy compat is still blocked on erp-manager: its
+`process()` is `getToken() ?? login()`, with no static-token branch.
