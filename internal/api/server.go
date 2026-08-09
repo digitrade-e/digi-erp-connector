@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -150,14 +151,66 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 
 	mux.Handle("/api/", wrap(http.HandlerFunc(NotFound)))
 
-	return &http.Server{
+	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
-	}, nil
+	}
+
+	tlsCfg, err := buildTLSConfig(cfg.TLS)
+	if err != nil {
+		return nil, err
+	}
+	srv.TLSConfig = tlsCfg
+
+	if deps.Logger != nil && tlsCfg == nil && !isLoopback(addr) {
+		deps.Logger.Warn("serving plaintext HTTP on a non-loopback address (" + addr +
+			"): the bearer token crosses the network in the clear. Configure tls.certFile/tls.keyFile.")
+	}
+
+	return srv, nil
+}
+
+// buildTLSConfig validates the certificate pair and returns the server's TLS
+// settings, or nil when TLS is not configured.
+//
+// A half-configured or unloadable pair is a startup error rather than a warning:
+// falling back to plaintext when the operator believes they configured HTTPS is
+// exactly the failure that leaks a credential.
+func buildTLSConfig(cfg config.TLSConfig) (*tls.Config, error) {
+	if !cfg.Enabled() {
+		return nil, nil
+	}
+
+	certFile := strings.TrimSpace(cfg.CertFile)
+	keyFile := strings.TrimSpace(cfg.KeyFile)
+	if certFile == "" || keyFile == "" {
+		return nil, errors.New("tls requires both certFile and keyFile")
+	}
+
+	// Load it now so a bad path or mismatched pair fails at startup, not on the
+	// first request.
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		return nil, fmt.Errorf("tls: load certificate: %w", err)
+	}
+
+	return &tls.Config{MinVersion: tls.VersionTLS12}, nil
+}
+
+// isLoopback reports whether the listen address is limited to this machine, in
+// which case plaintext is not exposed to the network.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
 }
 
 func validateListenAddr(addr string) error {

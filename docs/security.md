@@ -121,8 +121,42 @@ to the backend's source address if it is stable, prefer a port-scoped rule over 
 program-scoped one (a replaced binary silently loses a program rule), and treat the
 token like a password — rotate it by editing `config.yaml` and restarting.
 
-There is no TLS. Traffic is plaintext HTTP, so on an untrusted network put it
-behind something that terminates TLS, or keep it on loopback.
+### TLS
+
+The connector serves HTTPS directly when configured:
+
+```yaml
+tls:
+    certFile: C:\ProgramData\digi-erp-connector\tls\server.crt
+    keyFile:  C:\ProgramData\digi-erp-connector\tls\server.key
+```
+
+TLS 1.2 is the floor. Both files are validated at startup, and a half-configured
+or unloadable pair **stops the service** rather than falling back to plaintext —
+silently serving HTTP when the operator believes they configured HTTPS is exactly
+how a token leaks.
+
+With no `tls` block the connector serves plaintext and logs a warning if
+`apiListen` is not a loopback address. That is fine on loopback and wrong
+anywhere else: the bearer token crosses the network in the clear, and anyone able
+to sniff the LAN has your database.
+
+Generating a self-signed certificate for an internal deployment:
+
+```powershell
+$cert = New-SelfSignedCertificate -DnsName "connector.internal","192.168.0.5" `
+        -CertStoreLocation "cert:\LocalMachine\My" -NotAfter (Get-Date).AddYears(5)
+$pwd = ConvertTo-SecureString -String "export-password" -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath C:\ProgramData\digi-erp-connector\tls\server.pfx -Password $pwd
+# convert the PFX to the PEM pair the connector expects (openssl ships with Git for Windows):
+openssl pkcs12 -in server.pfx -clcerts -nokeys -out server.crt
+openssl pkcs12 -in server.pfx -nocerts -nodes  -out server.key
+```
+
+The calling backend must then trust that certificate, or be configured to skip
+verification. Skipping verification still encrypts the traffic — it only drops
+the identity check — so it is a large improvement over plaintext, not a
+replacement for a trusted certificate.
 
 ## Least-privilege database user
 
@@ -137,9 +171,14 @@ The connector needs:
 
 Granting `sysadmin` is common in the field and is not necessary.
 
+Ready-made scripts: `scripts/sql/least-privilege-read-node.sql` and
+`scripts/sql/least-privilege-write-node.sql`. The write-node one grants SELECT on
+exactly two tables — Accounts and Rates — and nothing else.
+
 ## Known limitations
 
-- No TLS, no token expiry, no per-route authorisation.
+- No token expiry and no per-route authorisation. TLS is available but off by
+  default — configure it whenever apiListen is not loopback.
 - Secrets are not protected at rest on Linux.
 - Saved queries are unrestricted by design.
 - `POST /api/query` is a read-only-validated exception that exists for migration

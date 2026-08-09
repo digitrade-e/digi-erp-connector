@@ -352,3 +352,24 @@ func TestLegacyOrderInvalidID(t *testing.T) {
 		t.Errorf("error = %q, want invalid_id", errBody.Error)
 	}
 }
+
+// newServerForTest builds a server and returns the error, for cases that assert
+// NewServer refuses a configuration.
+func newServerForTest(t *testing.T, cfg config.Config) (*http.Server, error) {
+	t.Helper()
+	store, err := queries.NewStore(filepath.Join(t.TempDir(), "queries.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	return NewServer(cfg, ServerDeps{QueryStore: store})
+}
+
+// mustServer builds a server that is expected to be valid.
+func mustServer(t *testing.T, cfg config.Config) *http.Server {
+	t.Helper()
+	srv, err := newServerForTest(t, cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return srv
+}

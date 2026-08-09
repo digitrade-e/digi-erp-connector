@@ -192,3 +192,38 @@ side — the six routes erp-manager calls, the credentials it sends, its
 development does not need the erp-manager repo open to know what the caller
 expects. Retiring legacy compat is still blocked on erp-manager: its
 `process()` is `getToken() ?? login()`, with no static-token branch.
+
+## 13. TLS, least-privilege SQL, and dead-code removal (2026-08-09)
+
+Asked for after establishing that the static bearer token is decisively more
+secure than the legacy JWT (256-bit random vs the password `123456`, no forgery
+path vs a signing secret that shipped in the old app's source) — but that the
+bigger hole was the transport, not the credential.
+
+**TLS.** `tls.certFile`/`tls.keyFile`; TLS 1.2 minimum; the pair is loaded in
+NewServer so a bad path or mismatched key stops the service at startup. Setting
+only one of the two is an error rather than a silent fallback to plaintext: that
+fallback is precisely how a token leaks. With no TLS block and a non-loopback
+apiListen the daemon logs a warning. Tested with a generated self-signed pair,
+including a real handshake and the rejection of a plaintext request.
+
+**Least-privilege SQL.** `scripts/sql/least-privilege-{read,write}-node.sql`.
+The connector logs in as `sa` in production, so a stolen bearer token is a
+database administrator. The write-node script grants SELECT on exactly two
+tables — Accounts and Rates — which is all the order pipeline reads.
+
+**Dead code removed**, each verified unreferenced first:
+
+- `internal/erp/{hasavshevet,sap}/repo.go` — files containing only a TODO comment
+- `respond.NotImplemented` — no callers
+- `sap.ErrNotImplemented` and its handler branch — never returned, so the 501 was
+  unreachable. This retires the "left as-is deliberately" note in decision 9.
+- `PostOrderHook` — interface, field, variadic parameter and invocation loop with
+  no implementations since the PDF hook was deleted on 2026-07-20. Decision 10
+  kept it as "part of the queue design"; with the feature gone it was plumbing to
+  nowhere, and git history has it if printing ever returns.
+- `ERPPriority` — offered in the GUI dropdown but unimplemented, so choosing it
+  produced a runtime failure. Decision 9 deferred this; it is now removed from the
+  selectable list.
+
+`NOT_IMPLEMENTED` is therefore no longer a code the API can return.

@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"net/http"
 	"time"
 
@@ -60,10 +59,6 @@ func NewPriceAndStockHandler(cfg config.Config, dbConn *sql.DB) http.HandlerFunc
 		}
 
 		if err != nil {
-			if errors.Is(err, sap.ErrNotImplemented) {
-				respond.Error(w, http.StatusNotImplemented, "Price/stock not implemented", "NOT_IMPLEMENTED", nil)
-				return
-			}
 			respond.Error(w, http.StatusInternalServerError, "Failed to load price and stock", "PRICE_STOCK_FAILED", nil)
 			return
 		}

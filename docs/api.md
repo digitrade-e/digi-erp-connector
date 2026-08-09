@@ -1,7 +1,9 @@
 # API Reference
 
-Base URL: `http://<apiListen>` (default `127.0.0.1:8080`). Plaintext HTTP — there
-is no TLS; see [security.md](security.md).
+Base URL: `http(s)://<apiListen>` (default `127.0.0.1:8080`). HTTP by default;
+**HTTPS when `tls.certFile`/`tls.keyFile` are configured**, which you should do
+whenever the backend is on another machine — see
+[configuration.md](configuration.md#tls) and [security.md](security.md).
 
 Every `/api/*` route requires `Authorization: Bearer <token>` and is rate-limited
 per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate limiting is applied
@@ -107,7 +109,6 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |
-| `NOT_IMPLEMENTED` | 501 | Reached a declared-but-unimplemented ERP path (Priority). |
 | `ORDERS_NOT_CONFIGURED` | 501 | This connector cannot send orders: it needs `erp: hasavshevet` and a `sendOrderDir`. Expected on a read-only node - see [deployment-topologies.md](deployment-topologies.md). |
 
 Legacy compatibility routes do **not** use these codes; they return the old app's

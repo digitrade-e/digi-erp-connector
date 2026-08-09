@@ -38,37 +38,27 @@ type orderJob struct {
 	req         OrderRequest
 }
 
-// PostOrderHook is called after order processing succeeds.
-// Implementations run inside the single-worker goroutine.
-// Errors are logged but never fail the order.
-type PostOrderHook interface {
-	AfterOrder(ctx context.Context, req OrderRequest, result *OrderResult) error
-}
-
 // OrderQueue is a single-worker async queue for Hasavshevet send-order jobs.
 //
 // Using a single worker guarantees that only one goroutine writes to
 // IMOVEIN.doc/.prm and executes has.exe at a time, preventing file collisions.
 // Jobs are processed in FIFO order.
 type OrderQueue struct {
-	ch        chan orderJob
-	sender    *Sender
-	log       logger.LoggerService
-	postHooks []PostOrderHook
+	ch     chan orderJob
+	sender *Sender
+	log    logger.LoggerService
 
 	mu   sync.RWMutex
 	jobs map[string]*JobResult
 }
 
 // NewOrderQueue creates a new queue. Call Start to begin processing.
-// Optional PostOrderHook instances are called after each successful order.
-func NewOrderQueue(sender *Sender, log logger.LoggerService, hooks ...PostOrderHook) *OrderQueue {
+func NewOrderQueue(sender *Sender, log logger.LoggerService) *OrderQueue {
 	return &OrderQueue{
-		ch:        make(chan orderJob, defaultQueueSize),
-		sender:    sender,
-		log:       log,
-		postHooks: hooks,
-		jobs:      make(map[string]*JobResult),
+		ch:     make(chan orderJob, defaultQueueSize),
+		sender: sender,
+		log:    log,
+		jobs:   make(map[string]*JobResult),
 	}
 }
 
@@ -95,14 +85,6 @@ func (q *OrderQueue) run(ctx context.Context) {
 			} else {
 				q.log.Success(fmt.Sprintf("order job %s done orderNumber=%d files=%v", job.id, result.OrderNumber, result.WrittenFiles))
 				q.setStatus(job.id, JobStatusDone, result.OrderNumber, result.WrittenFiles, nil)
-
-				// Post-order hooks (PDF generation, printing, email).
-				// Errors are logged but never fail the order.
-				for _, hook := range q.postHooks {
-					if hookErr := hook.AfterOrder(ctx, job.req, result); hookErr != nil {
-						q.log.Warn(fmt.Sprintf("post-order hook failed for job %s: %v", job.id, hookErr))
-					}
-				}
 			}
 		}
 	}

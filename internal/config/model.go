@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type ERPType string
 type DBDriver string
@@ -8,7 +11,6 @@ type DBDriver string
 const (
 	ERPSAP         ERPType = "sap"
 	ERPHasavshevet ERPType = "hasavshevet"
-	ERPPriority    ERPType = "priority"
 )
 
 const (
@@ -29,6 +31,25 @@ type DBConfig struct {
 	// Server presents a self-signed certificate, as a default local instance
 	// does. Only meaningful together with Encrypt.
 	TrustServerCertificate bool `yaml:"trustServerCertificate,omitempty"`
+}
+
+// TLSConfig serves the API over HTTPS instead of plaintext HTTP.
+//
+// Without it every request — including the bearer token — crosses the network in
+// cleartext, which matters as soon as apiListen is anything but a loopback
+// address. Configure it whenever the backend is on another machine.
+//
+// Both files must be PEM. A certificate chain goes in CertFile, leaf first.
+type TLSConfig struct {
+	CertFile string `yaml:"certFile,omitempty"`
+	KeyFile  string `yaml:"keyFile,omitempty"`
+}
+
+// Enabled reports whether TLS was asked for. Setting only one of the two counts
+// as enabled on purpose: the server then refuses to start rather than quietly
+// serving plaintext when the operator believed they had configured HTTPS.
+func (t TLSConfig) Enabled() bool {
+	return strings.TrimSpace(t.CertFile) != "" || strings.TrimSpace(t.KeyFile) != ""
 }
 
 // LegacyCompatConfig turns on the electron-mssql-app compatibility surface so
@@ -83,6 +104,7 @@ type Config struct {
 	// (e.g. -p"digi.bat") resolve correctly.
 	HasBatFile   string             `yaml:"hasBatFile"`
 	DB           DBConfig           `yaml:"db"`
+	TLS          TLSConfig          `yaml:"tls"`
 	Queries      QueriesConfig      `yaml:"queries"`
 	LegacyCompat LegacyCompatConfig `yaml:"legacyCompat"`
 }
@@ -97,7 +119,7 @@ func (c LegacyCompatConfig) LegacyJWTExpiry() time.Duration {
 }
 
 func ErpValues() []ERPType {
-	return []ERPType{ERPSAP, ERPHasavshevet, ERPPriority}
+	return []ERPType{ERPSAP, ERPHasavshevet}
 }
 
 func ErpOption() []string {

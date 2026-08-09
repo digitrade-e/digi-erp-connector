@@ -13,8 +13,6 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/erp"
 )
 
-var ErrNotImplemented = errors.New("sap price/stock not implemented")
-
 func FetchPriceAndStock(ctx context.Context, dbConn *sql.DB, cfg config.Config, req erp.PriceStockRequest) (erp.PriceStockResult, error) {
 	_ = cfg
 	if ctx == nil {

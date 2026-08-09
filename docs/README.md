@@ -17,6 +17,7 @@
 | understand price/stock per ERP | [price-and-stock.md](price-and-stock.md) |
 | send orders into Hasavshevet | [hasavshevet-send-order.md](hasavshevet-send-order.md) |
 | review the security posture | [security.md](security.md) |
+| lock down the SQL login the connector uses | [../scripts/sql/](../scripts/sql/) + [security.md](security.md) |
 | set up service auto-start | [autostart.md](autostart.md) |
 
 ## Every document

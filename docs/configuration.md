@@ -124,6 +124,22 @@ Note the key is per-ERP: switching `erp` means the password must be entered agai
 
 Pool settings are not configurable: 10 open, 10 idle, 30-minute lifetime, 5s ping.
 
+## `tls`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `certFile` | — | PEM certificate (chain: leaf first) |
+| `keyFile` | — | PEM private key |
+
+Absent means plaintext HTTP. Setting **either** counts as "TLS requested", so a
+half-configured block is a startup error rather than a silent fallback to
+plaintext. The pair is loaded at startup, so a wrong path or a mismatched key
+stops the service immediately instead of failing on the first request. TLS 1.2 is
+the minimum version.
+
+Configure this whenever `apiListen` is not a loopback address; see
+[security.md](security.md#tls) for generating a certificate.
+
 ## `queries`
 
 | Key | Default | Meaning |

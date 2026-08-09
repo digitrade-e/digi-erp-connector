@@ -37,12 +37,6 @@ func Error(w http.ResponseWriter, status int, message, code string, details map[
 	})
 }
 
-// NotImplemented reports a path that exists but has no implementation (e.g. the
-// Priority ERP).
-func NotImplemented(w http.ResponseWriter) {
-	Error(w, http.StatusNotImplemented, "Not implemented", "NOT_IMPLEMENTED", nil)
-}
-
 // JSON writes payload as UTF-8 JSON with the given status.
 //
 // An encoding failure cannot be reported to the client — the status line and

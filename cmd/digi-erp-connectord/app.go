@@ -145,13 +145,26 @@ func (a *serverApp) Start() error {
 	}
 	a.srv = srv
 
+	// NewServer has already validated the certificate pair, so reaching here with
+	// TLSConfig set means the files load.
+	serveTLS := srv.TLSConfig != nil
+	scheme := "http"
+	if serveTLS {
+		scheme = "https"
+	}
+
 	a.errCh = make(chan error, 1)
 	go func() {
+		if serveTLS {
+			// The paths are already in the server's TLS config; passing them
+			// again is how net/http wants them.
+			a.errCh <- srv.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+			return
+		}
 		a.errCh <- srv.ListenAndServe()
 	}()
-	logSvc.Info(fmt.Sprintf("HTTP server goroutine launched, will listen on %s", srv.Addr))
 
-	logSvc.Info(fmt.Sprintf("digi-erp-connectord listening on %s", srv.Addr))
+	logSvc.Info(fmt.Sprintf("digi-erp-connectord listening on %s://%s", scheme, srv.Addr))
 	return nil
 }
 
