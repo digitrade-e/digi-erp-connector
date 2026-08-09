@@ -34,7 +34,7 @@ const procedureSetupTimeout = 12 * time.Second
 func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	port, ok := f.parsePort()
 	if !ok {
-		return config.Config{}, "", fmt.Errorf("invalid DB Port")
+		return config.Config{}, "", fmt.Errorf("DB Port must be a number between 1 and 65535, or left empty if this connector uses no database")
 	}
 
 	cfg := f.cfg
@@ -49,9 +49,10 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.DB.Database = f.dbNameEdit.Text()
 	cfg.ERPUser = strings.TrimSpace(f.erpUserEdit.Text())
 
-	if cfg.ERP == config.ERPHasavshevet && strings.TrimSpace(cfg.DB.Database) == "" {
-		return config.Config{}, "", fmt.Errorf("DB database is required for Hasavshevet")
-	}
+	// The database is optional. A connector deployed only to write order files
+	// may have no database of its own, and refusing to save left such a node
+	// impossible to configure at all. Whether orders can actually be built is
+	// decided at request time, where the missing piece can be named precisely.
 
 	folders := make([]string, 0, len(f.folderEdits))
 	for _, edit := range f.folderEdits {
@@ -72,9 +73,18 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	return cfg, f.passEdit.Text(), nil
 }
 
-// parsePort parses and validates the port field. UI thread only.
+// parsePort reads the DB port field. UI thread only.
+//
+// An empty field is valid and means "no database configured" — it yields 0, and
+// db.IsConfigured treats that as unset. Only a non-numeric or out-of-range value
+// is an error. Before this, leaving the DB blank produced "invalid DB Port",
+// which named the wrong problem and blocked the save entirely.
 func (f *mainForm) parsePort() (int, bool) {
-	p, err := strconv.Atoi(f.portEdit.Text())
+	text := strings.TrimSpace(f.portEdit.Text())
+	if text == "" {
+		return 0, true
+	}
+	p, err := strconv.Atoi(text)
 	if err != nil || p <= 0 || p > 65535 {
 		return 0, false
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -25,6 +26,19 @@ func DefaultOptions() Options {
 		ConnMaxLifetime: 30 * time.Minute,
 		PingTimeout:     5 * time.Second,
 	}
+}
+
+// IsConfigured reports whether a database has been set up at all.
+//
+// A connector deployed only to write ERP order files may legitimately have no
+// database: the backend supplies the customer details with the order, and the
+// connector never queries anything. Everything that touches the database checks
+// this first so an unconfigured node degrades cleanly — endpoints answer 503
+// instead of failing with a confusing driver error.
+func IsConfigured(cfg config.Config) bool {
+	return strings.TrimSpace(cfg.DB.Host) != "" &&
+		strings.TrimSpace(cfg.DB.User) != "" &&
+		cfg.DB.Port > 0
 }
 
 // Open returns a pool that is verified reachable: it pings the server and fails

@@ -29,6 +29,22 @@ type OrderRequest struct {
 	Currency      string
 	CustomerEmail string // optional; used for PDF email delivery
 	Details       []OrderLineItem
+	// Account optionally carries the customer details normally read from
+	// [dbo].[Accounts]. When set it is used as-is and no lookup happens, which
+	// is what lets a connector with no database build orders.
+	Account *AccountDetails
+}
+
+// AccountDetails is the caller-supplied form of the account record: the columns
+// the connector would otherwise read from [dbo].[Accounts].
+type AccountDetails struct {
+	AccountKey string
+	FullName   string
+	Address    string
+	City       string
+	Phone      string
+	Agent      string
+	HProtect   string
 }
 
 // OrderLineItem is one line item in an order.
@@ -118,12 +134,6 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		return nil, errors.New("sendOrderDir is not configured")
 	}
 
-	// DB name always comes from the connector config.
-	dbName := strings.TrimSpace(s.cfg.DB.Database)
-	if dbName == "" {
-		return nil, errors.New("database is not configured (set db.database in config)")
-	}
-
 	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field spec)
 	if err := validateOrderRequest(req); err != nil {
 		return nil, err
@@ -138,20 +148,24 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		}
 	}
 
-	s.log.Info(fmt.Sprintf("processing order orderNumber=%d historyId=%s userExtId=%s dbName=%s",
+	dbName := strings.TrimSpace(s.cfg.DB.Database)
+	s.log.Info(fmt.Sprintf("processing order orderNumber=%d historyId=%s userExtId=%s dbName=%q",
 		orderNum, req.HistoryID, req.UserExtID, dbName))
 
-	// 3. Account lookup
-	account, err := s.queryAccount(ctx, dbName, req.UserExtID)
+	// 3. Account details: supplied by the caller, or looked up in the ERP database
+	account, err := s.resolveAccount(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("query account %q: %w", req.UserExtID, err)
+		return nil, err
 	}
 
 	// 4. Currency rate (non-fatal; default 1.0 matches legacy behaviour)
-	rate, err := s.queryRate(ctx, dbName, req.Currency)
-	if err != nil {
-		s.log.Warn(fmt.Sprintf("rate lookup failed currency=%s: %v; using 1.0", req.Currency, err))
-		rate = 1.0
+	rate := 1.0
+	if s.db != nil && dbName != "" {
+		if r, err := s.queryRate(ctx, dbName, req.Currency); err != nil {
+			s.log.Warn(fmt.Sprintf("rate lookup failed currency=%s: %v; using 1.0", req.Currency, err))
+		} else {
+			rate = r
+		}
 	}
 
 	// 5. Build DOC and PRM content
@@ -307,6 +321,52 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 }
 
 // queryAccount fetches account columns required for the DOC header.
+// resolveAccount returns the customer details for the order.
+//
+// Details supplied with the request win and skip the database entirely — that is
+// what allows a connector with no database (an order-writing node sitting beside
+// the ERP importer) to build IMOVEIN files at all. Otherwise they are read from
+// [dbo].[Accounts] as before.
+func (s *Sender) resolveAccount(ctx context.Context, req OrderRequest) (accountInfo, error) {
+	if a := req.Account; a != nil {
+		account := accountInfo{
+			AccountKey: strings.TrimSpace(a.AccountKey),
+			FullName:   a.FullName,
+			Address:    a.Address,
+			City:       a.City,
+			Phone:      a.Phone,
+			Agent:      a.Agent,
+			HProtect:   a.HProtect,
+		}
+		// The account key identifies the customer in the IMOVEIN record; fall
+		// back to the order's userExtId, which is the same identifier.
+		if account.AccountKey == "" {
+			account.AccountKey = strings.TrimSpace(req.UserExtID)
+		}
+		if account.AccountKey == "" {
+			return accountInfo{}, errors.New("account.accountKey or userExtId is required")
+		}
+		return account, nil
+	}
+
+	if s.db == nil {
+		return accountInfo{}, errors.New(
+			"no database is configured and the order carries no \"account\" details: " +
+				"either send account details with the order, or configure db.host/db.user/db.port/db.database")
+	}
+
+	dbName := strings.TrimSpace(s.cfg.DB.Database)
+	if dbName == "" {
+		return accountInfo{}, errors.New("db.database is not set, so the customer account cannot be looked up")
+	}
+
+	account, err := s.queryAccount(ctx, dbName, req.UserExtID)
+	if err != nil {
+		return accountInfo{}, fmt.Errorf("query account %q: %w", req.UserExtID, err)
+	}
+	return account, nil
+}
+
 func (s *Sender) queryAccount(ctx context.Context, dbName, userExtID string) (accountInfo, error) {
 	if !isSafeDBName(dbName) {
 		return accountInfo{}, fmt.Errorf("invalid dbName %q", dbName)

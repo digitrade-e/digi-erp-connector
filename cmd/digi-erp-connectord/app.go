@@ -84,20 +84,30 @@ func (a *serverApp) Start() error {
 	//
 	// Only a bad configuration is fatal here. Connectivity is retried by
 	// database/sql on demand, and DB-dependent endpoints answer 503 meanwhile.
-	dbConn, err := db.OpenLazy(cfg, a.dbPassStr, db.DefaultOptions())
-	if err != nil {
-		logSvc.Error("db configuration invalid", err)
-		a.Stop(context.Background())
-		return err
-	}
-	a.dbConn = dbConn
+	var dbConn *sql.DB
+	if db.IsConfigured(cfg) {
+		dbConn, err = db.OpenLazy(cfg, a.dbPassStr, db.DefaultOptions())
+		if err != nil {
+			logSvc.Error("db configuration invalid", err)
+			a.Stop(context.Background())
+			return err
+		}
+		a.dbConn = dbConn
 
-	if pingErr := db.Ping(context.Background(), dbConn, 0); pingErr != nil {
-		logSvc.Warn(fmt.Sprintf(
-			"database not reachable at startup (%v) — the API will start anyway and reconnect on demand; "+
-				"database-backed endpoints return 503 until it succeeds", pingErr))
+		if pingErr := db.Ping(context.Background(), dbConn, 0); pingErr != nil {
+			logSvc.Warn(fmt.Sprintf(
+				"database not reachable at startup (%v) — the API will start anyway and reconnect on demand; "+
+					"database-backed endpoints return 503 until it succeeds", pingErr))
+		} else {
+			logSvc.Info("db connected")
+		}
 	} else {
-		logSvc.Info("db connected")
+		// A node that only writes order files needs no database of its own; the
+		// backend supplies the customer details with the order. Saved queries,
+		// price/stock and health answer 503 here.
+		logSvc.Warn("no database configured (db.host/db.user/db.port unset) — " +
+			"saved queries, price/stock and health will report 503. Orders require the " +
+			"customer details to be supplied in the request.")
 	}
 
 	// Build the send-order queue for Hasavshevet.

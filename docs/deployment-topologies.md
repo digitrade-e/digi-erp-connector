@@ -57,7 +57,47 @@ network, so the order sequence depends on the share being available.
 Use the share approach only when installing a connector on the write node is
 genuinely impossible.
 
-### Configuring the write node
+### Option 1: no database on the write node (the backend supplies the customer)
+
+The write node needs the customer details that normally come from
+`[dbo].[Accounts]`. If the backend sends them with the order, the connector needs
+**no database at all** — leave the whole `db` block empty:
+
+```yaml
+erp: hasavshevet
+apiListen: '[::]:8082'
+bearerToken: <its own token>
+sendOrderDir: C:
+mpphtdocsherp
+hasBatFile: C:Hash7digi.bat        # only if the importer runs here
+# no db: block
+```
+
+The backend adds an `account` object to `POST /api/sendOrder`:
+
+```json
+{
+  "documentType": "ORDER",
+  "userExtId": "1234",
+  "account": {
+    "accountKey": "1234",
+    "fullName":  "...",
+    "address":   "...",
+    "city":      "...",
+    "phone":     "...",
+    "agent":     "...",
+    "hProtect":  "..."
+  },
+  "details": [ ... ]
+}
+```
+
+`accountKey` defaults to `userExtId` when omitted. These fields go straight into
+the IMOVEIN header, so whatever the backend sends is what the ERP receives. With
+no database, saved queries, price/stock and `/api/health` answer 503 on this node
+— which is correct: it is not a read node.
+
+### Option 2: the write node reads the database over the network
 
 ```yaml
 erp: hasavshevet

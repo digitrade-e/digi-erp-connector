@@ -149,6 +149,20 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			Details:       details,
 		}
 
+		// Customer details supplied with the order skip the [dbo].[Accounts]
+		// lookup, which is what lets a connector with no database build orders.
+		if a := req.Account; a != nil {
+			orderReq.Account = &hasavshevet.AccountDetails{
+				AccountKey: a.AccountKey,
+				FullName:   a.FullName,
+				Address:    a.Address,
+				City:       a.City,
+				Phone:      a.Phone,
+				Agent:      a.Agent,
+				HProtect:   a.HProtect,
+			}
+		}
+
 		lastOrderNumber, err := queue.Submit(orderReq)
 		if err != nil {
 			respond.Error(w, http.StatusServiceUnavailable,
