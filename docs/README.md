@@ -12,7 +12,6 @@
 | configure a machine (every key explained) | [configuration.md](configuration.md) |
 | work out why something is broken | [troubleshooting.md](troubleshooting.md) |
 | change the code | [development.md](development.md) + [../CLAUDE.md](../CLAUDE.md) |
-| migrate the backend off the old login/password auth | [erp-manager-migration-plan.md](erp-manager-migration-plan.md) |
 | know what the backend needs back before a release can ship | [connector-adaptation-plan.md](connector-adaptation-plan.md) |
 | run the database and the ERP folder on different servers | [deployment-topologies.md](deployment-topologies.md) |
 | understand price/stock per ERP | [price-and-stock.md](price-and-stock.md) |
@@ -28,7 +27,7 @@
 
 - [api.md](api.md) — routes, request/response bodies, the complete error-code table
 - [erp-manager-integration.md](erp-manager-integration.md) — the backend contract: the six calls erp-manager makes, the credentials it sends, the response shapes it depends on, and what fails silently
-- [authentication.md](authentication.md) — the two credentials, the `POST /auth/token` exchange, the `auth:` block, rollout order and verification
+- [authentication.md](authentication.md) — the one credential: the `POST /auth/token` exchange, the `auth:` block, rollout order and verification
 - [configuration.md](configuration.md) — every `config.yaml` key, defaults, secrets, file layout
 - [saved-queries.md](saved-queries.md) — the data-access model: CRUD, parameter binding, execution limits, trust model
 - [price-and-stock.md](price-and-stock.md) — `POST /api/priceAndStockHandler` per ERP
@@ -46,7 +45,7 @@
 - [deployment-topologies.md](deployment-topologies.md) — single node, or a split read/write pair when the database and the import folder are on different servers
 - [troubleshooting.md](troubleshooting.md) — symptom → cause → fix, and where the logs are
 - [autostart.md](autostart.md) — Windows service registration
-- [erp-manager-migration-plan.md](erp-manager-migration-plan.md) — handover for the backend developer: switching to the static API token
+- [erp-manager-migration-plan.md](erp-manager-migration-plan.md) — **historical**: a proposal to switch to a static API token, superseded when the static token was removed altogether
 - [connector-adaptation-plan.md](connector-adaptation-plan.md) — the backend's reply: what this connector must restore before a build is deployable, and how to fix the credentials without deleting the protocol
 - [erp-manager-integration.md](erp-manager-integration.md) — how the live backend calls this connector
 

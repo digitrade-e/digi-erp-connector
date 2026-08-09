@@ -8,13 +8,15 @@
 > [connector-adaptation-plan.md](connector-adaptation-plan.md). Read that first. §7's
 > verification checklist and §8's "what is NOT changing" list remain valid.
 >
-> The connector has since implemented that reply: `POST /auth/token` is back as a
-> supported feature with per-install credentials — see
-> [authentication.md](authentication.md). So the premise below ("once the new build is
-> deployed, `/auth/token` no longer exists") is **no longer true**. This document stays
-> as the eventual target: the static token is still the simpler design, and the
-> connector accepts it today alongside the exchange, so the migration can happen
-> whenever erp-manager is ready, without a synchronised deploy.
+> **Superseded — kept only as history (v1.0.16).** The connector implemented that reply,
+> then went further: the static bearer token was removed from the product entirely, at the
+> operator's instruction, leaving username + password → `POST /auth/token` as the **only**
+> authentication scheme. So the premise below ("once the new build is deployed,
+> `/auth/token` no longer exists") is inverted — `/auth/token` is now the only thing that
+> does exist, and there is no static token to migrate *to*. Nothing in this document
+> should be acted on. The current contract is
+> [authentication.md](authentication.md); the reasoning is decisions 15–17 in
+> `.claude/docs/02-decisions.md`.
 
 **Audience:** whoever maintains erp-manager (and the client-instance B2B backend).
 **Goal:** stop authenticating with a login and password, start sending a static
