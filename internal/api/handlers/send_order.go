@@ -15,9 +15,22 @@ import (
 //
 // Using async processing means the HTTP response is returned immediately;
 // the caller does not block while IMOVEIN files are written and has.exe runs.
-func NewSendOrderHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
+//
+// ordersConfigured tells the handler whether this installation can process
+// orders at all — it needs erp: hasavshevet and a sendOrderDir. A node deployed
+// only to serve queries has neither, and must refuse orders up front: accepting
+// them with 202 and failing inside the worker looks like success to the caller
+// and only surfaces on a status poll nobody makes.
+func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+
+		if !ordersConfigured {
+			respond.Error(w, http.StatusNotImplemented,
+				"This connector is not configured to send orders (requires erp: hasavshevet and sendOrderDir)",
+				"ORDERS_NOT_CONFIGURED", nil)
+			return
+		}
 
 		var req dto.SendOrderRequest
 		if err := decodeJSONBody(w, r, &req); err != nil {

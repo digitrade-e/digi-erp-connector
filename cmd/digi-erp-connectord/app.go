@@ -76,14 +76,29 @@ func (a *serverApp) Start() error {
 		"calling db.Open: driver=%s host=%s port=%d database=%s user=%s",
 		cfg.DB.Driver, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database, cfg.DB.User,
 	))
-	dbConn, err := db.Open(cfg, a.dbPassStr, db.DefaultOptions())
+	// Build the pool without contacting the server: an unreachable database at
+	// startup must not stop the service. This matters most when the database is
+	// on another host — the daemon would otherwise die on every network blip or
+	// whenever it starts before SQL Server is ready — but it also removes a
+	// whole class of "service won't stay started" incidents on a single box.
+	//
+	// Only a bad configuration is fatal here. Connectivity is retried by
+	// database/sql on demand, and DB-dependent endpoints answer 503 meanwhile.
+	dbConn, err := db.OpenLazy(cfg, a.dbPassStr, db.DefaultOptions())
 	if err != nil {
-		logSvc.Error("db connection failed", err)
+		logSvc.Error("db configuration invalid", err)
 		a.Stop(context.Background())
 		return err
 	}
 	a.dbConn = dbConn
-	logSvc.Info("db.Open returned successfully")
+
+	if pingErr := db.Ping(context.Background(), dbConn, 0); pingErr != nil {
+		logSvc.Warn(fmt.Sprintf(
+			"database not reachable at startup (%v) — the API will start anyway and reconnect on demand; "+
+				"database-backed endpoints return 503 until it succeeds", pingErr))
+	} else {
+		logSvc.Info("db connected")
+	}
 
 	// Build the send-order queue for Hasavshevet.
 	// Order number file lives next to IMOVEIN files for self-contained directory.

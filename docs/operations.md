@@ -47,10 +47,11 @@ not on a shared one.
 
 ## Service hardening — do this on every install
 
-The daemon **exits if the database is unreachable at startup**. Without a
-dependency on SQL Server and restart-on-failure, a reboot in which SQL Server
-becomes ready after the connector leaves the API dead until someone starts it by
-hand.
+The daemon survives an unreachable database at startup (it warns and serves 503
+until the connection succeeds), so this is no longer the difference between a
+working and a dead API. It is still worth doing: the dependency starts the
+services in a sensible order, and the recovery actions bring the connector back
+if it ever exits for another reason.
 
 ```powershell
 # elevated. Adjust the SQL Server service name: Get-Service *MSSQL*

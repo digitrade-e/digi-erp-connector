@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,7 +80,7 @@ func (r *Runner) Run(ctx context.Context, query string, params map[string]any) (
 	if isPlainDML(query) {
 		res, err := r.db.ExecContext(cctx, query, args...)
 		if err != nil {
-			return nil, err
+			return nil, r.classifyExecError(ctx, err)
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {
@@ -93,7 +94,7 @@ func (r *Runner) Run(ctx context.Context, query string, params map[string]any) (
 
 	rows, err := r.db.QueryContext(cctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, r.classifyExecError(ctx, err)
 	}
 	defer rows.Close()
 
@@ -108,6 +109,35 @@ func (r *Runner) Run(ctx context.Context, query string, params map[string]any) (
 	}
 	return &Result{Recordsets: recordsets, RowsAffected: affected}, nil
 }
+
+// classifyExecError decides whether a failed statement means "the database is
+// unreachable" (503, retry later) or "this query failed" (500, a real error).
+//
+// The daemon builds its pool lazily, so a database that is down produces a
+// perfectly valid *sql.DB whose queries fail on connect. Reporting that as a
+// query error tells the caller their request was wrong, when in fact the server
+// simply has no database right now. Distinguishing them by parsing driver error
+// text would be fragile, so we ask the pool instead: if a fresh ping also fails,
+// it is a connectivity problem.
+//
+// This runs only on the error path, so it costs nothing in the normal case.
+func (r *Runner) classifyExecError(ctx context.Context, err error) error {
+	// A caller-cancelled or timed-out request is not a connectivity problem.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, connectivityProbeTimeout)
+	defer cancel()
+	if pingErr := r.db.PingContext(pingCtx); pingErr != nil {
+		return fmt.Errorf("%w: %v", ErrNoDatabase, pingErr)
+	}
+	return err
+}
+
+// connectivityProbeTimeout bounds the ping in classifyExecError; it must stay
+// short because it delays reporting a genuine query error.
+const connectivityProbeTimeout = 3 * time.Second
 
 // isPlainDML reports whether query is an INSERT/UPDATE/DELETE/MERGE without
 // an OUTPUT clause, i.e. a statement that produces no recordset.

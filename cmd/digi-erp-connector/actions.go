@@ -139,13 +139,19 @@ func (f *mainForm) onSave() {
 	f.busy = true
 	f.setStatus("Saving...")
 	go func() {
-		err := persistConfig(cfg, password, f.logSvc)
+		warning, err := persistConfig(cfg, password, f.logSvc)
 		f.Synchronize(func() {
 			if err != nil {
 				f.finish(err.Error())
 				return
 			}
 			f.cfg = cfg
+			if warning != "" {
+				// Saved, but something optional did not succeed — say so rather
+				// than reporting plain success.
+				f.finish(warning)
+				return
+			}
 			f.finish("נשמר בהצלחה.")
 		})
 	}()

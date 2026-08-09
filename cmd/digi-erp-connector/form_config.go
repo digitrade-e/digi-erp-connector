@@ -102,32 +102,49 @@ func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bo
 // persistConfig performs all I/O for a save: Hasavshevet procedure setup, the
 // password secret, then config.yaml. Safe to call from a background goroutine.
 //
-// Order matters: the procedures are created first because they need a working
-// connection, so a bad password or host fails before anything is written.
-func persistConfig(cfg config.Config, password string, logSvc logger.LoggerService) error {
-	pw, err := resolveDBPassword(cfg.ERP, password, cfg.ERP == config.ERPHasavshevet)
-	if err != nil {
-		return err
-	}
-
+// It returns a non-empty warning when the configuration was saved but something
+// optional did not succeed. Only a failure to store the password or write
+// config.yaml is an error.
+//
+// Installing the stored procedures is deliberately best-effort. It needs a
+// reachable database and DDL rights, and a connector that only sends orders has
+// neither — its database may be on another host, and the procedures are used
+// solely by price/stock. Failing the whole save there would make such a node
+// impossible to configure at all.
+func persistConfig(cfg config.Config, password string, logSvc logger.LoggerService) (warning string, err error) {
 	if cfg.ERP == config.ERPHasavshevet {
-		if err := ensureHasavshevetProcedures(cfg, pw, logSvc); err != nil {
-			return err
-		}
+		warning = ensureProceduresBestEffort(cfg, password, logSvc)
 	}
 
 	// An empty field means "keep the stored password", so only overwrite when
 	// something was actually typed.
 	if password != "" {
 		if err := secrets.Set(dbPasswordKey(cfg.ERP), []byte(password)); err != nil {
-			return fmt.Errorf("failed to save password: %w", err)
+			return "", fmt.Errorf("failed to save password: %w", err)
 		}
 	}
 
 	if err := config.Save(cfg); err != nil {
-		return fmt.Errorf("error saving config: %w", err)
+		return "", fmt.Errorf("error saving config: %w", err)
 	}
-	return nil
+	return warning, nil
+}
+
+// ensureProceduresBestEffort tries to install the Hasavshevet stored procedures
+// and returns a human-readable warning instead of an error when it cannot.
+func ensureProceduresBestEffort(cfg config.Config, enteredPassword string, logSvc logger.LoggerService) string {
+	pw, err := resolveDBPassword(cfg.ERP, enteredPassword, true)
+	if err != nil {
+		logSvc.Warn("skipping Hasavshevet procedure setup: no DB password available")
+		return "Saved. Note: no DB password, so GPRICE_Bulk/GetOnHandStockForSkus were not installed (needed only for price & stock)."
+	}
+
+	if err := ensureHasavshevetProcedures(cfg, pw, logSvc); err != nil {
+		logSvc.Warn("Hasavshevet procedure setup failed: " + err.Error())
+		return "Saved. Note: could not install GPRICE_Bulk/GetOnHandStockForSkus (" + err.Error() +
+			"). Needed only for price & stock — sending orders is unaffected."
+	}
+	return ""
 }
 
 // ensureHasavshevetProcedures installs (CREATE OR ALTER) the stored procedures

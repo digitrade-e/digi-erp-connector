@@ -162,10 +162,15 @@ would stop the daemon from starting at all.
 
 ## Failure behaviour
 
-- **No database at startup → the daemon exits.** `db.Open` failure aborts
-  `Start()`. This is why the service needs a dependency on the SQL Server service
-  plus restart-on-failure (see [operations.md](operations.md)); otherwise a
-  reboot where SQL Server is ready late leaves the API dead.
+- **No database at startup → the daemon starts anyway.** It builds the pool
+  without contacting the server (`db.OpenLazy`), logs a warning, and serves;
+  `database/sql` connects on demand and reconnects after a failure. Only a bad
+  configuration (missing host, invalid port, unknown driver) is fatal. This is
+  what makes a database on another host workable — see
+  [deployment-topologies.md](deployment-topologies.md) — and it removes a whole
+  class of "the service won't stay started" incidents. The service dependency on
+  SQL Server plus restart-on-failure (see [operations.md](operations.md)) is
+  still worth configuring, but it is no longer load-bearing.
 - **Database lost while running** → the affected request fails closed:
   `ErrNoDatabase` → `503 DB_UNAVAILABLE`. It never panics on a nil handle.
 - **Driver errors are never returned to callers** — they are logged, and the

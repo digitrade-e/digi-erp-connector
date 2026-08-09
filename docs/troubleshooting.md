@@ -17,13 +17,18 @@ Check `server.log` — the daemon logs its whole startup sequence.
 | `failed to load db password` | No stored secret, or it was written under a different `erp` value. | Re-enter the password in the GUI and save. The secret key is per-ERP. |
 | `db connection failed` | See the next section. | |
 
-**The daemon exits when the database is unreachable at startup — by design.** So
-"the service stops right after starting" is usually a database problem, not a
-connector problem. This is exactly what the service dependency plus
-restart-on-failure in [operations.md](operations.md) exists for.
+**An unreachable database no longer stops the daemon.** It starts, logs
 
-Another cause of a service that dies on boot but works when started by hand: SQL
-Server was not ready yet. Same fix.
+```
+database not reachable at startup (...) — the API will start anyway and reconnect
+on demand; database-backed endpoints return 503 until it succeeds
+```
+
+and serves. So if the service itself is *stopping*, the cause is one of the
+configuration errors above, not the database — check the last line before it
+exits. If instead the service is running but every DB-backed call returns
+`503 DB_UNAVAILABLE`, that is the database, and the connector will pick it up
+again by itself once it is reachable.
 
 ## Database connection failures
 

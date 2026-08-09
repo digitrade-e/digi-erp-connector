@@ -52,7 +52,7 @@ func ptr[T any](v T) *T { return &v }
 
 // TestSendOrderHandler_EmptyBody returns 400 for an empty JSON object.
 func TestSendOrderHandler_EmptyBody(t *testing.T) {
-	h := NewSendOrderHandler(newTestQueue())
+	h := NewSendOrderHandler(newTestQueue(), true)
 	w := sendOrderRequest(t, h, map[string]any{})
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("empty body: got %d, want 400", w.Code)
@@ -61,7 +61,7 @@ func TestSendOrderHandler_EmptyBody(t *testing.T) {
 
 // TestSendOrderHandler_MissingDocumentType returns 400.
 func TestSendOrderHandler_MissingDocumentType(t *testing.T) {
-	h := NewSendOrderHandler(newTestQueue())
+	h := NewSendOrderHandler(newTestQueue(), true)
 	body := validOrderBody()
 	delete(body, "documentType")
 	w := sendOrderRequest(t, h, body)
@@ -72,7 +72,7 @@ func TestSendOrderHandler_MissingDocumentType(t *testing.T) {
 
 // TestSendOrderHandler_InvalidDocumentType returns 400.
 func TestSendOrderHandler_InvalidDocumentType(t *testing.T) {
-	h := NewSendOrderHandler(newTestQueue())
+	h := NewSendOrderHandler(newTestQueue(), true)
 	body := validOrderBody()
 	body["documentType"] = "INVOICE"
 	w := sendOrderRequest(t, h, body)
@@ -83,7 +83,7 @@ func TestSendOrderHandler_InvalidDocumentType(t *testing.T) {
 
 // TestSendOrderHandler_MissingDiscount returns 400 (discount can be 0, but not absent).
 func TestSendOrderHandler_MissingDiscount(t *testing.T) {
-	h := NewSendOrderHandler(newTestQueue())
+	h := NewSendOrderHandler(newTestQueue(), true)
 	body := validOrderBody()
 	delete(body, "discount")
 	w := sendOrderRequest(t, h, body)
@@ -94,7 +94,7 @@ func TestSendOrderHandler_MissingDiscount(t *testing.T) {
 
 // TestSendOrderHandler_ZeroQuantity returns 400 per Hasavshevet spec (line23 ≠ 0).
 func TestSendOrderHandler_ZeroQuantity(t *testing.T) {
-	h := NewSendOrderHandler(newTestQueue())
+	h := NewSendOrderHandler(newTestQueue(), true)
 	body := validOrderBody()
 	details := body["details"].([]any)
 	details[0].(map[string]any)["quantity"] = 0.0
@@ -106,7 +106,7 @@ func TestSendOrderHandler_ZeroQuantity(t *testing.T) {
 
 // TestSendOrderHandler_MissingSKU returns 400 per Hasavshevet spec (line22 required).
 func TestSendOrderHandler_MissingSKU(t *testing.T) {
-	h := NewSendOrderHandler(newTestQueue())
+	h := NewSendOrderHandler(newTestQueue(), true)
 	body := validOrderBody()
 	details := body["details"].([]any)
 	delete(details[0].(map[string]any), "sku")
@@ -123,7 +123,7 @@ func TestSendOrderHandler_ValidRequest(t *testing.T) {
 	// We need to start the queue to prevent "queue full" on the channel send.
 	// Actually, since defaultQueueSize=64 and we only submit once, Submit won't block
 	// even without Start. The channel has capacity 64.
-	h := NewSendOrderHandler(q)
+	h := NewSendOrderHandler(q, true)
 	w := sendOrderRequest(t, h, validOrderBody())
 	if w.Code != http.StatusAccepted {
 		t.Errorf("valid request: got %d, want 202; body: %s", w.Code, w.Body.String())
@@ -145,7 +145,7 @@ func TestSendOrderHandler_ValidRequest(t *testing.T) {
 func TestSendOrderHandler_AllDocumentTypes(t *testing.T) {
 	for _, dt := range []string{"ORDER", "QUOATE", "RETURN"} {
 		t.Run(dt, func(t *testing.T) {
-			h := NewSendOrderHandler(newTestQueue())
+			h := NewSendOrderHandler(newTestQueue(), true)
 			body := validOrderBody()
 			body["documentType"] = dt
 			w := sendOrderRequest(t, h, body)
@@ -179,5 +179,39 @@ func validOrderBody() map[string]any {
 				"discount":      0.0,
 			},
 		},
+	}
+}
+
+// A connector deployed only to serve queries has no sendOrderDir and cannot
+// build IMOVEIN files. It must say so immediately: returning 202 and failing
+// inside the worker reads as success to the caller.
+func TestSendOrderHandler_NotConfigured(t *testing.T) {
+	h := NewSendOrderHandler(newTestQueue(), false)
+	w := sendOrderRequest(t, h, validOrderBody())
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("got %d, want 501 when orders are not configured", w.Code)
+	}
+
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Code != "ORDERS_NOT_CONFIGURED" {
+		t.Errorf("code = %q, want ORDERS_NOT_CONFIGURED", body.Code)
+	}
+}
+
+// The refusal must come before any work: an unconfigured node rejects even a
+// body that would otherwise be invalid, rather than reporting a validation error
+// that hides the real problem.
+func TestSendOrderHandler_NotConfiguredBeatsValidation(t *testing.T) {
+	h := NewSendOrderHandler(newTestQueue(), false)
+	w := sendOrderRequest(t, h, map[string]any{})
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("got %d, want 501 — configuration is checked before validation", w.Code)
 	}
 }

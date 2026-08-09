@@ -40,9 +40,13 @@ func (f *mainForm) onStartServer() {
 	f.busy = true
 	f.setStatus("Saving and starting server...")
 	go func() {
-		if err := persistConfig(cfg, password, f.logSvc); err != nil {
+		warning, err := persistConfig(cfg, password, f.logSvc)
+		if err != nil {
 			f.Synchronize(func() { f.finish(err.Error()) })
 			return
+		}
+		if warning != "" {
+			f.Synchronize(func() { f.setStatus(warning) })
 		}
 
 		daemonPath, err := findConnectordBinary()

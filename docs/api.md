@@ -108,6 +108,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |
 | `NOT_IMPLEMENTED` | 501 | Reached a declared-but-unimplemented ERP path (Priority). |
+| `ORDERS_NOT_CONFIGURED` | 501 | This connector cannot send orders: it needs `erp: hasavshevet` and a `sendOrderDir`. Expected on a read-only node - see [deployment-topologies.md](deployment-topologies.md). |
 
 Legacy compatibility routes do **not** use these codes; they return the old app's
 snake_case strings (`not_found`, `invalid_id`, `sql_required`,

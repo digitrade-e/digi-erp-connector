@@ -79,10 +79,12 @@ the electron-mssql-app connector here on 2026-08-05 16:35.
   saved query legitimately returns 16183 rows and the old connector had no cap.
   Lowering it back to 10000 will make that query fail with 413.
 - Service runs as LocalSystem, `depend= MSSQL$WIZSOFT2017`, with failure
-  recovery `restart/15s, 30s, 60s` (reset daily). Both were added at cutover:
-  the daemon **aborts if the DB is unreachable at startup** (app.go), unlike the
-  electron app which started anyway, so without the dependency + recovery a
-  reboot where SQL Server is ready late would leave the API dead.
+  recovery `restart/15s, 30s, 60s` (reset daily). Both were added at cutover,
+  when the daemon still aborted if the DB was unreachable at startup. That is no
+  longer true (2026-08-06: `db.OpenLazy` — it starts, warns, and serves 503 until
+  the database answers), so these settings are now belt-and-braces rather than
+  load-bearing. Keep them: they order the service starts sensibly and restart the
+  connector if it exits for any other reason.
 - The electron app was **uninstalled** on 2026-08-05 after the connector ran
   clean, and no installer for it exists on this box. It is therefore no longer a
   rollback path; its config and all 25 saved queries are preserved under

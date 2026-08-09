@@ -27,7 +27,35 @@ func DefaultOptions() Options {
 	}
 }
 
+// Open returns a pool that is verified reachable: it pings the server and fails
+// if the database cannot be contacted. Use it for interactive checks ("Test
+// connection") where an immediate answer is the point.
+//
+// Long-running services should prefer OpenLazy — see the note there.
 func Open(cfg config.Config, password string, opt Options) (*sql.DB, error) {
+	db, err := OpenLazy(cfg, password, opt)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := Ping(context.Background(), db, opt.PingTimeout); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// OpenLazy builds the pool without contacting the server. It fails only on a
+// bad configuration (missing host, invalid port, unknown driver), never on
+// connectivity.
+//
+// This is what the daemon uses. database/sql opens connections on demand and
+// re-establishes them after a failure, so a database that is unreachable at
+// startup — a service starting before SQL Server, or a database on another host
+// across a flaky link — is a temporary condition rather than a fatal one. The
+// API keeps serving and the DB-dependent endpoints fail closed with 503 until
+// the connection succeeds.
+func OpenLazy(cfg config.Config, password string, opt Options) (*sql.DB, error) {
 	driverName, dsn, err := buildDSN(cfg, password)
 	if err != nil {
 		return nil, err
@@ -48,19 +76,21 @@ func Open(cfg config.Config, password string, opt Options) (*sql.DB, error) {
 		db.SetConnMaxLifetime(opt.ConnMaxLifetime)
 	}
 
-	if opt.PingTimeout <= 0 {
-		opt.PingTimeout = 5 * time.Second
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), opt.PingTimeout)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
 	return db, nil
+}
+
+// Ping verifies the pool can reach the server. timeout <= 0 uses the default.
+func Ping(ctx context.Context, db *sql.DB, timeout time.Duration) error {
+	if db == nil {
+		return errors.New("no database handle")
+	}
+	if timeout <= 0 {
+		timeout = DefaultOptions().PingTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return db.PingContext(ctx)
 }
 
 func buildDSN(cfg config.Config, password string) (driverName string, dsn string, err error) {

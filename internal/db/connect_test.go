@@ -1,9 +1,11 @@
 package db
 
 import (
+	"context"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
@@ -154,5 +156,46 @@ func TestBuildDSNOmitsEmptyDatabase(t *testing.T) {
 	}
 	if strings.Contains(dsn, "database=") {
 		t.Errorf("DSN should omit an empty database, got %q", dsn)
+	}
+}
+
+// OpenLazy must not contact the server. A connector whose database lives on
+// another host has to survive starting before that host is reachable — the
+// daemon relies on this to keep serving (and answering 503) instead of exiting.
+func TestOpenLazyDoesNotRequireAReachableServer(t *testing.T) {
+	cfg := baseConfig()
+	// Nothing listens here; port 1 is reserved and refuses immediately.
+	cfg.DB.Host = "127.0.0.1"
+	cfg.DB.Port = 1
+
+	pool, err := OpenLazy(cfg, "pw", DefaultOptions())
+	if err != nil {
+		t.Fatalf("OpenLazy should succeed without a reachable server: %v", err)
+	}
+	if pool == nil {
+		t.Fatal("OpenLazy returned a nil pool")
+	}
+	defer pool.Close()
+
+	// The failure surfaces on use, not on construction.
+	if err := Ping(context.Background(), pool, 2*time.Second); err == nil {
+		t.Error("Ping should fail against a port with no listener")
+	}
+}
+
+// A broken configuration is still fatal at construction: that is an operator
+// error, not a transient network condition.
+func TestOpenLazyStillRejectsBadConfig(t *testing.T) {
+	cfg := baseConfig()
+	cfg.DB.Host = ""
+
+	if _, err := OpenLazy(cfg, "pw", DefaultOptions()); err == nil {
+		t.Error("OpenLazy accepted a config with no host")
+	}
+}
+
+func TestPingRejectsNilHandle(t *testing.T) {
+	if err := Ping(context.Background(), nil, time.Second); err == nil {
+		t.Error("Ping(nil) should return an error rather than panicking")
 	}
 }

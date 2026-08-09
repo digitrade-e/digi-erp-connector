@@ -118,3 +118,39 @@ a failed initial `db.Open`.
   erp-connector but had no HTTP endpoint.
 - Config section `queries: {timeoutSeconds: 30, maxRows: 10000}`.
 - Server WriteTimeout raised 30s → 60s (saved queries may run up to 30s).
+
+## 12. Split read/write deployment supported (2026-08-06)
+
+The customer needs orders written into `C:\xampp\htdocs\herp` on a *second*
+server (192.168.0.7) while the database stays on 192.168.0.5. Installing a
+connector on .7 "for orders only" was impossible: order building needs the
+database (`queryAccount` is mandatory), the GUI refused to save when the stored
+procedures could not be installed, and the daemon exited when the DB was
+unreachable.
+
+Chosen topology: a connector **on** the write node with its database over the
+network, rather than one connector writing files across an SMB share. The share
+alternative needs the other team to grant the *computer account* rights on both
+share and NTFS, leaves the question of what imports the files unanswered, and
+puts `lastOrderNumber.json` on the far side of the network. See
+`docs/deployment-topologies.md`.
+
+Three code changes made it possible, each defensible on its own:
+
+- **`db.OpenLazy`** — the daemon builds the pool without contacting the server,
+  warns, and serves; `database/sql` reconnects on demand. Only a bad config is
+  fatal. Startup no longer depends on the network, which matters far beyond this
+  deployment.
+- **Best-effort procedure install** — a failure to create `GPRICE_Bulk` /
+  `GetOnHandStockForSkus` now warns instead of aborting the save. They serve
+  price/stock only, so a write node with a least-privilege login does not need
+  them, and refusing the save made such a node unconfigurable.
+- **`ORDERS_NOT_CONFIGURED` (501)** — a node with no `sendOrderDir` refuses
+  orders up front instead of returning 202 and failing inside the worker.
+  Capability is derived from config rather than a new switch, so the two cannot
+  disagree.
+
+Constraint that must hold: **exactly one node owns `sendOrderDir`**.
+`lastOrderNumber.json` is guarded by a process-local mutex, so two connectors
+sharing that folder would issue duplicate order numbers and overwrite each
+other's `IMOVEIN.doc`.
