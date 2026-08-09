@@ -1,12 +1,13 @@
 # erp-manager integration — what the backend sends and expects
 
-> **Current as of 2026-08-09.** The credential exchange erp-manager uses was
-> briefly deleted along with the rest of the legacy compatibility layer, then
-> restored as a first-class feature after erp-manager showed that the credential
-> fields it would have had to drop are shared with four other ERP services
-> ([connector-adaptation-plan.md](connector-adaptation-plan.md)). What changed
-> permanently: the credentials are now per installation, and the signing secret
-> is generated on the box instead of living in the old app's source. See
+> **Current as of 2026-08-09.** The credential exchange erp-manager uses was briefly
+> deleted with the rest of the legacy compatibility layer, then restored as a
+> first-class feature after erp-manager showed that the fields it would have had to
+> drop are shared with four other ERP services
+> ([connector-adaptation-plan.md](connector-adaptation-plan.md)). It is now the
+> connector's **only** authentication scheme — the static `bearerToken` was removed
+> the same day — and its credentials are per installation, with the signing secret
+> generated on the box instead of living in the old app's source. See
 > [authentication.md](authentication.md). `POST /api/query` stayed deleted.
 
 This connector has one production client: **erp-manager**, the Symfony/API-Platform
@@ -50,7 +51,7 @@ Table `client_connection`, entity `src/Entity/ClientConnection.php`, exposed as
 | ClientConnection field | Meaning for this connector | Must match |
 |---|---|---|
 | `baseUrl` | Prefix for every data call, e.g. `http://<host>:8082/api` | your `apiListen` host/port + the literal `/api` |
-| `authEndpoint` (`auth_endpoint`) | Where the credential exchange is POSTed, e.g. `http://<host>:8082/auth/token` | the `/auth/token` route, which exists **only** when `auth.enabled` |
+| `authEndpoint` (`auth_endpoint`) | Where the credential exchange is POSTed, e.g. `http://<host>:8082/auth/token` | the `/auth/token` route — always present |
 | `authLogin` | Sent as JSON `username` | `auth.username` on that box |
 | `authPassword` | Sent as JSON `password` | `auth.password` on that box |
 | `token` | Cache of the last issued JWT (written by erp-manager, plaintext) | signed by `auth.secret`, which is unique per install |
@@ -71,11 +72,11 @@ split read/write topology described in
 [deployment-topologies.md](deployment-topologies.md). Each node has its own
 config.yaml and therefore its own credentials.
 
-## 3. Authentication — the backend does not send your bearer token
+## 3. Authentication — login and password, and nothing else
 
-This is the single most confusing thing about the integration, so it is worth
-being blunt: **erp-manager never sends the `bearerToken` from the GUI.** It
-authenticates with a login and a password, and the connector hands back a JWT.
+erp-manager authenticates with a login and a password, and the connector hands
+back a JWT. That is now the connector's *only* scheme: the static `bearerToken`
+it used to accept alongside was removed on 2026-08-09.
 
 `src/Service/DigitradeMssqlService.php:21-52` (`login()`):
 
@@ -98,16 +99,11 @@ Content-Type: application/json
 On this side, `POST /auth/token` is served by
 `internal/api/handlers/auth.go`: it compares the credentials against
 `auth.username` / `auth.password`, signs an HS256 token with `auth.secret`, and
-answers `{access_token, token_type:"Bearer", expires_in}`.
-`middleware.AuthWithExchange` then accepts **either** the static bearer token
-**or** that token on every route — the constant-time static comparison runs first
-and fails, the signature check succeeds.
+answers `{access_token, token_type:"Bearer", expires_in}`. `middleware.Auth` then
+verifies that token on every route.
 
-Three consequences for development:
+Two consequences for development:
 
-- **`auth.enabled: false` cuts erp-manager off completely.** `/auth/token` stops
-  existing, so `login()` gets a 404 and every call fails. There is no fallback:
-  erp-manager has no static-token mode (see §8).
 - **The credentials are per installation now.** `authLogin`/`authPassword` on the
   ClientConnection row must match what the operator set on that box. The old
   `digitrade`/`123456` works nowhere, and a row still carrying it gets a 401.
@@ -117,9 +113,8 @@ Three consequences for development:
   next call gets a 401, which erp-manager handles (§4) — so this self-heals, but
   the first request after the change fails if anything upstream does not retry.
 
-The static bearer token is still worth keeping correct: it is what *you* use for
-curl probes (§7), and it is the credential the integration should eventually move
-to.
+Your own curl probes (§7) go through the same exchange — there is no shortcut
+credential to use instead.
 
 ## 4. Token lifecycle — the 401 contract
 
@@ -190,10 +185,10 @@ client-instance B2B backend (the shop on the customer's VM) has its own
   returns (`:189`).
 
 So the division of labour is: erp-manager *manages* saved queries, the B2B backend
-*executes* them and sends orders. Both authenticate the same way, but the B2B
-service is the more evolved of the two — it handles a pre-provisioned static token
-and fails with an explicit message naming both options when neither a token nor an
-`authEndpoint` is configured (`:31-36`). erp-manager has no such branch.
+*executes* them and sends orders. Both must now authenticate the same way. Note
+the B2B service also supports a pre-provisioned static token (`:31-36`) — that
+mode no longer works against this connector, so any customer using it must be
+switched to an `authEndpoint` with a username and password.
 
 ## 6. Response shapes — the trap that fails silently
 
@@ -252,15 +247,11 @@ Full rules: [saved-queries.md](saved-queries.md).
 
 Things that will cost you an hour if you meet them cold:
 
-- **No static-token mode.** `process()` is `getToken() ?? login()`. Pasting the
-  connector's `bearerToken` straight into `ClientConnection.token` does work — it
-  never expires, so the 401 branch never fires — but any transient 401 sends
-  erp-manager to `/auth/token` and it stays broken. Moving off the exchange
-  properly needs a real branch in `DigitradeMssqlService`, which does not exist
-  yet — that is exactly what
-  [erp-manager-migration-plan.md](erp-manager-migration-plan.md) asked for and
-  what [connector-adaptation-plan.md](connector-adaptation-plan.md) declined for
-  now.
+- **No static-token mode — and that is now moot.** `process()` is
+  `getToken() ?? login()`. There is nothing else to point it at: the connector
+  accepts only tokens it issued. The migration proposed in
+  [erp-manager-migration-plan.md](erp-manager-migration-plan.md) is off the table
+  for good; that document is kept as history.
 - **`getCustomQuery()` returns the wrong thing.** At
   `DigitradeMssqlService.php:244-252` the guard is inverted: it returns `[]` when
   the response is **non-empty** and returns the empty response otherwise. Called
@@ -278,12 +269,15 @@ Things that will cost you an hour if you meet them cold:
 
 ## 9. Exercising the contract from the Windows box
 
-You do not need erp-manager running to reproduce what it does. These six curls
-are the whole integration; run them from the connector machine with the **static**
-token, which is accepted on every route:
+You do not need erp-manager running to reproduce what it does. Get a token the
+same way it does, then run the same calls:
 
 ```powershell
-$t = "<bearerToken from the GUI>"
+'{"username":"<auth.username>","password":"<auth.password>"}' |
+  Set-Content -Encoding ascii $env:TEMP\body.json
+$t = (curl.exe -s -X POST http://127.0.0.1:8082/auth/token `
+        -H "Content-Type: application/json" --data-binary "@$env:TEMP\body.json" |
+      ConvertFrom-Json).access_token
 $b = "http://127.0.0.1:8082/api"
 
 # 1  the list erp-manager uses for the "alive" flag  → must be a BARE ARRAY
@@ -306,19 +300,16 @@ curl.exe -s -X POST http://127.0.0.1:8082/auth/token `
   -H "Content-Type: application/json" --data-binary "@$env:TEMP\b.json"
 # → {"access_token":"eyJ...","token_type":"Bearer","expires_in":1800}
 
-# then prove the issued token is accepted everywhere the static token is
-curl.exe -s $b/custom_sql -H "Authorization: Bearer eyJ..."
+# the token it returns is what $t above already holds
 ```
 
 Use `--data-binary "@file"`, not an inline `-d`: PowerShell 5.1 strips the double
 quotes out of a JSON argument passed to a native executable, and the request comes
 back 401 for reasons that have nothing to do with the credentials.
 
-A 404 on `/auth/token` means `auth.enabled` is off — check the **Credential
-exchange** section of the GUI, which is where those credentials live. The
-username and password shown there must equal `authLogin`/`authPassword` on the
-ClientConnection row, or the exchange answers 401 and erp-manager reports a login
-failure.
+The username and password in the GUI's **Authentication** section must equal
+`authLogin`/`authPassword` on the ClientConnection row, or the exchange answers
+401 and erp-manager reports a login failure.
 
 `GET /api/ping` (with either credential) is the quickest way to separate "the
 service is down" from "the credential is wrong": it answers 200 without touching
@@ -334,7 +325,7 @@ Connector side:
 
 | Concern | File |
 |---|---|
-| static token / issued token acceptance | `internal/api/middleware/auth.go` |
+| token verification on every route | `internal/api/middleware/auth.go` |
 | `/auth/token`, `/api/ping` | `internal/api/handlers/auth.go` |
 | token signing and verification | `internal/auth/token.go` |
 | auth config + validation | `internal/config/model.go` (`AuthConfig`), `internal/api/server.go` |

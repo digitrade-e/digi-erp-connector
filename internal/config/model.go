@@ -53,22 +53,20 @@ func (t TLSConfig) Enabled() bool {
 	return strings.TrimSpace(t.CertFile) != "" || strings.TrimSpace(t.KeyFile) != ""
 }
 
-// AuthConfig enables the credential exchange at POST /auth/token: a caller
-// posts a username and password and receives a short-lived HS256 token, which it
-// then presents as a bearer token like any other.
+// AuthConfig holds this installation's only credential.
 //
-// This exists because backends that predate the static token authenticate this
-// way, and their credential fields are shared with other integrations, so they
-// cannot simply be repointed. It is a supported feature, not a compatibility
-// shim — but the static bearer token remains the simpler credential and the one
-// to prefer for anything new.
+// A caller posts the username and password to /auth/token, gets a short-lived
+// HS256 token back, and presents that token on every other route. There is no
+// second way in: the static bearer token this connector used to accept was
+// removed on 2026-08-09, because two credentials meant two things to rotate and
+// two ways in for no benefit — erp-manager, the caller that matters, only ever
+// used this one.
 //
-// The two weaknesses of the scheme it replaces are fixed here:
+// Both weaknesses of the scheme it descends from are fixed here:
 //   - Secret is generated per installation and never has a default. A constant
 //     compiled into the binary would let anyone with the source mint tokens.
 //   - Username and Password are set by the operator, not shipped.
 type AuthConfig struct {
-	Enabled  bool   `yaml:"enabled"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 	// Secret signs issued tokens. Generated on first run if empty; changing it
@@ -79,9 +77,9 @@ type AuthConfig struct {
 	TokenTTL string `yaml:"tokenTTL,omitempty"`
 }
 
-// Validate reports why this block cannot be used, so the daemon refuses to start
-// and the GUI refuses to save rather than exposing an exchange that accepts
-// blank credentials.
+// Validate reports why this installation has no usable credential, so the daemon
+// refuses to start and the GUI refuses to save rather than serving an exchange
+// that accepts blanks — which would be an open door, not an inconvenience.
 //
 // Both callers share this one function: a check that lives in only one of them
 // is a check the other can walk past.
@@ -90,11 +88,8 @@ type AuthConfig struct {
 // server checks it separately, because by the time it builds a signer a missing
 // secret means generation failed.
 func (a AuthConfig) Validate() error {
-	if !a.Enabled {
-		return nil
-	}
 	if strings.TrimSpace(a.Username) == "" || strings.TrimSpace(a.Password) == "" {
-		return errors.New("auth.enabled requires auth.username and auth.password")
+		return errors.New("auth.username and auth.password are required")
 	}
 	return nil
 }
@@ -142,7 +137,6 @@ type Config struct {
 	ERP          ERPType  `yaml:"erp"`
 	APIListen    string   `yaml:"apiListen"`
 	Debug        bool     `yaml:"debug"`
-	BearerToken  string   `yaml:"bearerToken"`
 	ERPUser      string   `yaml:"erpUser"`
 	ImageFolders []string `yaml:"imageFolders"`
 	// SendOrderDir is the working directory for Hasavshevet import files.
@@ -196,7 +190,6 @@ func Default() Config {
 		ERP:          ERPHasavshevet,
 		APIListen:    "127.0.0.1:8080",
 		Debug:        false,
-		BearerToken:  "",
 		ImageFolders: []string{},
 		SendOrderDir: "",
 		HasExePath:   "",

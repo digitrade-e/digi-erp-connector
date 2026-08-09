@@ -217,3 +217,32 @@ before the regeneration.
 
 Not deployed. b4l stays on 1.0.4 until erp-manager updates ClientConnection rows
 67 and 76 — see `.claude/docs/04-operations.md`.
+
+## 2026-08-09 (later) — the static bearer token removed (v1.0.16)
+
+Two follow-ups to the exchange work, both driven by the operator looking at the
+result and saying it still offered more than one way to authenticate.
+
+**v1.0.15** replaced the GUI's bearer-token field and "exchange enabled"
+tick-box with a single *Authentication method* dropdown that shows only the
+selected method's fields.
+
+**v1.0.16** removed the static token altogether. Gone from `config.Config`
+(`bearerToken`), from `AuthConfig` (`Enabled` — the block is no longer
+optional), from the GUI, from `cutover-seed`, and from the middleware, which now
+takes a verifier and nothing else. `NewServer` requires a valid `auth:` block and
+always registers `/auth/token`.
+
+Test surface changed with it: `TestBothCredentialsAreAccepted` became
+`TestOnlyAnIssuedTokenAuthenticates` (the password, the signing secret, a
+foreign installation's token and JWT-shaped garbage all 401), and
+`TestExchangeAbsentWhenDisabled` is gone — it cannot be disabled.
+
+Verified on a fresh sandboxed install seeded by `cutover-seed -auth-user`:
+config.yaml contains no `bearerToken` key at all; the exchange returns 200 with a
+token; that token gets 200 on `/api/custom_sql` and `/api/ping`; a wrong token,
+an absent header and bad credentials all 401; `/api/query` 404.
+
+The cost, recorded in decision 17: every probe now does a login round-trip, and
+the B2B backend's pre-provisioned-static-token mode no longer works against this
+connector.

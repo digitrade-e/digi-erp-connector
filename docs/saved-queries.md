@@ -74,11 +74,11 @@ Everything binds via `sql.Named()` — never string concatenation.
 
 Saved queries are **trusted** — they are managed by the authenticated backend
 or an operator, so they may contain writes or `EXEC`. The security boundary is
-the bearer token + the CRUD store, not a keyword filter. This mirrors the
+the credential + the CRUD store, not a keyword filter. This mirrors the
 electron-mssql-app design ("Keep your saved queries trusted").
 
 Consequences:
-- Guard the bearer token like a DB credential.
+- Guard the auth password like a DB credential.
 - Keep `apiListen` on `127.0.0.1` unless there is a reason not to.
 - Rate limiting (25 rps / burst 50 per IP) applies before auth.
 

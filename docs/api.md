@@ -9,9 +9,8 @@ Every `/api/*` route requires `Authorization: Bearer <credential>` and is
 rate-limited per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate
 limiting is applied **before** authentication.
 
-An installation is configured with one credential, of one of two kinds: the
-static `bearerToken`, or a token obtained from `POST /auth/token` when the
-credential exchange is enabled. They behave identically on every route. See
+The credential is a token obtained from `POST /auth/token` by posting the
+configured username and password. There is no static API token. See
 [authentication.md](authentication.md).
 
 Errors are always `{ "error": "<message>", "code": "<CODE>", "details": {} }`.
@@ -31,10 +30,10 @@ is rejected), and driver errors are never returned to callers.
 
 `POST /auth/token` → `200 {"access_token":"…","token_type":"Bearer","expires_in":1800}`
 
-Body `{"username","password"}`. Registered only when `auth.enabled` is true —
-otherwise `404`. Unauthenticated (it is the credential check) but rate-limited.
-Anything wrong is `401 INVALID_CREDENTIALS`; a malformed body is not
-distinguished from wrong credentials.
+Body `{"username","password"}`. Unauthenticated (it is the credential check) but
+logged and rate-limited. Anything wrong is `401 INVALID_CREDENTIALS`; a malformed
+body is not distinguished from wrong credentials. **This is the only way to get a
+credential** — every other route requires the token it returns.
 
 ## Health
 
@@ -85,7 +84,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 
 | Code | Status | Meaning |
 |---|---|---|
-| `UNAUTHORIZED` | 401 | Missing, malformed, wrong or expired credential. No distinction between the cases, by design. |
+| `UNAUTHORIZED` | 401 | Missing, malformed, wrong or expired token. No distinction between the cases, by design. |
 | `INVALID_CREDENTIALS` | 401 | `POST /auth/token` refused the username/password, or could not parse the body. |
 | `TOKEN_ISSUE_FAILED` | 500 | Credentials were right but signing the token failed. No known trigger. |
 | `RATE_LIMITED` | 429 | Per-IP bucket exhausted. Applied before auth. |

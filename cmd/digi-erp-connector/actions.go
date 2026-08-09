@@ -27,15 +27,6 @@ func (f *mainForm) onERPChanged() {
 	f.updateSendOrderVisibility(config.ERPType(comboValue(f.erpCombo, config.ErpOption())))
 }
 
-func (f *mainForm) onGenerateToken() {
-	token, err := newBearerToken()
-	if err != nil {
-		f.setStatus("Failed to generate key: " + err.Error())
-		return
-	}
-	f.bearerTokenEdit.SetText(token)
-}
-
 func (f *mainForm) onAddFolder() {
 	f.addFolderRow("")
 }

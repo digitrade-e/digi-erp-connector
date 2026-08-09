@@ -11,7 +11,6 @@ package main
 
 import (
 	"strconv"
-	"strings"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
@@ -32,20 +31,15 @@ type mainForm struct {
 	logSvc logger.LoggerService
 	busy   bool // set on UI thread only; prevents concurrent save/start
 
-	erpCombo        *walk.ComboBox
-	apiListenEdit   *walk.LineEdit
-	debugCheck      *walk.CheckBox
-	bearerTokenEdit *walk.LineEdit
+	erpCombo      *walk.ComboBox
+	apiListenEdit *walk.LineEdit
+	debugCheck    *walk.CheckBox
 
-	authMethodCombo *walk.ComboBox
-	tokenFields     *walk.Composite
-	authFields      *walk.Composite
-	authBothLabel   *walk.Label
-	authUserEdit    *walk.LineEdit
-	authPassEdit    *walk.LineEdit
-	authSecretEdit  *walk.LineEdit
-	authTTLEdit     *walk.LineEdit
-	authShowCheck   *walk.CheckBox
+	authUserEdit   *walk.LineEdit
+	authPassEdit   *walk.LineEdit
+	authSecretEdit *walk.LineEdit
+	authTTLEdit    *walk.LineEdit
+	authShowCheck  *walk.CheckBox
 
 	driverCombo *walk.ComboBox
 	hostEdit    *walk.LineEdit
@@ -94,74 +88,39 @@ func newMainForm(cfg config.Config, logSvc logger.LoggerService) (*mainForm, err
 						Text:     "Debug mode",
 					},
 					// ── Authentication ────────────────────────────────────
-					// One method per installation. The config format can hold
-					// both credentials — a box migrating from one to the other
-					// passes through that state — but presenting them as two
-					// tick-boxes invites leaving both on forever, which is two
-					// things to rotate and two ways in. So the window offers a
-					// choice, and shows only the fields belonging to it.
+					// One credential, one way in: the caller posts these to
+					// /auth/token and gets a short-lived token back. Nothing
+					// here is shipped — the predecessor's fixed password and
+					// source-embedded signing secret are exactly what this
+					// replaces.
 					HSeparator{},
-					Label{Text: "Authentication method"},
-					ComboBox{
-						AssignTo:              &f.authMethodCombo,
-						Model:                 authMethodOptions(),
-						OnCurrentIndexChanged: f.onAuthMethodChanged,
-					},
-
-					// Static bearer token: the caller sends one fixed value.
+					Label{Text: "Authentication — the backend posts these to /auth/token"},
+					Label{Text: "These must match what the calling backend is configured with:"},
+					Label{Text: "Username"},
+					LineEdit{AssignTo: &f.authUserEdit},
+					Label{Text: "Password"},
 					Composite{
-						AssignTo: &f.tokenFields,
-						Layout:   VBox{MarginsZero: true},
+						Layout: HBox{MarginsZero: true},
 						Children: []Widget{
-							Label{Text: "Bearer token — the calling backend sends this as Authorization: Bearer <token>"},
-							Composite{
-								Layout: HBox{MarginsZero: true},
-								Children: []Widget{
-									LineEdit{AssignTo: &f.bearerTokenEdit},
-									PushButton{Text: "Generate key", OnClicked: f.onGenerateToken},
-								},
-							},
+							LineEdit{AssignTo: &f.authPassEdit, PasswordMode: true},
+							PushButton{Text: "Generate", OnClicked: f.onGenerateAuthPassword},
 						},
 					},
-
-					// Credential exchange: the caller posts a username and
-					// password to /auth/token and gets a short-lived token.
-					// Nothing here is shipped — the predecessor's fixed
-					// password and source-embedded signing secret are exactly
-					// what this replaces.
+					Label{Text: "Signing secret (unique to this install; changing it invalidates issued tokens)"},
 					Composite{
-						AssignTo: &f.authFields,
-						Layout:   VBox{MarginsZero: true},
+						Layout: HBox{MarginsZero: true},
 						Children: []Widget{
-							Label{Text: "These must match what the calling backend is configured with:"},
-							Label{Text: "Username"},
-							LineEdit{AssignTo: &f.authUserEdit},
-							Label{Text: "Password"},
-							Composite{
-								Layout: HBox{MarginsZero: true},
-								Children: []Widget{
-									LineEdit{AssignTo: &f.authPassEdit, PasswordMode: true},
-									PushButton{Text: "Generate", OnClicked: f.onGenerateAuthPassword},
-								},
-							},
-							Label{Text: "Signing secret (unique to this install; changing it invalidates issued tokens)"},
-							Composite{
-								Layout: HBox{MarginsZero: true},
-								Children: []Widget{
-									LineEdit{AssignTo: &f.authSecretEdit, PasswordMode: true},
-									PushButton{Text: "Regenerate", OnClicked: f.onGenerateAuthSecret},
-								},
-							},
-							Label{Text: "Token lifetime (e.g. 30m, 1h; blank = 30m)"},
-							LineEdit{AssignTo: &f.authTTLEdit},
-							CheckBox{
-								AssignTo:         &f.authShowCheck,
-								Text:             "Show password and secret",
-								OnCheckedChanged: f.onAuthShowChanged,
-							},
+							LineEdit{AssignTo: &f.authSecretEdit, PasswordMode: true},
+							PushButton{Text: "Regenerate", OnClicked: f.onGenerateAuthSecret},
 						},
 					},
-					Label{AssignTo: &f.authBothLabel, Text: ""},
+					Label{Text: "Token lifetime (e.g. 30m, 1h; blank = 30m)"},
+					LineEdit{AssignTo: &f.authTTLEdit},
+					CheckBox{
+						AssignTo:         &f.authShowCheck,
+						Text:             "Show password and secret",
+						OnCheckedChanged: f.onAuthShowChanged,
+					},
 
 					// ── DB ───────────────────────────────────────────────
 					HSeparator{},
@@ -261,7 +220,6 @@ func (f *mainForm) populateFromConfig(cfg config.Config) {
 	f.setComboByValue(f.erpCombo, config.ErpOption(), string(cfg.ERP))
 	f.apiListenEdit.SetText(cfg.APIListen)
 	f.debugCheck.SetChecked(cfg.Debug)
-	f.bearerTokenEdit.SetText(cfg.BearerToken)
 	f.setComboByValue(f.driverCombo, config.DBDriverOptions(), string(cfg.DB.Driver))
 	f.hostEdit.SetText(cfg.DB.Host)
 	f.portEdit.SetText(strconv.Itoa(cfg.DB.Port))
@@ -280,7 +238,7 @@ func (f *mainForm) populateFromConfig(cfg config.Config) {
 		}
 	}
 
-	f.populateAuth(cfg)
+	f.populateAuth(cfg.Auth)
 	f.updateSendOrderVisibility(cfg.ERP)
 }
 
@@ -361,70 +319,20 @@ func (f *mainForm) finish(text string) {
 	f.setStatus(text)
 }
 
-// Authentication methods, in the order they appear in the dropdown.
-const (
-	authMethodToken    = 0 // static bearerToken only
-	authMethodExchange = 1 // POST /auth/token only
-	authMethodBoth     = 2 // both accepted — a migration state, not a destination
-)
-
-// authMethodOptions labels the choice in the operator's terms — "what does the
-// calling backend send" — rather than in the config's.
-func authMethodOptions() []string {
-	return []string{
-		"Bearer token — the backend sends one fixed token",
-		"Username and password — the backend calls POST /auth/token",
-		"Both (migration only — remove one when every caller has moved)",
-	}
-}
-
-// populateAuth fills the authentication widgets and selects the method this
-// installation is actually using, derived from the config rather than stored
-// separately: a stored "method" field could disagree with the credentials
-// present, and then one of the two would be lying.
+// populateAuth fills the authentication widgets.
 //
 // The password and secret live in config.yaml in the clear, so showing them
 // reveals nothing that opening the file would not — and being able to read them
 // back is how an operator confirms the calling backend was given the right
 // values. They start masked all the same, because this window is often open on a
 // shared screen.
-func (f *mainForm) populateAuth(cfg config.Config) {
-	a := cfg.Auth
+func (f *mainForm) populateAuth(a config.AuthConfig) {
 	f.authUserEdit.SetText(a.Username)
 	f.authPassEdit.SetText(a.Password)
 	f.authSecretEdit.SetText(a.Secret)
 	f.authTTLEdit.SetText(a.TokenTTL)
 	f.authShowCheck.SetChecked(false)
 	f.onAuthShowChanged()
-
-	method := authMethodToken
-	switch {
-	case a.Enabled && strings.TrimSpace(cfg.BearerToken) != "":
-		method = authMethodBoth
-	case a.Enabled:
-		method = authMethodExchange
-	}
-	f.authMethodCombo.SetCurrentIndex(method)
-	f.updateAuthMethodVisibility(method)
-}
-
-// onAuthMethodChanged shows only the fields belonging to the selected method.
-// Hiding rather than disabling is deliberate: a greyed-out box full of
-// credentials still reads as "this is in use".
-func (f *mainForm) onAuthMethodChanged() {
-	f.updateAuthMethodVisibility(f.authMethodCombo.CurrentIndex())
-}
-
-func (f *mainForm) updateAuthMethodVisibility(method int) {
-	f.tokenFields.SetVisible(method == authMethodToken || method == authMethodBoth)
-	f.authFields.SetVisible(method == authMethodExchange || method == authMethodBoth)
-
-	if method == authMethodBoth {
-		f.authBothLabel.SetText("Two credentials are live. Remove one once every caller has moved — " +
-			"the service warns about this at every start.")
-	} else {
-		f.authBothLabel.SetText("")
-	}
 }
 
 func (f *mainForm) onAuthShowChanged() {

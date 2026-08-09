@@ -13,8 +13,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -38,11 +36,9 @@ func main() {
 	encrypt := flag.Bool("encrypt", false, "set db.encrypt")
 	trust := flag.Bool("trust", false, "set db.trustServerCertificate")
 	queriesFrom := flag.String("queries-from", "", "import saved queries from this file")
-	authUser := flag.String("auth-user", "", "enable POST /auth/token with this username (see -auth-password)")
-	authPassword := flag.String("auth-password", "", "password for the credential exchange; blank generates one and prints it")
+	authUser := flag.String("auth-user", "", "username the calling backend posts to /auth/token")
+	authPassword := flag.String("auth-password", "", "its password; blank generates one and prints it")
 	authTTL := flag.String("auth-ttl", "", "issued token lifetime (e.g. 30m); blank uses the default")
-	clearBearer := flag.Bool("clear-bearer-token", false,
-		"remove the static bearerToken, leaving the credential exchange as the only credential")
 	flag.Parse()
 
 	cfg, err := config.LoadOrDefault()
@@ -72,66 +68,40 @@ func main() {
 	cfg.DB.Encrypt = *encrypt
 	cfg.DB.TrustServerCertificate = *trust
 
-	// The credential exchange, for backends that authenticate with a username and
-	// password rather than a static token. Off unless -auth-user is given.
-	//
-	// Everything is generated here rather than left for the daemon so the operator
-	// walks away with the exact values to hand the calling backend; the daemon
-	// would otherwise mint the secret silently on first start.
+	// The installation's only credential. Everything is generated here rather
+	// than left for the daemon so the operator walks away with the exact values
+	// to hand the calling backend; the daemon would otherwise mint the secret
+	// silently on first start.
 	if *authUser != "" {
-		cfg.Auth.Enabled = true
 		cfg.Auth.Username = *authUser
+	}
+	if *authTTL != "" {
 		cfg.Auth.TokenTTL = *authTTL
-
+	}
+	if *authPassword != "" {
 		cfg.Auth.Password = *authPassword
-		if cfg.Auth.Password == "" {
-			pw, err := auth.NewPassword()
-			if err != nil {
-				fail("generate auth password", err)
-			}
-			cfg.Auth.Password = pw
-		}
-		// Never regenerate an existing secret: tokens already issued verify
-		// against it.
-		if cfg.Auth.Secret == "" {
-			secret, err := auth.NewSecret()
-			if err != nil {
-				fail("generate auth signing secret", err)
-			}
-			cfg.Auth.Secret = secret
-			fmt.Println("generated this installation's auth signing secret")
-		}
-		if err := cfg.Auth.Validate(); err != nil {
-			fail("auth settings", err)
-		}
-		if !cfg.Auth.TokenTTLValid() {
-			fail("auth settings", fmt.Errorf("-auth-ttl %q is not a positive duration", *authTTL))
-		}
 	}
-
-	// Retiring the static token is how an existing install becomes exchange-only.
-	// Verify nothing still presents it before doing this — every caller that does
-	// starts getting 401.
-	if *clearBearer {
-		if !cfg.Auth.Enabled {
-			fail("clear-bearer-token", fmt.Errorf(
-				"refusing to leave this installation with no credential at all; enable the exchange with -auth-user first"))
+	if cfg.Auth.Password == "" {
+		pw, err := auth.NewPassword()
+		if err != nil {
+			fail("generate auth password", err)
 		}
-		cfg.BearerToken = ""
+		cfg.Auth.Password = pw
 	}
-
-	// The static token is the default credential, but not when the exchange is
-	// being configured: an installation uses one credential, and generating a
-	// second here would quietly make it two.
-	//
-	// Never regenerate an existing token either — the backend may already hold it.
-	if cfg.BearerToken == "" && !cfg.Auth.Enabled {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			fail("generate bearer token", err)
+	// Never regenerate an existing secret: tokens already issued verify against it.
+	if cfg.Auth.Secret == "" {
+		secret, err := auth.NewSecret()
+		if err != nil {
+			fail("generate auth signing secret", err)
 		}
-		cfg.BearerToken = hex.EncodeToString(b)
-		fmt.Println("generated a new bearerToken")
+		cfg.Auth.Secret = secret
+		fmt.Println("generated this installation's signing secret")
+	}
+	if err := cfg.Auth.Validate(); err != nil {
+		fail("auth settings", fmt.Errorf("%w — pass -auth-user", err))
+	}
+	if !cfg.Auth.TokenTTLValid() {
+		fail("auth settings", fmt.Errorf("-auth-ttl %q is not a positive duration", *authTTL))
 	}
 
 	if err := config.Save(cfg); err != nil {
@@ -142,16 +112,9 @@ func main() {
 	fmt.Printf("  apiListen=%s erp=%s db=%s:%d/%s user=%s encrypt=%v trust=%v\n",
 		cfg.APIListen, cfg.ERP, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database, cfg.DB.User,
 		cfg.DB.Encrypt, cfg.DB.TrustServerCertificate)
-	if cfg.BearerToken != "" {
-		fmt.Printf("  bearerToken=%s\n", cfg.BearerToken)
-	} else {
-		fmt.Println("  bearerToken: none — the credential exchange is this installation's only credential")
-	}
-	if cfg.Auth.Enabled {
-		fmt.Println("credential exchange enabled at POST /auth/token — give the calling backend:")
-		fmt.Printf("  username=%s\n", cfg.Auth.Username)
-		fmt.Printf("  password=%s\n", cfg.Auth.Password)
-	}
+	fmt.Println("give the calling backend these — it posts them to /auth/token:")
+	fmt.Printf("  username=%s\n", cfg.Auth.Username)
+	fmt.Printf("  password=%s\n", cfg.Auth.Password)
 
 	if *dbPassword != "" {
 		key := "db_password_" + string(cfg.ERP)

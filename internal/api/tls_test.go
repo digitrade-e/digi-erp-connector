@@ -69,8 +69,7 @@ func writeSelfSignedPair(t *testing.T) (certFile, keyFile string) {
 }
 
 func TestServerWithoutTLSHasNoTLSConfig(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
+	cfg := authConfig(t)
 
 	srv := mustServer(t, cfg)
 	if srv.TLSConfig != nil {
@@ -81,8 +80,7 @@ func TestServerWithoutTLSHasNoTLSConfig(t *testing.T) {
 func TestServerWithTLSSetsAMinimumVersion(t *testing.T) {
 	certFile, keyFile := writeSelfSignedPair(t)
 
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
+	cfg := authConfig(t)
 	cfg.TLS = config.TLSConfig{CertFile: certFile, KeyFile: keyFile}
 
 	srv := mustServer(t, cfg)
@@ -108,8 +106,7 @@ func TestServerRejectsHalfConfiguredTLS(t *testing.T) {
 		{"key without cert", config.TLSConfig{KeyFile: keyFile}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.Default()
-			cfg.BearerToken = testStaticToken
+			cfg := authConfig(t)
 			cfg.TLS = tc.tls
 
 			_, err := newServerForTest(t, cfg)
@@ -137,8 +134,7 @@ func TestServerRejectsUnusableCertificate(t *testing.T) {
 		{"cert file is not a certificate", config.TLSConfig{CertFile: keyFile, KeyFile: certFile}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.Default()
-			cfg.BearerToken = testStaticToken
+			cfg := authConfig(t)
 			cfg.TLS = tc.tls
 
 			if _, err := newServerForTest(t, cfg); err == nil {
@@ -153,8 +149,7 @@ func TestServerRejectsUnusableCertificate(t *testing.T) {
 func TestServerServesHTTPS(t *testing.T) {
 	certFile, keyFile := writeSelfSignedPair(t)
 
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
+	cfg := authConfig(t)
 	// Only used for validation; the listener below is what actually binds.
 	cfg.APIListen = "127.0.0.1:8443"
 	cfg.TLS = config.TLSConfig{CertFile: certFile, KeyFile: keyFile}
@@ -176,7 +171,7 @@ func TestServerServesHTTPS(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	req.Header.Set("Authorization", "Bearer "+testStaticToken)
+	req.Header.Set("Authorization", "Bearer "+mustIssuedToken(t))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("HTTPS request failed: %v", err)

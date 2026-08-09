@@ -7,22 +7,21 @@ import (
 )
 
 // Validate is the one precondition the daemon and the GUI share. If it stops
-// rejecting a half-configured block, the GUI can save a config the service will
-// not start on.
+// rejecting a blank credential, the GUI can save a config the service will not
+// start on — and the exchange would accept empty strings, which is an open door
+// rather than an inconvenience.
 func TestAuthConfigValidate(t *testing.T) {
-	complete := AuthConfig{Enabled: true, Username: "bfl", Password: "pw"}
-
 	for _, tc := range []struct {
 		name    string
 		cfg     AuthConfig
 		wantErr string
 	}{
-		{"disabled blocks are not checked", AuthConfig{}, ""},
-		{"disabled and half-filled is still fine", AuthConfig{Username: "bfl"}, ""},
-		{"complete", complete, ""},
-		{"no username", AuthConfig{Enabled: true, Password: "pw"}, "username"},
-		{"no password", AuthConfig{Enabled: true, Username: "bfl"}, "password"},
-		{"whitespace is not a password", AuthConfig{Enabled: true, Username: "bfl", Password: "   "}, "password"},
+		{"complete", AuthConfig{Username: "bfl", Password: "pw"}, ""},
+		{"empty", AuthConfig{}, "username"},
+		{"no username", AuthConfig{Password: "pw"}, "username"},
+		{"no password", AuthConfig{Username: "bfl"}, "password"},
+		{"whitespace is not a password", AuthConfig{Username: "bfl", Password: "   "}, "password"},
+		{"whitespace is not a username", AuthConfig{Username: "\t", Password: "pw"}, "username"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.cfg.Validate()

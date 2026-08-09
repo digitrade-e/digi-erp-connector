@@ -8,7 +8,7 @@ It installs on the customer's machine as a Windows service plus a small
 configuration GUI.
 
 ```
-Digitrade backend ──HTTP + Bearer token──► digi-erp-connectord ──► MSSQL / IMOVEIN files
+Digitrade backend ──HTTP + issued token──► digi-erp-connectord ──► MSSQL / IMOVEIN files
 ```
 
 **The central idea:** the backend never sends SQL. SQL statements are stored on

@@ -19,8 +19,7 @@ func TestNewServerRegistersRoutes(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	cfg := config.Default()
-	cfg.BearerToken = "test-token"
+	cfg := authConfig(t)
 
 	srv, err := NewServer(cfg, ServerDeps{QueryStore: store})
 	if err != nil {
@@ -32,15 +31,12 @@ func TestNewServerRegistersRoutes(t *testing.T) {
 }
 
 func TestNewServerRequiresQueryStore(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = "test-token"
+	cfg := authConfig(t)
 
 	if _, err := NewServer(cfg, ServerDeps{}); err == nil {
 		t.Fatalf("expected error without query store")
 	}
 }
-
-const testStaticToken = "static-bearer-token"
 
 // newServerForTest builds a server and returns the error, for cases that assert
 // NewServer refuses a configuration.
@@ -68,9 +64,8 @@ func mustServer(t *testing.T, cfg config.Config) *http.Server {
 // not, and `/api/query` in particular must never return — the backend team asked
 // for that explicitly.
 func TestLegacyRoutesAreGone(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
-	h := mustServer(t, cfg).Handler
+	h := mustServer(t, authConfig(t)).Handler
+	token := mustIssuedToken(t)
 
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/api/test-connection"},
@@ -79,7 +74,7 @@ func TestLegacyRoutesAreGone(t *testing.T) {
 		{http.MethodPost, "/api/query"},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
-		req.Header.Set("Authorization", "Bearer "+testStaticToken)
+		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
@@ -87,38 +82,5 @@ func TestLegacyRoutesAreGone(t *testing.T) {
 			t.Errorf("%s %s = %d, want 404 — the legacy surface should not exist",
 				tc.method, tc.path, rec.Code)
 		}
-	}
-}
-
-// With the exchange disabled, only the static token authenticates. Anything that
-// merely looks like a JWT must be rejected like any other wrong credential.
-func TestOnlyTheStaticTokenAuthenticates(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
-	h := mustServer(t, cfg).Handler
-
-	for _, tc := range []struct {
-		name       string
-		credential string
-		wantAuthed bool
-	}{
-		{"static token", testStaticToken, true},
-		{"jwt-shaped credential", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkaWdpdHJhZGUifQ.sig", false},
-		{"garbage", "nonsense", false},
-		{"empty", "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/api/folders/list", nil)
-			if tc.credential != "" {
-				req.Header.Set("Authorization", "Bearer "+tc.credential)
-			}
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-
-			authed := rec.Code != http.StatusUnauthorized
-			if authed != tc.wantAuthed {
-				t.Errorf("status %d: authenticated=%v, want %v", rec.Code, authed, tc.wantAuthed)
-			}
-		})
 	}
 }

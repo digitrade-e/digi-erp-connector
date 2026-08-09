@@ -25,7 +25,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 	want := Default()
 	want.APIListen = "[::]:8082"
-	want.BearerToken = "deadbeef"
+	want.Auth = AuthConfig{Username: "bfl-reads", Password: "pw", Secret: "deadbeef", TokenTTL: "30m"}
 	want.ERP = ERPHasavshevet
 	want.DB.Host = "localhost"
 	want.DB.Port = 1433
@@ -48,8 +48,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if got.APIListen != want.APIListen {
 		t.Errorf("apiListen = %q, want %q", got.APIListen, want.APIListen)
 	}
-	if got.BearerToken != want.BearerToken {
-		t.Errorf("bearerToken = %q, want %q", got.BearerToken, want.BearerToken)
+	if got.Auth != want.Auth {
+		t.Errorf("auth = %+v, want %+v", got.Auth, want.Auth)
 	}
 	if got.DB != want.DB {
 		t.Errorf("db = %+v, want %+v", got.DB, want.DB)
@@ -101,14 +101,14 @@ func TestSaveOverwritesCompletely(t *testing.T) {
 	dir := redirectDataDir(t)
 
 	first := Default()
-	first.BearerToken = "a-very-long-token-value-from-the-first-save"
+	first.Auth = AuthConfig{Username: "a-very-long-username-from-the-first-save", Password: "pw", Secret: "s"}
 	first.ImageFolders = []string{`C:\one`, `C:\two`, `C:\three`}
 	if err := Save(first); err != nil {
 		t.Fatalf("first Save: %v", err)
 	}
 
 	second := Default()
-	second.BearerToken = "short"
+	second.Auth = AuthConfig{Username: "short", Password: "pw", Secret: "s"}
 	if err := Save(second); err != nil {
 		t.Fatalf("second Save: %v", err)
 	}
@@ -117,8 +117,8 @@ func TestSaveOverwritesCompletely(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.BearerToken != "short" {
-		t.Errorf("bearerToken = %q, want %q", got.BearerToken, "short")
+	if got.Auth.Username != "short" {
+		t.Errorf("auth.username = %q, want %q", got.Auth.Username, "short")
 	}
 	if len(got.ImageFolders) != 0 {
 		t.Errorf("imageFolders = %v, want empty — the first save's values must not survive", got.ImageFolders)

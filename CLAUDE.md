@@ -37,7 +37,7 @@ internal/
     server.go           ← HTTP mux, route registration, rate limiter, timeouts
     handlers/           ← One handler per endpoint
       health.go         ← GET /api/health
-      auth.go           ← POST /auth/token (credential exchange), GET /api/ping
+      auth.go           ← POST /auth/token (the credential check), GET /api/ping
       custom_sql.go     ← Saved-query CRUD (/api/custom_sql...)
       sql_queries.go    ← GET /api/sqlqueries/{name} (saved-query runner)
       folders.go        ← GET /api/folders/list
@@ -46,8 +46,7 @@ internal/
       send_order.go     ← POST /api/sendOrder (async queue)
       send_order_status.go ← GET /api/sendOrder/{jobId}
     middleware/
-      auth.go           ← Bearer credential validation: static token (constant-time)
-                          or a token issued by the exchange
+      auth.go           ← verifies the issued token on every route
       ratelimit.go      ← Per-IP token bucket (429 RATE_LIMITED)
       logging.go        ← Request/response logging (no secrets)
     respond/            ← JSON / Error — the one error envelope
@@ -72,11 +71,11 @@ internal/
 
 Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/). Linux: `/etc/digi-erp-connector/`.
 
-## API endpoints (all `/api/*` require `Authorization: Bearer <credential>`; all rate-limited)
+## API endpoints (all `/api/*` require `Authorization: Bearer <token from /auth/token>`; all rate-limited)
 
 | Route | Method | What it does |
 |-------|--------|--------------|
-| `/auth/token` | POST | **Unauthenticated** (it is the credential check). Username+password → short-lived token. Only registered when `auth.enabled`. |
+| `/auth/token` | POST | **Unauthenticated** (it is the credential check). Username+password → short-lived token. The only way in. |
 | `/api/health` | GET | Pings DB; `{"status":"ok"}` or 503 |
 | `/api/ping` | GET | Liveness + credential check; **no DB touch**. `{"ok":true,"ts":<epoch ms>}` |
 | `/api/custom_sql` | POST | Create saved query `{name, description, sql, params}` (409 on duplicate) |
@@ -96,7 +95,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 - **Param binding only** — every request value binds via `sql.Named()` in `internal/queries/binder.go`; no string concatenation into SQL, ever.
 - **Forced-string params:** `skuArray`, `warehouse`, `sku`, `syncKey` always bind as strings (never coerced to numbers) — SAP WhsCodes and SKUs can look numeric.
 - **Type inference** for query-string values (electron compat): all-digits → int64, decimal → float64, `YYYY-MM-DD…` → datetime, else string. Integer hints from `TOP(@x)`/`OFFSET @x ROWS`/`FETCH NEXT @x ROWS`.
-- Saved queries are trusted (operator/backend-managed) and MAY contain writes/EXEC — that is by design; the trust boundary is the bearer token + CRUD store, not a keyword filter.
+- Saved queries are trusted (operator/backend-managed) and MAY contain writes/EXEC — that is by design; the trust boundary is the credential + CRUD store, not a keyword filter.
 - **Row limit** default 10,000; **execution timeout** default 30s (config `queries.maxRows` / `queries.timeoutSeconds`); CRUD body limit 1 MiB.
 - `queries.json` format stays drop-in compatible with electron-mssql-app `custom_sql_data.json` (import = copy the file).
 
@@ -108,16 +107,16 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 
 ## Authentication
 
-**One credential per installation, of one of two kinds** — the static `bearerToken`, or the `POST /auth/token` exchange. Both are presented as `Authorization: Bearer <credential>` and grant identical access. `middleware/auth.go` compares against `BearerToken` with `subtle.ConstantTimeCompare` first (skipped entirely when no static token is configured), then — when the exchange is enabled — verifies the credential as a token this installation signed. Every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
+**One credential, one scheme.** A caller posts the configured username and password to `POST /auth/token`, gets a short-lived HS256 token, and sends it as `Authorization: Bearer <token>` on every `/api/*` route. `middleware/auth.go` verifies the signature and nothing else; every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
 
-**At least one credential is required**: `NewServer` refuses to start with neither, because a connector that accepts nothing 401s every request and reads as a credential bug. Configuring both is allowed (it is how a box migrates from one to the other) but logs a warning every start — it is not a destination.
+**There is no static API token.** `bearerToken` was removed from the config and the code on 2026-08-09 at the operator's instruction: two credentials meant two things to rotate and two ways in, and erp-manager — the caller that matters — only ever used the exchange. **Do not reintroduce one.**
 
-`POST /auth/token` (config block `auth:`) exchanges a username and password for a short-lived HS256 token. It is optional and off by default; when disabled the route does not exist. Hard rules:
+Hard rules:
 
 - **No credential may ever have a default.** Username and password are operator-set; the signing secret is 32 random bytes generated on first run and saved to config.yaml. The Node app this replaced shipped `digitrade`/`123456` and a secret in its source — a test asserts those exact credentials are rejected.
 - **Rejections are exactly 401**, never 403 and never 500. erp-manager re-authenticates on 401 and on nothing else; any other status turns a self-healing hiccup into a dead connection.
 - **Success is exactly 200 with `access_token` present.** A caller treats anything else as failure, and stores a missing `access_token` as null.
-- `auth.enabled` with a blank username or password **stops the daemon and is refused by the GUI** (`config.AuthConfig.Validate`, called from both).
+- A blank username or password **stops the daemon and is refused by the GUI** (`config.AuthConfig.Validate`, called from both). There is no fallback credential, so an exchange accepting blanks would be an open door.
 
 Full details: `docs/authentication.md`. The contract is pinned by `internal/api/auth_exchange_test.go` — those tests exist because a live backend breaks in production when any of it drifts.
 
@@ -132,7 +131,7 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.
-Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`, `internal/api/auth_exchange_test.go` (the credential-exchange contract: 200-with-access_token, dual acceptance, exactly-401, shipped defaults rejected, ping, and that `/api/query` stays 404), `internal/config/auth_test.go` (the shared save-time/startup guard).
+Key suites: `internal/queries` (binder inference, forced strings, store CRUD + electron format compat, DML detection), `handlers/send_order_test.go`, `files_test.go`, `imovein_test.go` (2891-byte layout), `order_number_test.go`, `internal/api/auth_exchange_test.go` (the credential contract: 200-with-access_token, only-an-issued-token-authenticates, exactly-401, shipped defaults rejected, ping, and that `/api/query` stays 404), `internal/config/auth_test.go` (the shared save-time/startup guard).
 
 ## Build
 
@@ -183,7 +182,8 @@ production backend. Covered by `queries/normalize_test.go`:
   backend team explicitly asked that it not come back. A test asserts it 404s.
 - Shipping a default for any credential — username, password, or signing secret.
   Generate them; never compile one in.
-- Storing secrets in logs (DB password, bearer token, exchange credentials, token
+- Reintroducing a static API token as a second way to authenticate. One scheme.
+- Storing secrets in logs (DB password, auth password, signing secret, token
   contents)
 - Disabling auth or rate limiting "for testing" on any route
 - Returning raw DB driver errors to API clients

@@ -344,3 +344,35 @@ Before clearing BFL's static token, turn on `debug: true` and read `server.log`
 for a while. The B2B backend sends orders to the write node, but nothing has yet
 proven it does not also read through `:8082`, and "no log lines" is not evidence
 when request logging is off — the same trap as decision 14.
+
+## 17. The static bearer token is gone — one scheme only (2026-08-09)
+
+Decision 16 allowed a box to use either credential and, in a migration, both.
+The operator's response was that this still exposes two ways to authenticate and
+they want one — the one erp-manager actually uses. Their call, stated twice.
+
+`bearerToken` is removed from `config.Config`, from the GUI, from `cutover-seed`
+and from the middleware. `AuthConfig.Enabled` went with it: the block is no
+longer optional, because it is the only credential there is. `middleware.Auth`
+now takes a verifier and nothing else.
+
+What this costs, recorded so nobody rediscovers it as a surprise:
+
+- Every operator probe now does a login round-trip first. The curl recipes in
+  `docs/` and `.claude/docs/04-operations.md` were rewritten accordingly.
+- The client-instance B2B backend supports a pre-provisioned static token
+  (`DigitradeMssqlService.php:31-36`). That mode no longer works against this
+  connector; any customer using it must be switched to an `authEndpoint` with a
+  username and password.
+- There is no fallback if the exchange itself misbehaves. `/auth/token` is now a
+  single point of failure for a box, which is the direct price of one credential
+  when the caller only speaks passwords.
+
+The upside is real too: one thing to rotate, one thing to leak, and the config
+can no longer describe a state where the window and the service disagree about
+what is live.
+
+`config.AuthConfig.Validate` still backs both the daemon's startup check and the
+GUI's save-time check, and it is now unconditional — blank username or password
+stops the service. With no second credential, an exchange that accepted blanks
+would be an open door rather than an inconvenience.

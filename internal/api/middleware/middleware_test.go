@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,8 +15,13 @@ func okHandler() http.Handler {
 }
 
 func TestAuth(t *testing.T) {
-	// A nil verifier is the static-token-only configuration: the exchange is off.
-	h := AuthWithExchange("secret-token", nil, okHandler())
+	// Stands in for the real verifier: this installation issued "secret-token".
+	h := Auth(func(credential string) error {
+		if credential != "secret-token" {
+			return errors.New("not a token this installation issued")
+		}
+		return nil
+	}, okHandler())
 
 	tests := []struct {
 		name   string

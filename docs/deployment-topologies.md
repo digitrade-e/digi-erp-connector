@@ -68,7 +68,9 @@ The write node needs the customer details that normally come from
 ```yaml
 erp: hasavshevet
 apiListen: '[::]:8082'
-bearerToken: <its own token>
+auth:
+    username: <its own>
+    password: <its own>
 sendOrderDir: C:\xampp\htdocs\herp
 hasBatFile: C:\Hash7\digi.bat        # only if the importer runs here
 # no db: block at all
@@ -103,7 +105,9 @@ no database, saved queries, price/stock and `/api/health` answer 503 on this nod
 ```yaml
 erp: hasavshevet
 apiListen: '[::]:8082'
-bearerToken: <its own token>
+auth:
+    username: <its own>
+    password: <its own>
 db:
     driver: mssql
     host: 192.168.0.5          # the database server, not localhost
@@ -147,8 +151,8 @@ each other's `IMOVEIN.doc`. Only the write node gets a `sendOrderDir`.
 within a process; it cannot serialise across machines.
 
 **Each node gets its own credentials.** They are separate installations, so the
-bearer token and any credential-exchange username/password/secret differ per
-node. On BFL that is two ClientConnection rows with two sets of values.
+username, password and signing secret differ per node. On BFL that is two
+ClientConnection rows with two sets of values.
 
 **Only the write node needs the stored procedures**… actually it does not: the
 procedures serve price/stock, which the read node handles. The GUI attempts to
@@ -186,7 +190,7 @@ From the write node:
 
 ```powershell
 Test-NetConnection 192.168.0.5 -Port 1433      # database reachable?
-curl.exe -s http://127.0.0.1:8082/api/health -H "Authorization: Bearer <token>"
+curl.exe -s http://127.0.0.1:8082/api/health -H "Authorization: Bearer <access_token>"
 ```
 
 `{"status":"ok"}` proves it reaches the database across the network. Then send a
@@ -196,6 +200,6 @@ real order and confirm the files appear in `sendOrderDir` and that
 From the read node, confirm orders are refused rather than silently accepted:
 
 ```powershell
-curl.exe -s -X POST http://127.0.0.1:8082/api/sendOrder -H "Authorization: Bearer <token>" -d "{}"
+curl.exe -s -X POST http://127.0.0.1:8082/api/sendOrder -H "Authorization: Bearer <access_token>" -d "{}"
 # -> 501 ORDERS_NOT_CONFIGURED
 ```

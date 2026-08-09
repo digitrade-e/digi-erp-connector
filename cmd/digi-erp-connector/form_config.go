@@ -40,18 +40,6 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.ERP = config.ERPType(comboValue(f.erpCombo, config.ErpOption()))
 	cfg.APIListen = f.apiListenEdit.Text()
 	cfg.Debug = f.debugCheck.Checked()
-	// Authentication: the selected method decides which credential is written,
-	// and clears the other. Leaving a stale credential in config.yaml would mean
-	// the window says one thing and the service accepts another.
-	method := f.authMethodCombo.CurrentIndex()
-	cfg.BearerToken = ""
-	if method == authMethodToken || method == authMethodBoth {
-		cfg.BearerToken = strings.TrimSpace(f.bearerTokenEdit.Text())
-		if cfg.BearerToken == "" {
-			return config.Config{}, "", fmt.Errorf(
-				"bearer token is empty — press Generate key, or switch the authentication method to username and password")
-		}
-	}
 	cfg.DB.Driver = config.DBDriver(comboValue(f.driverCombo, config.DBDriverOptions()))
 	cfg.DB.Host = f.hostEdit.Text()
 	cfg.DB.Port = port
@@ -60,7 +48,6 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.ERPUser = strings.TrimSpace(f.erpUserEdit.Text())
 
 	cfg.Auth = config.AuthConfig{
-		Enabled:  method == authMethodExchange || method == authMethodBoth,
 		Username: strings.TrimSpace(f.authUserEdit.Text()),
 		Password: strings.TrimSpace(f.authPassEdit.Text()),
 		Secret:   strings.TrimSpace(f.authSecretEdit.Text()),
@@ -71,7 +58,7 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	// service will not start on.
 	if err := cfg.Auth.Validate(); err != nil {
 		return config.Config{}, "", fmt.Errorf(
-			"set both a username and a password, or choose a different authentication method (%w)", err)
+			"authentication: %w — the connector cannot serve without them", err)
 	}
 	if !cfg.Auth.TokenTTLValid() {
 		return config.Config{}, "", fmt.Errorf(

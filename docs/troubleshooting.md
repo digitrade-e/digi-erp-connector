@@ -11,9 +11,8 @@ Check `server.log` — the daemon logs its whole startup sequence.
 |---|---|---|
 | `config not found; run digi-erp-connector UI to create it` | No `config.yaml`. Normal on a fresh install. | Configure via the GUI or `cutover-seed`. |
 | `failed to load config` | Malformed YAML. | Fix the syntax; check indentation. |
-| `no credential configured` | Neither a `bearerToken` nor an enabled `auth` block. An installation needs one. | Generate a bearer token in the GUI, or enable the credential exchange and set a username and password. |
-| `auth.enabled requires auth.username and auth.password` | The credential exchange is on but half configured. | Fill both in the GUI's **Credential exchange** section, or untick Enabled. |
-| `auth.enabled requires auth.secret` | The signing secret is blank and could not be generated — normally the daemon writes one on first start. | Check that `config.yaml` is writable, or press **Regenerate** in the GUI. |
+| `auth.username and auth.password are required` | No credential. The connector has only one and cannot serve without it. | Fill both in the GUI's **Authentication** section, or run `cutover-seed -auth-user …`. |
+| `auth.secret is required` | The signing secret is blank and could not be generated — normally the daemon writes one on first start. | Check that `config.yaml` is writable, or press **Regenerate** in the GUI. |
 | `apiListen must be in host:port format` / `port is invalid` | Bad bind address. | See [configuration.md](configuration.md#apilisten--bind-address). |
 | `failed to load db password` | No stored secret, or it was written under a different `erp` value. | Re-enter the password in the GUI and save. The secret key is per-ERP. |
 | `db connection failed` | See the next section. | |
@@ -48,26 +47,21 @@ form without saving them.
 
 ## Every request returns 401
 
-The installation authenticates with one credential — the static `bearerToken` or
-a token issued by `POST /auth/token` — and a failure of either looks identical
-from outside. [authentication.md](authentication.md) has the full picture.
-
-First thing to check: **which** credential this box is configured for. A caller
-sending a static token to an exchange-only install gets 401 forever, and nothing
-in the response says so. `server.log` at startup warns if both are configured.
+There is one credential — a token from `POST /auth/token` — and every way of
+getting it wrong looks identical from outside.
+[authentication.md](authentication.md) has the full picture.
 
 | Cause | Check |
 |---|---|
-| Token mismatch | `bearerToken` in `config.yaml` vs what the caller sends. The comparison is exact and constant-time. |
-| Missing or malformed header | It must be `Authorization: Bearer <credential>` — two whitespace-separated fields. |
-| The issued token expired | Expected, and self-healing: the caller re-authenticates on the 401. Only a problem if it repeats — see the next row. |
-| The exchange credentials do not match | `server.log` shows `rejected /auth/token: user="…"`. Compare `auth.username`/`auth.password` with what the caller is configured with. The old `digitrade`/`123456` is rejected everywhere by design. |
+| The caller sends a static API token | There is no such thing here any more. It must call `/auth/token` first and send the token that comes back. |
+| Missing or malformed header | It must be `Authorization: Bearer <token>` — two whitespace-separated fields. |
+| The token expired | Expected, and self-healing: the caller re-authenticates on the 401. Only a problem if it repeats. |
+| The credentials do not match | `server.log` shows `rejected /auth/token: user="…"`. Compare `auth.username`/`auth.password` with what the caller is configured with. The old `digitrade`/`123456` is rejected by design. |
 | `auth.secret` was regenerated | Every previously issued token stops verifying. Callers recover after one failed request; a caller that does not retry needs its cached token cleared. |
-| The caller gets 404 on `POST /auth/token` | `auth.enabled` is false, so the route does not exist. Enable it in the GUI's **Credential exchange** section, or point the caller at the static token. |
 | Testing with curl on PowerShell 5.1 | An inline `-d '{"username":…}'` loses its double quotes before curl sees it, and everything returns 401. Write the body to a file and use `--data-binary "@body.json"`. |
 
-`GET /api/ping` with the credential in question separates "service down" from
-"credential wrong" — it returns 200 without touching the database.
+`GET /api/ping` with a fresh token separates "service down" from "credential
+wrong" — it returns 200 without touching the database.
 
 ## 429 RATE_LIMITED
 

@@ -59,7 +59,7 @@ func (a *serverApp) Start() error {
 	// rather than shipping a default is the whole point: a constant compiled into
 	// the binary would let anyone with the source mint tokens accepted by every
 	// deployment. Persisted so tokens survive a restart.
-	if cfg.Auth.Enabled && strings.TrimSpace(cfg.Auth.Secret) == "" {
+	if strings.TrimSpace(cfg.Auth.Secret) == "" {
 		secret, secErr := auth.NewSecret()
 		if secErr != nil {
 			bootstrapLog.Error("could not generate an auth signing secret", secErr)

@@ -26,14 +26,27 @@ const (
 func authConfig(t *testing.T) config.Config {
 	t.Helper()
 	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
 	cfg.Auth = config.AuthConfig{
-		Enabled:  true,
 		Username: testAuthUser,
 		Password: testAuthPass,
 		Secret:   testAuthSecret,
 	}
 	return cfg
+}
+
+// mustIssuedToken returns a valid credential for the test installation — the
+// only kind there is.
+func mustIssuedToken(t *testing.T) string {
+	t.Helper()
+	signer, err := auth.NewSigner(testAuthSecret)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	token, _, err := signer.Sign(testAuthUser, time.Minute)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return token
 }
 
 func postToken(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
@@ -84,12 +97,11 @@ func TestTokenExchangeReturns200WithAccessToken(t *testing.T) {
 	}
 }
 
-// R2: the issued token authenticates the data routes, and so does the static
-// bearer token. Dual acceptance is what lets the eventual static-token migration
-// be a configuration change on the caller's side.
-func TestBothCredentialsAreAccepted(t *testing.T) {
-	cfg := authConfig(t)
-	h := mustServer(t, cfg).Handler
+// There is exactly one credential: a token this installation issued and has not
+// yet expired. Nothing else opens a route — no static token, no token signed by
+// another installation, nothing that merely looks like a JWT.
+func TestOnlyAnIssuedTokenAuthenticates(t *testing.T) {
+	h := mustServer(t, authConfig(t)).Handler
 
 	signer, _ := auth.NewSigner(testAuthSecret)
 	issued, _, err := signer.Sign(testAuthUser, time.Minute)
@@ -105,11 +117,14 @@ func TestBothCredentialsAreAccepted(t *testing.T) {
 		credential string
 		wantAuthed bool
 	}{
-		{"static bearer token", testStaticToken, true},
 		{"issued token", issued, true},
 		{"expired token", expired, false},
 		{"token from another installation", foreignToken, false},
+		{"the password itself", testAuthPass, false},
+		{"the signing secret", testAuthSecret, false},
+		{"jwt-shaped garbage", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkaWdpdHJhZGUifQ.sig", false},
 		{"garbage", "nonsense", false},
+		{"empty", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/folders/list", nil)
@@ -175,22 +190,10 @@ func TestTokenExchangeRejectsBadCredentials(t *testing.T) {
 	}
 }
 
-// The exchange is opt-in: without it the route does not exist and only the
-// static token authenticates.
-func TestExchangeAbsentWhenDisabled(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
-	h := mustServer(t, cfg).Handler
-
-	rec := postToken(t, h, `{"username":"x","password":"y"}`)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("POST /auth/token = %d, want 404 when auth.enabled is false", rec.Code)
-	}
-}
-
-// A half-configured block must stop the service rather than expose an exchange
-// that accepts blanks.
-func TestExchangeRequiresCompleteConfig(t *testing.T) {
+// A blank credential must stop the service rather than produce an exchange that
+// accepts empty strings — which is an open door, not an inconvenience. The
+// connector has no other way in, so there is nothing to fall back to.
+func TestServerRefusesBlankCredentials(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*config.AuthConfig)
@@ -199,6 +202,7 @@ func TestExchangeRequiresCompleteConfig(t *testing.T) {
 		{"no username", func(a *config.AuthConfig) { a.Username = "" }, "username"},
 		{"no password", func(a *config.AuthConfig) { a.Password = "" }, "password"},
 		{"no secret", func(a *config.AuthConfig) { a.Secret = "" }, "secret"},
+		{"nothing at all", func(a *config.AuthConfig) { *a = config.AuthConfig{} }, "username"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := authConfig(t)
@@ -206,71 +210,12 @@ func TestExchangeRequiresCompleteConfig(t *testing.T) {
 
 			_, err := newServerForTest(t, cfg)
 			if err == nil {
-				t.Fatal("expected NewServer to refuse an incomplete auth block")
+				t.Fatal("expected NewServer to refuse a config with no usable credential")
 			}
 			if !strings.Contains(err.Error(), tc.expect) {
 				t.Errorf("error %q should name the missing setting %q", err, tc.expect)
 			}
 		})
-	}
-}
-
-// An installation authenticates with one credential. Which one is a deployment
-// decision, so both fields exist — but a server with neither would 401 every
-// request, which reads as a credential problem and sends whoever debugs it
-// somewhere else entirely.
-func TestAtLeastOneCredentialIsRequired(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = ""
-
-	if _, err := newServerForTest(t, cfg); err == nil {
-		t.Fatal("expected NewServer to refuse a config with no credential at all")
-	} else if !strings.Contains(err.Error(), "no credential configured") {
-		t.Errorf("error %q should say no credential is configured", err)
-	}
-}
-
-// Exchange-only: no static token at all. This is what a box serving erp-manager
-// runs, and the empty bearerToken must not become a credential of its own — an
-// empty or absent Authorization value has to fail like any other.
-func TestExchangeOnlyInstallation(t *testing.T) {
-	cfg := authConfig(t)
-	cfg.BearerToken = ""
-	h := mustServer(t, cfg).Handler
-
-	signer, _ := auth.NewSigner(testAuthSecret)
-	issued, _, err := signer.Sign(testAuthUser, time.Minute)
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
-
-	for _, tc := range []struct {
-		name       string
-		credential string
-		wantAuthed bool
-	}{
-		{"issued token", issued, true},
-		{"the retired static token", testStaticToken, false},
-		{"empty credential", "", false},
-		{"a single space", " ", false},
-		{"garbage", "nonsense", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/api/folders/list", nil)
-			req.Header.Set("Authorization", "Bearer "+tc.credential)
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-
-			authed := rec.Code != http.StatusUnauthorized
-			if authed != tc.wantAuthed {
-				t.Errorf("status %d: authenticated=%v, want %v", rec.Code, authed, tc.wantAuthed)
-			}
-		})
-	}
-
-	// The exchange itself still works — it is the only way in.
-	if rec := postToken(t, h, `{"username":"`+testAuthUser+`","password":"`+testAuthPass+`"}`); rec.Code != http.StatusOK {
-		t.Errorf("exchange on an exchange-only install = %d, want 200", rec.Code)
 	}
 }
 
@@ -281,7 +226,7 @@ func TestPing(t *testing.T) {
 	h := mustServer(t, authConfig(t)).Handler
 
 	req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
-	req.Header.Set("Authorization", "Bearer "+testStaticToken)
+	req.Header.Set("Authorization", "Bearer "+mustIssuedToken(t))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -315,29 +260,12 @@ func TestPingRequiresAuthentication(t *testing.T) {
 	}
 }
 
-// Ping exists whether or not the exchange is enabled: the static-token callers
-// need it too.
-func TestPingExistsWithoutTheExchange(t *testing.T) {
-	cfg := config.Default()
-	cfg.BearerToken = testStaticToken
-	h := mustServer(t, cfg).Handler
-
-	req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
-	req.Header.Set("Authorization", "Bearer "+testStaticToken)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("ping without the exchange = %d, want 200", rec.Code)
-	}
-}
-
 // The raw-SQL route stays deleted — explicitly requested, and nothing calls it.
 func TestRawSQLRouteStaysDeleted(t *testing.T) {
 	h := mustServer(t, authConfig(t)).Handler
 
 	req := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"sql":"SELECT 1"}`))
-	req.Header.Set("Authorization", "Bearer "+testStaticToken)
+	req.Header.Set("Authorization", "Bearer "+mustIssuedToken(t))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 

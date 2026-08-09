@@ -13,7 +13,7 @@ connector, which owns the SQL and the ERP-specific file formats.
    Digitrade backend                    customer machine
    (remote)                             ┌─────────────────────────────────────────┐
         │                               │                                         │
-        │  HTTPS/HTTP + Bearer token    │  digi-erp-connectord (Windows service)   │
+        │  HTTPS/HTTP + issued token    │  digi-erp-connectord (Windows service)   │
         └──────────────────────────────►│    ├─ saved-query runner ───────────┐    │
                                         │    ├─ image folder access           │    │
                                         │    ├─ price & stock                 ▼    │
@@ -50,16 +50,14 @@ Every route is wrapped in the same chain, outermost first
 request
   └─ Logging      method, path, status, duration — never the token or DB password
       └─ RateLimit  per-IP token bucket, 25 rps / burst 50 → 429 RATE_LIMITED
-          └─ Auth     the installation's credential → 401 UNAUTHORIZED
+          └─ Auth     a token this installation issued → 401 UNAUTHORIZED
               └─ handler
 ```
 
 `POST /auth/token` is the one route outside the Auth step — it *is* the
 credential check — but it keeps Logging and RateLimit. The Auth step compares the
-presented credential against `bearerToken` in constant time and, if the exchange
-is enabled, verifies it as an HS256 token; either match authenticates, and every
-failure is the same flat 401. An installation normally configures one of the two;
-`NewServer` requires at least one and warns when both are live.
+presented credential as an HS256 token this installation signed. There is no
+second credential and no fallback; every failure is the same flat 401.
 
 Rate limiting sits **before** auth deliberately: an unauthenticated flood is
 exactly what you want to shed cheaply, and it means brute-forcing the token is
@@ -80,7 +78,7 @@ cmd/
 internal/
   api/                   HTTP server, route table, middleware chain
     handlers/            one file per endpoint group; json.go holds the shared decoder
-    middleware/          auth (static token or issued token), rate limit, logging
+    middleware/          auth (verify the issued token), rate limit, logging
     respond/             the single JSON error envelope
     dto/                 request/response structs per endpoint
   queries/               THE data-access model: store, binder, runner
@@ -88,7 +86,7 @@ internal/
     hasavshevet/         order pipeline (IMOVEIN, queue, order numbers), price/stock procs
     sap/                 SAP B1 price/stock (one large CTE)
     types.go             the ERP-neutral price/stock request and result
-  auth/                  HS256 sign/verify for the credential exchange, no deps
+  auth/                  HS256 sign/verify for /auth/token, no deps
   config/                config model + atomic YAML load/save
   db/                    MSSQL DSN construction, pool, ping
   files/                 allow-list + traversal defence for image folders
@@ -143,7 +141,7 @@ Windows, `/etc/digi-erp-connector/` on Linux:
 
 | File | Written by | Notes |
 |---|---|---|
-| `config.yaml` | GUI, cutover-seed | 0600; holds the bearer token in plaintext |
+| `config.yaml` | GUI, cutover-seed | 0600; holds the API credentials in plaintext |
 | `queries.json` | the CRUD endpoints | drop-in compatible with electron-mssql-app |
 | `secrets/db_password_<erp>.bin` | GUI, cutover-seed | DPAPI machine scope |
 | `server.log`, `ui.log` | daemon, GUI | no secrets, ever |

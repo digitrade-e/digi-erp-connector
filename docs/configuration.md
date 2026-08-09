@@ -13,8 +13,8 @@ The Windows path comes from the `PROGRAMDATA` environment variable, falling back
 to `C:\ProgramData`. Tests exploit that to redirect the data directory, which is
 why they can never touch a live installation.
 
-The file is written atomically with mode 0600 — it contains the bearer token in
-plaintext. **A change only takes effect when the daemon restarts** (GUI →
+The file is written atomically with mode 0600 — it contains the API credentials
+in plaintext. **A change only takes effect when the daemon restarts** (GUI →
 "Restart server", or `Restart-Service digi-erp-connectord`).
 
 ## Complete example
@@ -26,7 +26,6 @@ involved case — a replacement for an old electron-mssql-app install:
 erp: hasavshevet
 apiListen: '[::]:8082'
 debug: false
-bearerToken: <64 hex chars>
 erpUser: ""
 imageFolders: []
 sendOrderDir: ""
@@ -42,7 +41,6 @@ db:
     encrypt: true
     trustServerCertificate: true
 auth:
-    enabled: true
     username: bfl-reads
     password: <operator-set>
     secret: <64 hex chars, generated on first start>
@@ -52,10 +50,8 @@ queries:
     maxRows: 100000
 ```
 
-A fresh install is much smaller: `erp`, `apiListen`, `bearerToken`, the `db`
-block, and nothing else. The `auth` block is shown because BFL's backend
-authenticates with a username and password — it is what that box will run once
-the exchange ships; leave it out unless a caller needs it.
+A fresh install is much smaller: `erp`, `apiListen`, the `auth` block and the
+`db` block.
 
 ## Top level
 
@@ -63,8 +59,7 @@ the exchange ships; leave it out unless a caller needs it.
 |---|---|---|
 | `erp` | `hasavshevet` | `hasavshevet`, `sap`, or `priority` (selectable, not implemented). Decides which price/stock backend runs and whether the order pipeline is usable. |
 | `apiListen` | `127.0.0.1:8080` | `host:port` to bind. **Required.** See below. |
-| `debug` | `false` | Verbose request logging. Never logs the token or DB password. |
-| `bearerToken` | — | The static API credential. **Required unless the `auth` block below is enabled** — an installation must have one credential or the other. Generate with the GUI's "Generate key" (32 random bytes, hex). |
+| `debug` | `false` | Verbose request logging. Never logs credentials or the DB password. |
 | `erpUser` | `""` | Hasavshevet login name written into order files. The GUI's "Test user" checks it exists in the customer's `USERS` table. |
 | `imageFolders` | `[]` | Absolute paths served by `/api/folders/list` and `/api/file`. Nothing outside this list is reachable. |
 
@@ -77,7 +72,7 @@ the exchange ships; leave it out unless a caller needs it.
 | `0.0.0.0:8082` | every IPv4 interface |
 
 Use a loopback address unless the backend is genuinely on another host. If you do
-expose it, the bearer token is the only thing standing in front of a database —
+expose it, the credential is the only thing standing in front of a database —
 and remember a Windows firewall rule is also required. The production box uses
 `[::]:8082` because its backend is remote; that is a deliberate, documented
 exception, not a template.
@@ -143,14 +138,12 @@ Configure this whenever `apiListen` is not a loopback address; see
 
 ## `auth`
 
-The optional credential exchange at `POST /auth/token`, for backends that
-authenticate with a username and password rather than a static token. Absent or
-`enabled: false` means the route does not exist and only `bearerToken`
-authenticates. Full description in [authentication.md](authentication.md).
+**Required.** This installation's only credential: the caller posts the username
+and password to `POST /auth/token` and gets a short-lived token back. Full
+description in [authentication.md](authentication.md).
 
 ```yaml
 auth:
-    enabled: true
     username: bfl-reads
     password: <operator-set; generate it>
     secret: <64 hex chars; the daemon writes this on first start>
@@ -159,20 +152,14 @@ auth:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | Register `POST /auth/token`. Tokens it issues are accepted alongside `bearerToken`. |
-| `username` | — | **Required when enabled.** Operator-set; there is exactly one account. |
-| `password` | — | **Required when enabled.** Operator-set — use the GUI's *Generate*, or `cutover-seed -auth-user`. |
+| `username` | — | **Required.** Operator-set; there is exactly one account. |
+| `password` | — | **Required.** Operator-set — use the GUI's *Generate*, or `cutover-seed -auth-user`. |
 | `secret` | generated | HS256 signing key, 32 random bytes hex. Written by the daemon on first start if blank. Changing it invalidates every issued token. |
 | `tokenTTL` | `30m` | Go duration. A malformed value falls back to the default rather than failing startup; the GUI refuses to save one. |
 
-`enabled: true` with a blank `username` or `password` **stops the service** — the
-same reasoning as the `tls` pair above. An exchange that accepts blanks is worse
-than no exchange.
-
-An installation is meant to use **one** credential: either this block or
-`bearerToken`. Neither configured stops the service; both configured works and
-logs a warning on every start, which is the state a box passes through while
-migrating from one to the other. Clear `bearerToken` to finish the move.
+A blank `username` or `password` **stops the service** — the same reasoning as
+the `tls` pair above, and with more at stake: an exchange that accepts empty
+strings is an open door, and there is no second credential to fall back to.
 
 The password and the secret sit in `config.yaml` in the clear, protected only by
 its 0600 mode. That is deliberate: the operator has to read the password back to

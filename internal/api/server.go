@@ -46,50 +46,29 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		return nil, errors.New("query store is required")
 	}
 
-	// An installation authenticates with one credential: either the static bearer
-	// token or the POST /auth/token exchange. Which one is a deployment decision —
-	// erp-manager can only do the exchange, the B2B backend and every operator
-	// probe prefer the static token — so the config carries both fields and the
-	// operator configures the one that suits the caller.
-	//
-	// At least one is required. A server with neither would answer 401 to every
-	// request, which looks exactly like a credential problem and would send
-	// whoever debugs it to the wrong place entirely.
-	token := strings.TrimSpace(cfg.BearerToken)
-	if token == "" && !cfg.Auth.Enabled {
-		return nil, errors.New("no credential configured: set bearerToken, or enable the " +
-			"credential exchange with auth.enabled + auth.username + auth.password")
+	// The one credential. Refuse to start rather than serving an exchange that
+	// accepts blanks — the same reasoning as the TLS pair below, and with more at
+	// stake, since this is the only thing in front of the database.
+	if err := cfg.Auth.Validate(); err != nil {
+		return nil, err
 	}
-
-	// Refuse to start on a half-configured exchange rather than exposing one that
-	// accepts blank credentials — the same reasoning as the TLS pair below.
-	var signer *auth.Signer
-	if cfg.Auth.Enabled {
-		if err := cfg.Auth.Validate(); err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(cfg.Auth.Secret) == "" {
-			return nil, errors.New("auth.enabled requires auth.secret (the daemon generates one on first run; " +
-				"if you see this, generation failed or the value was cleared by hand)")
-		}
-		s, err := auth.NewSigner(cfg.Auth.Secret)
-		if err != nil {
-			return nil, err
-		}
-		signer = s
+	if strings.TrimSpace(cfg.Auth.Secret) == "" {
+		return nil, errors.New("auth.secret is required (the daemon generates one on first run; " +
+			"if you see this, generation failed or the value was cleared by hand)")
+	}
+	signer, err := auth.NewSigner(cfg.Auth.Secret)
+	if err != nil {
+		return nil, err
 	}
 
 	mux := http.NewServeMux()
 	limiter := middleware.NewRateLimiter(rateLimitPerSecond, rateLimitBurst)
-	var verifyIssued middleware.TokenVerifier
-	if signer != nil {
-		verifyIssued = func(credential string) error {
-			_, err := signer.Verify(credential)
-			return err
-		}
+	verifyIssued := func(credential string) error {
+		_, err := signer.Verify(credential)
+		return err
 	}
 	withAuth := func(h http.Handler) http.Handler {
-		return middleware.AuthWithExchange(token, verifyIssued, h)
+		return middleware.Auth(verifyIssued, h)
 	}
 	withLog := func(h http.Handler) http.Handler {
 		return middleware.Logging(deps.Logger, cfg.Debug, h)
@@ -120,16 +99,13 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	mux.Handle("GET /api/health", wrap(healthHandler))
 
 	// "Is the service up and is my credential good" — deliberately no database
-	// touch, unlike /api/health. Always registered: an operator checking a
-	// connection needs it whichever credential they use.
+	// touch, unlike /api/health.
 	mux.Handle("GET /api/ping", wrap(handlers.NewPingHandler()))
 
-	if signer != nil {
-		// The credential exchange cannot itself require a credential. It is
-		// still logged and rate-limited.
-		mux.Handle("POST /auth/token", withLog(limiter.Middleware(
-			handlers.NewTokenHandler(cfg.Auth, signer, deps.Logger))))
-	}
+	// The credential exchange cannot itself require a credential. It is still
+	// logged and rate-limited.
+	mux.Handle("POST /auth/token", withLog(limiter.Middleware(
+		handlers.NewTokenHandler(cfg.Auth, signer, deps.Logger))))
 
 	// Saved queries: the only SQL entry point. The backend registers queries
 	// via CRUD and executes them by name — raw SQL is never accepted.
@@ -164,19 +140,9 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	}
 	srv.TLSConfig = tlsCfg
 
-	// Both credentials work, but an installation is meant to use one. Two live
-	// credentials is two things to rotate and two ways in, usually because a
-	// migration was left half-done — say so rather than letting it become the
-	// permanent state.
-	if deps.Logger != nil && token != "" && signer != nil {
-		deps.Logger.Warn("this installation accepts two credentials: the static bearerToken and " +
-			"the POST /auth/token exchange. Once every caller uses one of them, remove the other — " +
-			"clear bearerToken, or set auth.enabled to false.")
-	}
-
 	if deps.Logger != nil && tlsCfg == nil && !isLoopback(addr) {
 		deps.Logger.Warn("serving plaintext HTTP on a non-loopback address (" + addr +
-			"): the bearer token crosses the network in the clear. Configure tls.certFile/tls.keyFile.")
+			"): credentials and issued tokens cross the network in the clear. Configure tls.certFile/tls.keyFile.")
 	}
 
 	return srv, nil
