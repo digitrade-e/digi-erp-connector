@@ -56,8 +56,7 @@ request
 
 Rate limiting sits **before** auth deliberately: an unauthenticated flood is
 exactly what you want to shed cheaply, and it means brute-forcing the token is
-also rate-limited. `POST /auth/token` (legacy compatibility only) is logged and
-rate-limited but not authenticated — it *is* the credential exchange.
+also rate-limited.
 
 Server timeouts are set on `http.Server`: 5s read-header, 10s read, 60s write,
 60s idle. The write timeout is 60s because a saved query may legitimately run for
@@ -74,10 +73,10 @@ cmd/
 internal/
   api/                   HTTP server, route table, middleware chain
     handlers/            one file per endpoint group; json.go holds the shared decoder
-    middleware/          auth (+ optional legacy JWT), rate limit, logging
+    middleware/          auth (static bearer token), rate limit, logging
     respond/             the single JSON error envelope
-    dto/                 request/response structs, incl. the legacy shapes
-  queries/               THE data-access model: store, binder, runner, read-only validator
+    dto/                 request/response structs per endpoint
+  queries/               THE data-access model: store, binder, runner
   erp/
     hasavshevet/         order pipeline (IMOVEIN, queue, order numbers), price/stock procs
     sap/                 SAP B1 price/stock (one large CTE)
@@ -86,7 +85,6 @@ internal/
   db/                    MSSQL DSN construction, pool, ping
   files/                 allow-list + traversal defence for image folders
   secrets/               DB password at rest (Windows DPAPI machine scope)
-  legacyauth/            HS256 JWT for the electron compatibility exchange
   logger/                file-first logger used by the daemon and GUI
   platform/
     autostart/           Windows service registration and control
@@ -183,7 +181,7 @@ would stop the daemon from starting at all.
 
 | Not here | Why |
 |---|---|
-| A raw-SQL endpoint (by default) | Replaced by saved queries. The config-gated `POST /api/query` exists only for electron compatibility — see [legacy-compat.md](legacy-compat.md). |
+| A raw-SQL endpoint | Replaced by saved queries. The electron-compatibility `POST /api/query` was deleted on 2026-08-09 along with the rest of that layer. |
 | PDF generation, printing, SMTP email | Removed 2026-07-20. Recoverable from git history; read the old repo's `docs/printing.md` first — the print path had session-0 and WSD-port constraints that are not obvious. |
 | Priority ERP | Selectable in the GUI, not implemented. |
 | A `--headless` GUI mode | Never existed, despite an earlier version of this document claiming otherwise. Configure headless installs with `cmd/cutover-seed` or by editing `config.yaml`. |

@@ -48,7 +48,8 @@ internal/
       auth.go           ← Bearer token validation (constant-time compare)
       ratelimit.go      ← Per-IP token bucket (429 RATE_LIMITED)
       logging.go        ← Request/response logging (no secrets)
-    respond/            ← JSON / Error — the one error envelope (was "utils")
+    respond/            ← JSON / Error — the one error envelope
+    middleware/auth.go  ← static bearer token only (constant-time compare)
     dto/                ← Request/response structs per endpoint
   queries/              ← Saved-query subsystem (THE data-access model)
     store.go            ← JSON registry (queries.json, atomic writes, mutex)
@@ -60,7 +61,6 @@ internal/
   erp/sap/              ← SAP B1 price/stock query
   files/                ← Path traversal prevention
   logger/               ← LoggerService interface
-  legacyauth/           ← HS256 JWT for the electron compat exchange
   platform/
     autostart/          ← Windows service registration/control
     paths/              ← data dir + config path (PROGRAMDATA-based)
@@ -86,31 +86,9 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
 
-### Legacy compatibility routes (only when `legacyCompat.enabled`)
-
-Off by default. Present so a backend written against the old Node connector works
-unchanged during migration; all reply in the **old app's error shape**
-(`{"error":"snake_case"}`). Full detail: `docs/legacy-compat.md`.
-
-The live backend is **erp-manager**, and it authenticates through `/auth/token`
-rather than the static bearer token — so `legacyCompat.enabled: false` cuts it off.
-What it sends, the six routes it calls, the response keys it depends on (`value` on
-saved queries, a bare array on `custom_sql`) and its 401-triggered re-login are
-documented in `docs/erp-manager-integration.md`. Read that before changing any
-response shape.
-
-| Route | Method | What it does |
-|-------|--------|--------------|
-| `/auth/token` | POST | Credentials → HS256 JWT (unauthenticated, rate-limited). Auth then accepts that JWT **or** the static bearer token everywhere. |
-| `/api/ping` | GET | `{"ok":true,"ts":<ms>}`, no DB touch |
-| `/api/test-connection` | POST | Try supplied `{mssql:{...}}` settings |
-| `/api/customers` | GET | Old sample route over `dbo.Items` |
-| `/api/orders/{id}` | GET | Old sample route over `dbo.Items` |
-| `/api/query` | POST | Ad-hoc read-only SQL — **only** with `allowRawSQL: true` |
-
 ## Saved-query model — hard constraints, NEVER bypass
 
-- **There is NO raw-SQL endpoint by default.** The legacy `POST /api/sql` was deliberately deleted; never add an endpoint that accepts SQL text for immediate execution. SQL enters the system only through the CRUD store. The **one** exception is `POST /api/query`, which exists solely for electron-mssql-app compatibility, is absent unless `legacyCompat.allowRawSQL` is true, is read-only validated (`queries.ValidateReadOnly`), fully parameter-bound and logged on every call — see `docs/legacy-compat.md`. Do not widen it, and do not add a second one.
+- **There is NO raw-SQL endpoint.** The legacy `POST /api/sql` was deleted before the first release, and the electron-compatibility `POST /api/query` was deleted on 2026-08-09. Never add an endpoint that accepts SQL text for immediate execution. SQL enters the system only through the CRUD store.
 - **Param binding only** — every request value binds via `sql.Named()` in `internal/queries/binder.go`; no string concatenation into SQL, ever.
 - **Forced-string params:** `skuArray`, `warehouse`, `sku`, `syncKey` always bind as strings (never coerced to numbers) — SAP WhsCodes and SKUs can look numeric.
 - **Type inference** for query-string values (electron compat): all-digits → int64, decimal → float64, `YYYY-MM-DD…` → datetime, else string. Integer hints from `TOP(@x)`/`OFFSET @x ROWS`/`FETCH NEXT @x ROWS`.
@@ -172,19 +150,14 @@ production backend. Covered by `queries/normalize_test.go`:
   the shared 1 MiB limit, rejects trailing data and keeps numbers exact. Do not
   reintroduce per-handler decoders or per-handler size constants.
 - **`respond.JSON` / `respond.Error` only** — no direct `json.NewEncoder(w)` in
-  handlers. Legacy compat routes are the documented exception and use
-  `writeLegacyError`.
+  handlers. There is exactly one error envelope; do not add a second shape.
 - **`readFormConfig` must start from `f.cfg`**, never a zero `config.Config`.
-  Settings with no widget (queries limits, db.encrypt, hasExePath) would
-  otherwise be wiped by a GUI save. `legacyCompat` was the reason this rule
-  exists; it now has widgets of its own, and `readLegacyCompat` starts from the
-  loaded block for the same reason.
+  Settings with no widget (queries limits, db.encrypt, hasExePath, tls) would
+  otherwise be wiped by a GUI save.
 - **The GUI must not be able to save a config the daemon refuses to start on.**
-  `validateLegacyCompat` mirrors the `api.NewServer` precondition (enabled needs
-  jwtSecret + jwtUser + jwtPassword) at save time, and `confirmLegacyDisable`
-  prompts before the compat layer is switched off, because that single click cuts
-  erp-manager off on the next restart. Any new startup precondition that a widget
-  can violate needs the same treatment.
+  Any startup precondition in `api.NewServer` that a widget can violate needs a
+  matching check at save time, so the GUI cannot leave a box holding a config its
+  own service will not start on.
 - **Keep the tree gofmt-clean.** `.gitattributes` pins `.go` to LF; if
   `gofmt -l ./cmd ./internal` prints anything, fix it rather than adding to it.
 

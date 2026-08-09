@@ -13,7 +13,6 @@ Check `server.log` — the daemon logs its whole startup sequence.
 | `failed to load config` | Malformed YAML. | Fix the syntax; check indentation. |
 | `config validation error` … `bearerToken is required` | No token. | Generate one in the GUI. |
 | `apiListen must be in host:port format` / `port is invalid` | Bad bind address. | See [configuration.md](configuration.md#apilisten--bind-address). |
-| `legacyCompat.enabled requires jwtSecret, jwtUser and jwtPassword` | Compat switched on with blanks. | Fill them in, or set `enabled: false`. |
 | `failed to load db password` | No stored secret, or it was written under a different `erp` value. | Re-enter the password in the GUI and save. The secret key is per-ERP. |
 | `db connection failed` | See the next section. | |
 
@@ -51,11 +50,7 @@ form without saving them.
 |---|---|
 | Token mismatch | `bearerToken` in `config.yaml` vs what the caller sends. The comparison is exact and constant-time. |
 | Missing or malformed header | It must be `Authorization: Bearer <token>` — two whitespace-separated fields. |
-| The backend is doing the old JWT exchange | It is calling `POST /auth/token` and getting 404, or sending a JWT that is not accepted. Either migrate the backend to the static token or enable `legacyCompat` — see [legacy-compat.md](legacy-compat.md). |
-| Compat was switched off while tokens were live | Legacy JWTs are rejected the moment `legacyCompat.enabled` is false. |
-
-A 401 with `{"error":"invalid_credentials"}` is different: that is `/auth/token`
-rejecting the username/password, not a bearer-token problem.
+| The backend still uses the old login/password exchange | It calls `POST /auth/token` and gets 404. That route was deleted; the backend must send the static token — see [erp-manager-migration-plan.md](erp-manager-migration-plan.md). |
 
 ## 429 RATE_LIMITED
 
@@ -125,7 +120,7 @@ still matches the configured folder.
 | Buttons do nothing / service control fails | It is not elevated. Use the shortcut, which goes through `launch-admin.vbs`. |
 | "Error loading config: …" in the status bar | `config.yaml` is corrupt. The window still opens so you can fix the values. |
 | Nothing in `ui.log` | The log file was created by an elevated process and the current one cannot append. Harmless. |
-| Saved settings seem to have reverted | Check you clicked Save; the GUI preserves keys it does not display, so `legacyCompat` and `queries` are not the cause. |
+| Saved settings seem to have reverted | Check you clicked Save; the GUI preserves keys it does not display, so `queries` and `tls` are not the cause. |
 
 ## Nothing reaches the connector from another machine
 

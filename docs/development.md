@@ -38,7 +38,7 @@ never touch a real installation.
 
 ```bash
 go test ./...
-go test ./internal/queries/ -run TestValidateReadOnly -v
+go test ./internal/queries/ -run TestRun -v
 go test -cover ./...
 ```
 
@@ -46,10 +46,9 @@ Where the suites are, and what they actually protect:
 
 | Package | Protects |
 |---|---|
-| `internal/queries` | Parameter binding and type inference; the read-only validator; the JSON shape of scanned values (datetime and decimal formatting — **a wire contract with a live backend**) |
-| `internal/api` | The route table (`http.ServeMux` panics on conflicting patterns, so constructing the server is itself a test), the auth matrix, and that legacy routes are absent unless enabled |
+| `internal/queries` | Parameter binding and type inference; the JSON shape of scanned values (datetime and decimal formatting — **a wire contract with a live backend**) |
+| `internal/api` | The route table (`http.ServeMux` panics on conflicting patterns, so constructing the server is itself a test), the auth matrix, and that the deleted legacy routes stay deleted |
 | `internal/api/handlers` | Saved-query CRUD over `httptest`, send-order validation |
-| `internal/legacyauth` | JWT sign/verify, expiry, and the tampering cases including `alg: none` |
 | `internal/erp/hasavshevet` | The 2891-byte IMOVEIN record layout, Windows-1255 encoding, sequential order numbers |
 | `internal/files` | Traversal rejection and allow-list enforcement |
 | `internal/config`, `internal/secrets`, `internal/platform/atomicfile` | Round-trips, atomic replacement, and that failures are *reported* rather than swallowed |
@@ -103,16 +102,16 @@ the shared 1 MiB limit, rejects trailing data and keeps numbers exact. Do not ad
 per-handler decoders or per-handler size constants.
 
 **Respond with `respond.JSON` / `respond.Error` only.** One error envelope,
-`{error, code, details}`, with a stable machine-readable `code`. The legacy
-compatibility routes are the documented exception and use `writeLegacyError`.
+`{error, code, details}`, with a stable machine-readable `code`. There is no
+second error shape any more.
 
 **Never return a raw driver or filesystem error to a caller.** Log the detail, give
 the caller a generic message plus a code. A DB error names schemas, hosts and
 logins.
 
 **`readFormConfig` must start from `f.cfg`**, never a zero `config.Config`, or a
-GUI save silently drops every key without a widget — including `legacyCompat`,
-which on a production box means cutting off the backend.
+GUI save silently drops every key without a widget, which on a production box
+means resetting settings nobody intended to touch.
 
 **Keep the tree gofmt-clean.** `.gitattributes` pins `.go` files to LF so the
 formatting check is meaningful; before it existed, `core.autocrlf` made all 52

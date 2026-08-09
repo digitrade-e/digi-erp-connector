@@ -16,7 +16,6 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
-	"github.com/digitrade-e/digi-erp-connector/internal/legacyauth"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 )
@@ -51,33 +50,10 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		return nil, errors.New("query store is required")
 	}
 
-	// Legacy electron-mssql-app compatibility: when enabled, the old JWT
-	// exchange is accepted alongside the static bearer token and the old routes
-	// are registered. Refuse to start on a half-configured compat block rather
-	// than silently exposing /auth/token with empty credentials.
-	var legacySigner *legacyauth.Signer
-	if cfg.LegacyCompat.Enabled {
-		if cfg.LegacyCompat.JWTSecret == "" || cfg.LegacyCompat.JWTUser == "" || cfg.LegacyCompat.JWTPassword == "" {
-			return nil, errors.New("legacyCompat.enabled requires jwtSecret, jwtUser and jwtPassword")
-		}
-		signer, err := legacyauth.NewSigner(cfg.LegacyCompat.JWTSecret)
-		if err != nil {
-			return nil, err
-		}
-		legacySigner = signer
-	}
-
 	mux := http.NewServeMux()
 	limiter := middleware.NewRateLimiter(rateLimitPerSecond, rateLimitBurst)
-	var verifyLegacy middleware.LegacyTokenVerifier
-	if legacySigner != nil {
-		verifyLegacy = func(credential string) error {
-			_, err := legacySigner.Verify(credential)
-			return err
-		}
-	}
 	withAuth := func(h http.Handler) http.Handler {
-		return middleware.AuthWithLegacy(token, verifyLegacy, h)
+		return middleware.Auth(token, h)
 	}
 	withLog := func(h http.Handler) http.Handler {
 		return middleware.Logging(deps.Logger, cfg.Debug, h)
@@ -122,32 +98,6 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	mux.Handle("POST /api/sendOrder", wrap(sendOrderHandler))
 	mux.Handle("GET /api/sendOrder/{jobId}", wrap(sendOrderStatusHandler))
 	mux.Handle("POST /api/priceAndStockHandler", wrap(priceStockHandler))
-
-	// electron-mssql-app compatibility surface (cutover only, config-gated).
-	if legacySigner != nil {
-		// The credential exchange itself cannot require a credential; it is
-		// still logged and rate-limited.
-		mux.Handle("POST /auth/token", withLog(limiter.Middleware(
-			handlers.NewLegacyTokenHandler(cfg.LegacyCompat, legacySigner, deps.Logger))))
-
-		mux.Handle("GET /api/ping", wrap(handlers.NewLegacyPingHandler(deps.Logger)))
-		mux.Handle("POST /api/test-connection", wrap(
-			handlers.NewLegacyTestConnectionHandler(cfg, deps.DBPassword, deps.Logger)))
-		mux.Handle("GET /api/customers", wrap(handlers.NewLegacyCustomersHandler(queryRunner, deps.Logger)))
-		mux.Handle("GET /api/orders/{id}", wrap(handlers.NewLegacyOrderHandler(queryRunner, deps.Logger)))
-
-		if cfg.LegacyCompat.AllowRawSQL {
-			mux.Handle("POST /api/query", wrap(handlers.NewLegacyQueryHandler(queryRunner, deps.Logger)))
-		}
-
-		if deps.Logger != nil {
-			deps.Logger.Warn(fmt.Sprintf(
-				"legacy electron-mssql-app compatibility is ENABLED (rawSQL=%v): /auth/token JWT exchange, /api/ping, "+
-					"/api/test-connection, /api/customers, /api/orders/{id} are exposed. This is a cutover aid — "+
-					"migrate the backend to the static bearer token + saved queries and set legacyCompat.enabled=false.",
-				cfg.LegacyCompat.AllowRawSQL))
-		}
-	}
 
 	mux.Handle("/api/", wrap(http.HandlerFunc(NotFound)))
 

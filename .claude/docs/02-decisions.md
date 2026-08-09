@@ -227,3 +227,33 @@ tables — Accounts and Rates — which is all the order pipeline reads.
   selectable list.
 
 `NOT_IMPLEMENTED` is therefore no longer a code the API can return.
+
+## 14. Legacy compatibility layer deleted (2026-08-09)
+
+The user authorised a two-day maintenance window and asked for the old auth path
+gone. Removed in full: `internal/legacyauth`, the five compat handlers,
+`dto/legacy.go`, `queries.ValidateReadOnly` (only `/api/query` used it),
+`middleware.AuthWithLegacy`, `config.LegacyCompatConfig`, the GUI compatibility
+section, and every test for them — about 1,350 lines. `middleware.Auth` now
+accepts the static bearer token and nothing else.
+
+Sequencing matters more than the deletion: **removing the code breaks nothing
+until the binary is deployed.** So the code went first, the release exists, and
+the production box keeps running the older build until erp-manager is migrated.
+That inverts the usual risk — no downtime is spent waiting on a backend change.
+
+What deliberately stayed, because it is a *data* contract rather than an auth one:
+the `value`/`rowsAffected` response keys, `.000Z` datetimes, shortest-form decimal
+numbers, the `POST /api/create_custom_sql` alias and the `queries.json` format.
+erp-manager reads `value` and nothing else; dropping it blanks every screen with a
+200 and no error.
+
+Evidence used before deleting the routes: the source review in
+`docs/erp-manager-integration.md` establishes that erp-manager calls `/auth/token`
+plus five saved-query routes and nothing else, and `/api/query` — the only compat
+route that logged its caller — recorded 20 hits, all from 127.0.0.1 (local
+probes). Note the request logger is gated on `debug`, which is false in
+production, so "no log lines" was never evidence of "no callers"; the source
+review was.
+
+Handover for the backend developer: `docs/erp-manager-migration-plan.md`.

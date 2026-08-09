@@ -126,32 +126,6 @@ func (f *mainForm) onTestConnection() {
 	}()
 }
 
-// confirmLegacyDisable asks before the compatibility layer is switched off, and
-// reports whether the save should go ahead.
-//
-// Turning it off is a single click, and on a migrated box it is the click that
-// cuts the backend off: erp-manager authenticates by trading its ClientConnection
-// authLogin/authPassword for a JWT at POST /auth/token, and that route stops
-// existing along with the tokens it issued. Nothing else in the GUI can break
-// production this quietly, which is why this is the only confirmation prompt.
-func (f *mainForm) confirmLegacyDisable(next config.Config) bool {
-	if !f.cfg.LegacyCompat.Enabled || next.LegacyCompat.Enabled {
-		return true
-	}
-
-	answer := walk.MsgBox(
-		f.MainWindow,
-		"Disable legacy compatibility?",
-		"POST /auth/token will stop existing and every token it issued will be rejected.\r\n\r\n"+
-			"A backend that authenticates with a login and password loses access as soon as the "+
-			"service restarts — erp-manager does exactly that, through the authLogin/authPassword "+
-			"on its ClientConnection. It has to be switched to the static bearer token first.\r\n\r\n"+
-			"Disable it anyway?",
-		walk.MsgBoxYesNo|walk.MsgBoxIconWarning,
-	)
-	return answer == walk.DlgCmdYes
-}
-
 func (f *mainForm) onSave() {
 	if f.busy {
 		return
@@ -159,10 +133,6 @@ func (f *mainForm) onSave() {
 	cfg, password, err := f.readFormConfig()
 	if err != nil {
 		f.setStatus(err.Error())
-		return
-	}
-	if !f.confirmLegacyDisable(cfg) {
-		f.setStatus("Save cancelled — legacy compatibility is still enabled.")
 		return
 	}
 

@@ -35,11 +35,6 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	want.DB.TrustServerCertificate = true
 	want.ImageFolders = []string{`C:\images`, `D:\more images`}
 	want.Queries.MaxRows = 100000
-	want.LegacyCompat.Enabled = true
-	want.LegacyCompat.JWTSecret = "secret"
-	want.LegacyCompat.JWTUser = "digitrade"
-	want.LegacyCompat.JWTPassword = "123456"
-	want.LegacyCompat.AllowRawSQL = true
 
 	if err := Save(want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -61,9 +56,6 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.Queries != want.Queries {
 		t.Errorf("queries = %+v, want %+v", got.Queries, want.Queries)
-	}
-	if got.LegacyCompat != want.LegacyCompat {
-		t.Errorf("legacyCompat = %+v, want %+v", got.LegacyCompat, want.LegacyCompat)
 	}
 	if len(got.ImageFolders) != 2 || got.ImageFolders[0] != want.ImageFolders[0] {
 		t.Errorf("imageFolders = %v, want %v", got.ImageFolders, want.ImageFolders)
@@ -151,17 +143,6 @@ func TestDefaultIsUsable(t *testing.T) {
 
 	if cfg.Queries.TimeoutSeconds <= 0 || cfg.Queries.MaxRows <= 0 {
 		t.Errorf("query limits must have positive defaults, got %+v", cfg.Queries)
-	}
-	// The compat layer must never be on by default: it exposes /auth/token.
-	if cfg.LegacyCompat.Enabled {
-		t.Error("legacyCompat must default to disabled")
-	}
-	if cfg.LegacyCompat.AllowRawSQL {
-		t.Error("allowRawSQL must default to disabled")
-	}
-	// Nor may credentials be baked into the binary.
-	if cfg.LegacyCompat.JWTSecret != "" || cfg.LegacyCompat.JWTUser != "" || cfg.LegacyCompat.JWTPassword != "" {
-		t.Errorf("legacyCompat defaults must not carry credentials, got %+v", cfg.LegacyCompat)
 	}
 	if cfg.DB.Encrypt || cfg.DB.TrustServerCertificate {
 		t.Error("TLS options must default off so existing installs are unaffected")

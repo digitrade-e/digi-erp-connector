@@ -7,13 +7,10 @@ whenever the backend is on another machine — see
 
 Every `/api/*` route requires `Authorization: Bearer <token>` and is rate-limited
 per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate limiting is applied
-**before** authentication. The single exception is `POST /auth/token`, which exists
-only in legacy compatibility mode and is the credential exchange itself.
+**before** authentication.
 
 Errors are always `{ "error": "<message>", "code": "<CODE>", "details": {} }`.
 Branch on `code`, not on the message — messages may be reworded, codes are stable.
-Legacy compatibility routes answer in the old app's shape instead
-(`{"error":"snake_case"}`), noted where they appear.
 
 Request bodies are capped at 1 MiB, must be a single JSON document (trailing data
 is rejected), and driver errors are never returned to callers.
@@ -22,7 +19,6 @@ is rejected), and driver errors are never returned to callers.
 
 - [Health](#health) · [Saved queries](#saved-queries) · [Files](#files) ·
   [Orders](#orders-hasavshevet) · [Price & stock](#price--stock) ·
-  [Legacy routes](#legacy-compatibility-routes-only-when-legacycompatenabled) ·
   [Error codes](#error-code-reference)
 
 ## Health
@@ -56,21 +52,6 @@ See `saved-queries.md` for the full model.
 ## Price & stock
 
 `POST /api/priceAndStockHandler` → routed by config `erp` to Hasavshevet (`GPRICE_Bulk` + `GetOnHandStockForSkus`) or SAP B1 (12s timeout).
-
-## Legacy compatibility routes (only when `legacyCompat.enabled`)
-
-Absent by default. These reproduce electron-mssql-app so an unmigrated backend
-keeps working; they answer errors in the **old shape** — `{"error":"not_found"}`,
-not the `{error, code, details}` envelope above. See `legacy-compat.md`.
-
-| Route | Method | Response |
-|---|---|---|
-| `/auth/token` | POST | `{access_token, token_type:"Bearer", expires_in}`; `401 {"error":"invalid_credentials"}`. **Unauthenticated** (rate-limited). The returned JWT is accepted on every route, as is the static bearer token. |
-| `/api/ping` | GET | `{"ok":true,"ts":<epoch ms>}` — no DB access |
-| `/api/test-connection` | POST | `{mssql:{server,database,user,password,port,encrypt,trustServerCertificate}}` → `{"ok":true}` \| `400 {"ok":false,"error":"connection_failed"}` |
-| `/api/customers` | GET | `?limit=N` (default 50, max 200) → bare array of `dbo.Items` rows |
-| `/api/orders/{id}` | GET | one `dbo.Items` row; `400 invalid_id`, `404 not_found` |
-| `/api/query` | POST | **`allowRawSQL` only.** `{sql, params}` → `{value, rowsAffected}`; `400 sql_required` \| `only_select_allowed`, `500 query_failed` |
 
 ### Value formatting (all query routes)
 
@@ -110,7 +91,3 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |
 | `ORDERS_NOT_CONFIGURED` | 501 | This connector cannot send orders: it needs `erp: hasavshevet` and a `sendOrderDir`. Expected on a read-only node - see [deployment-topologies.md](deployment-topologies.md). |
-
-Legacy compatibility routes do **not** use these codes; they return the old app's
-snake_case strings (`not_found`, `invalid_id`, `sql_required`,
-`only_select_allowed`, `query_failed`, `invalid_credentials`, `connection_failed`).

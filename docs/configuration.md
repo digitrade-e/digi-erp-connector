@@ -44,13 +44,6 @@ db:
 queries:
     timeoutSeconds: 30
     maxRows: 100000
-legacyCompat:
-    enabled: true
-    jwtSecret: DIGITRADE_DEVEPOPMENT_MSSQL
-    jwtUser: digitrade
-    jwtPassword: "123456"
-    jwtExpiryMinutes: 30
-    allowRawSQL: true
 ```
 
 A fresh install is much smaller: `erp`, `apiListen`, `bearerToken`, the `db`
@@ -151,31 +144,6 @@ Configure this whenever `apiListen` is not a loopback address; see
 connector had no cap, so a query that legitimately returns more rows than this
 starts failing after migration. The production box needs `100000` because one
 query returns 16,183 rows. Values ≤ 0 fall back to the defaults.
-
-## `legacyCompat`
-
-Off by default; a fresh install exposes none of it. Full detail and the
-retirement procedure in [legacy-compat.md](legacy-compat.md).
-
-| Key | Meaning |
-|---|---|
-| `enabled` | Master switch. Adds `/auth/token`, `/api/ping`, `/api/test-connection`, `/api/customers`, `/api/orders/{id}`, and makes auth accept a legacy JWT as well as the static token. |
-| `jwtSecret` | HMAC secret. Must match the old connector's, or tokens it already issued stop verifying. |
-| `jwtUser`, `jwtPassword` | The credentials `/auth/token` accepts. |
-| `jwtExpiryMinutes` | Issued token lifetime (default 30). |
-| `allowRawSQL` | Separate switch for `POST /api/query`, so the raw-SQL route can be retired first. |
-
-`enabled: true` with any of `jwtSecret`/`jwtUser`/`jwtPassword` empty is a
-**startup error** — the daemon refuses to run rather than expose a credential
-exchange that accepts blanks. Since 2026-08-09 the GUI refuses that combination at
-save time too, so the config on disk can no longer describe a service that will not
-start.
-
-The whole block is editable in the GUI's **Legacy compatibility** section. It is
-there because `jwtUser`/`jwtPassword` are the credentials the live backend actually
-sends — see [erp-manager-integration.md](erp-manager-integration.md) — and while
-only `bearerToken` had a widget, the GUI showed a credential nothing used and hid
-the one in use.
 
 ## Editing safely
 

@@ -12,7 +12,7 @@
 | configure a machine (every key explained) | [configuration.md](configuration.md) |
 | work out why something is broken | [troubleshooting.md](troubleshooting.md) |
 | change the code | [development.md](development.md) + [../CLAUDE.md](../CLAUDE.md) |
-| replace an old electron-mssql-app connector | [legacy-compat.md](legacy-compat.md) |
+| migrate the backend off the old login/password auth | [erp-manager-migration-plan.md](erp-manager-migration-plan.md) |
 | run the database and the ERP folder on different servers | [deployment-topologies.md](deployment-topologies.md) |
 | understand price/stock per ERP | [price-and-stock.md](price-and-stock.md) |
 | send orders into Hasavshevet | [hasavshevet-send-order.md](hasavshevet-send-order.md) |
@@ -43,7 +43,8 @@
 - [deployment-topologies.md](deployment-topologies.md) — single node, or a split read/write pair when the database and the import folder are on different servers
 - [troubleshooting.md](troubleshooting.md) — symptom → cause → fix, and where the logs are
 - [autostart.md](autostart.md) — Windows service registration
-- [legacy-compat.md](legacy-compat.md) — the electron-mssql-app compatibility layer and how to retire it
+- [erp-manager-migration-plan.md](erp-manager-migration-plan.md) — handover for the backend developer: switching to the static API token
+- [erp-manager-integration.md](erp-manager-integration.md) — how the live backend calls this connector
 
 ## Project history and decisions
 

@@ -36,11 +36,6 @@ func main() {
 	dbPassword := flag.String("db-password", "", "db password (stored via DPAPI, not in yaml)")
 	encrypt := flag.Bool("encrypt", false, "set db.encrypt")
 	trust := flag.Bool("trust", false, "set db.trustServerCertificate")
-	legacy := flag.Bool("legacy", false, "enable electron-mssql-app compatibility")
-	legacySecret := flag.String("legacy-secret", "", "legacy JWT secret")
-	legacyUser := flag.String("legacy-user", "", "legacy JWT username")
-	legacyPass := flag.String("legacy-pass", "", "legacy JWT password")
-	legacyRawSQL := flag.Bool("legacy-raw-sql", false, "expose POST /api/query")
 	queriesFrom := flag.String("queries-from", "", "import saved queries from this file")
 	flag.Parse()
 
@@ -71,17 +66,6 @@ func main() {
 	cfg.DB.Encrypt = *encrypt
 	cfg.DB.TrustServerCertificate = *trust
 
-	if *legacy {
-		cfg.LegacyCompat.Enabled = true
-		cfg.LegacyCompat.JWTSecret = *legacySecret
-		cfg.LegacyCompat.JWTUser = *legacyUser
-		cfg.LegacyCompat.JWTPassword = *legacyPass
-		cfg.LegacyCompat.AllowRawSQL = *legacyRawSQL
-		if cfg.LegacyCompat.JWTExpiryMinutes == 0 {
-			cfg.LegacyCompat.JWTExpiryMinutes = 30
-		}
-	}
-
 	// Never regenerate an existing token: the backend may already hold it.
 	if cfg.BearerToken == "" {
 		b := make([]byte, 32)
@@ -100,8 +84,6 @@ func main() {
 	fmt.Printf("  apiListen=%s erp=%s db=%s:%d/%s user=%s encrypt=%v trust=%v\n",
 		cfg.APIListen, cfg.ERP, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database, cfg.DB.User,
 		cfg.DB.Encrypt, cfg.DB.TrustServerCertificate)
-	fmt.Printf("  legacyCompat.enabled=%v allowRawSQL=%v jwtUser=%s\n",
-		cfg.LegacyCompat.Enabled, cfg.LegacyCompat.AllowRawSQL, cfg.LegacyCompat.JWTUser)
 	fmt.Printf("  bearerToken=%s\n", cfg.BearerToken)
 
 	if *dbPassword != "" {

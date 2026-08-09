@@ -38,9 +38,9 @@ cheaply, and token guessing is throttled. Buckets are capped at 4096 with
 10-minute idle eviction, so spoofed source IPs cannot exhaust memory.
 
 There is no user model, no roles, no token rotation and no expiry. One
-installation, one credential. If short-lived tokens are ever needed, add an
-exchange endpoint rather than reviving the hardcoded-credentials flow that the
-legacy connector used.
+installation, one credential. If short-lived tokens are ever needed, add a proper
+exchange endpoint — do not revive the hardcoded-credentials flow the legacy
+connector used (fixed password, fixed signing secret, both in its source).
 
 ## SQL access
 
@@ -61,11 +61,9 @@ Execution is bounded — `queries.timeoutSeconds` (default 30) and `queries.maxR
 (default 10,000) — so one query cannot hold a connection or exhaust memory
 indefinitely.
 
-**The documented exception:** `POST /api/query` accepts SQL text, exists only when
-`legacyCompat.allowRawSQL` is true, and is validated read-only (single statement,
-`SELECT`/`WITH` only, no comments, keyword blocklist applied after string literals
-are stripped), fully parameter-bound, and logged in full on every call. See
-[legacy-compat.md](legacy-compat.md). Do not add a second one.
+There is no exception any more: the electron-compatibility `POST /api/query`, the
+only route that ever accepted SQL text from a caller, was deleted on 2026-08-09.
+Do not reintroduce one.
 
 ## File access
 
@@ -101,9 +99,7 @@ Neither value is ever logged. Log lines about the password mention only its leng
 ## What is logged
 
 Method, path, status, duration, and enough startup detail to diagnose a failed
-start (config summary, DB host/port/user/database, query count). Legacy-compat
-route hits are logged by design, including the full SQL text of any
-`POST /api/query` — that is the audit trail for the one route that accepts SQL.
+start (config summary, DB host/port/user/database, query count).
 
 Never logged: the bearer token, the DB password, JWT contents.
 
@@ -181,7 +177,3 @@ exactly two tables — Accounts and Rates — and nothing else.
   default — configure it whenever apiListen is not loopback.
 - Secrets are not protected at rest on Linux.
 - Saved queries are unrestricted by design.
-- `POST /api/query` is a read-only-validated exception that exists for migration
-  and should be retired — [legacy-compat.md](legacy-compat.md) says how.
-- The compatibility layer's JWT credentials live in `config.yaml` in plaintext when
-  enabled. That is why it defaults to off and carries no credentials in the binary.

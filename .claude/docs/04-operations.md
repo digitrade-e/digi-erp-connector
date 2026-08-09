@@ -73,8 +73,11 @@ the electron-mssql-app connector here on 2026-08-05 16:35.
 - DB: `localhost:1433/BFL`, user `sa`, `encrypt: true` +
   `trustServerCertificate: true` (local self-signed cert — both are required,
   they mirror the old app's connection settings).
-- `legacyCompat.enabled: true` with `allowRawSQL: true` — the backend still uses
-  the old JWT exchange. See `docs/legacy-compat.md` for how to retire it.
+- The legacy compatibility layer (/auth/token, /api/ping, /api/query and the two
+  sample routes) was deleted from the codebase on 2026-08-09. The box still runs
+  an older build that has it; the new build must not be deployed until
+  erp-manager sends the static bearer token. Handover:
+  `docs/erp-manager-migration-plan.md`.
 - `queries.maxRows: 100000`, not the 10000 default: the `IndividualProductList`
   saved query legitimately returns 16183 rows and the old connector had no cap.
   Lowering it back to 10000 will make that query fail with 413.
@@ -106,9 +109,10 @@ timestamp the only difference.
 
 Rollback options, in order of preference:
 
-1. re-install a previous release (`gh release download v1.0.3 …`) — but note
-   v1.0.3 and earlier have **no legacy compatibility layer**, so the backend
-   would immediately get 401s. Only useful with the backend migrated.
+1. re-install a previous release. Note the direction changed on 2026-08-09:
+   releases from v1.0.4 to v1.0.10 CONTAIN the legacy layer, and anything after it
+   does not. Before the backend migrates, roll back to one that has it; after the
+   backend migrates, roll forward only.
 2. `install-backup-1.0.4\*.before-1.0.4` — the binaries running before the
    installer (same code, locally built)
 3. `deploy-backup-2026-08-05-refactor\*.previous` — the cutover build

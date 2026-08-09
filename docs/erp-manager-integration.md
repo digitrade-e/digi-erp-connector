@@ -1,5 +1,12 @@
 # erp-manager integration — what the backend sends and expects
 
+> **Superseded in part (2026-08-09).** The connector no longer has a
+> `/auth/token` route: the legacy compatibility layer was deleted. Sections 3 and
+> 4 below describe how the integration works *today, before the migration*, and
+> are kept because they explain what has to change. The plan for changing it is
+> [erp-manager-migration-plan.md](erp-manager-migration-plan.md). Sections 5 and 6
+> — the routes and the response shapes — are unchanged and still authoritative.
+
 This connector has one production client: **erp-manager**, the Symfony/API-Platform
 service that sits between the customer-facing apps and every ERP. When you develop
 here on Windows, erp-manager is the contract you are actually coding against — not
@@ -11,7 +18,7 @@ relative to `erp-manager-backend/api/` in the `erp-manager` repo.
 
 The connector-side counterpart of every statement is in
 [api.md](api.md) (routes), [saved-queries.md](saved-queries.md) (the data model)
-and [legacy-compat.md](legacy-compat.md) (the auth exchange).
+and [erp-manager-migration-plan.md](erp-manager-migration-plan.md) (the auth exchange).
 
 ---
 

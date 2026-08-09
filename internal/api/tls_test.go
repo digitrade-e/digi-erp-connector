@@ -157,9 +157,6 @@ func TestServerServesHTTPS(t *testing.T) {
 	cfg.BearerToken = testStaticToken
 	// Only used for validation; the listener below is what actually binds.
 	cfg.APIListen = "127.0.0.1:8443"
-	cfg.LegacyCompat = config.LegacyCompatConfig{
-		Enabled: true, JWTSecret: "s", JWTUser: "u", JWTPassword: "p",
-	}
 	cfg.TLS = config.TLSConfig{CertFile: certFile, KeyFile: keyFile}
 
 	srv := mustServer(t, cfg)
@@ -171,7 +168,7 @@ func TestServerServesHTTPS(t *testing.T) {
 	go func() { _ = srv.ServeTLS(ln, certFile, keyFile) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	url := "https://" + ln.Addr().String() + "/api/ping"
+	url := "https://" + ln.Addr().String() + "/api/folders/list"
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		// The certificate is self-signed; this test is about the transport.
@@ -201,7 +198,7 @@ func TestServerServesHTTPS(t *testing.T) {
 	// with 400 and an explanatory body rather than refusing the connection, which
 	// is helpful — but it must never reach a handler.
 	plain := &http.Client{Timeout: 3 * time.Second}
-	plainResp, err := plain.Get("http://" + ln.Addr().String() + "/api/ping")
+	plainResp, err := plain.Get("http://" + ln.Addr().String() + "/api/folders/list")
 	if err != nil {
 		return // connection refused is also an acceptable outcome
 	}
