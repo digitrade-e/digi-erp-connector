@@ -11,7 +11,7 @@ Check `server.log` — the daemon logs its whole startup sequence.
 |---|---|---|
 | `config not found; run digi-erp-connector UI to create it` | No `config.yaml`. Normal on a fresh install. | Configure via the GUI or `cutover-seed`. |
 | `failed to load config` | Malformed YAML. | Fix the syntax; check indentation. |
-| `config validation error` … `bearerToken is required` | No token. | Generate one in the GUI. |
+| `no credential configured` | Neither a `bearerToken` nor an enabled `auth` block. An installation needs one. | Generate a bearer token in the GUI, or enable the credential exchange and set a username and password. |
 | `auth.enabled requires auth.username and auth.password` | The credential exchange is on but half configured. | Fill both in the GUI's **Credential exchange** section, or untick Enabled. |
 | `auth.enabled requires auth.secret` | The signing secret is blank and could not be generated — normally the daemon writes one on first start. | Check that `config.yaml` is writable, or press **Regenerate** in the GUI. |
 | `apiListen must be in host:port format` / `port is invalid` | Bad bind address. | See [configuration.md](configuration.md#apilisten--bind-address). |
@@ -48,9 +48,13 @@ form without saving them.
 
 ## Every request returns 401
 
-Two credentials are accepted — the static `bearerToken` and a token issued by
-`POST /auth/token` — and a failure of either looks identical from outside.
-[authentication.md](authentication.md) has the full picture.
+The installation authenticates with one credential — the static `bearerToken` or
+a token issued by `POST /auth/token` — and a failure of either looks identical
+from outside. [authentication.md](authentication.md) has the full picture.
+
+First thing to check: **which** credential this box is configured for. A caller
+sending a static token to an exchange-only install gets 401 forever, and nothing
+in the response says so. `server.log` at startup warns if both are configured.
 
 | Cause | Check |
 |---|---|

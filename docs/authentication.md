@@ -1,18 +1,34 @@
 # Authentication
 
-The connector accepts **two credentials**, and both authenticate every `/api/*`
-route identically:
+**An installation uses one credential.** There are two kinds to choose from,
+because the callers are not the same:
 
-| Credential | Configured as | Obtained by the caller |
-|---|---|---|
-| Static bearer token | `bearerToken` | copied from `config.yaml` once, used forever |
-| Issued token | the `auth:` block | `POST /auth/token` with a username and password |
+| Kind | Configured as | Obtained by the caller | Use it when |
+|---|---|---|---|
+| Static bearer token | `bearerToken` | copied from `config.yaml` once, used forever | the caller can send a fixed token — the B2B backend, scripts, your own probes |
+| Credential exchange | the `auth:` block | `POST /auth/token` with a username and password | the caller only speaks username/password — erp-manager |
 
-Present either one as `Authorization: Bearer <credential>`. The static token is
-the simpler of the two and the one to prefer for anything new. The exchange
-exists because erp-manager — and four other ERP integrations that share its
-credential fields — authenticate with a username and password and cannot be
-repointed at a static token without changing all five.
+Either way the caller sends `Authorization: Bearer <credential>`; the routes,
+the error codes and the response shapes are identical. The static token is the
+simpler of the two and the default for a new install. The exchange exists
+because erp-manager — and four other ERP integrations that share its credential
+fields — cannot be repointed at a static token without changing all five.
+
+**At least one must be configured**, or the daemon refuses to start: a connector
+that accepts nothing answers `401` to every request, which looks exactly like a
+credential problem and sends whoever debugs it to the wrong place.
+
+Configuring **both** works — the two are accepted side by side — but it is a
+migration state, not a destination, and the daemon logs a warning every start
+until you remove one. Two live credentials means two things to rotate and two
+ways in. Retire one as soon as every caller is on the other:
+
+- to go exchange-only: clear `bearerToken` (GUI, or `cutover-seed -clear-bearer-token`)
+- to go token-only: set `auth.enabled: false`
+
+Before retiring the static token, be sure nothing still presents it — turn on
+`debug: true` for a while and read `server.log`. Every caller that still sends it
+starts getting `401` the moment it is gone.
 
 Rate limiting (25 rps per IP, burst 50) runs **before** authentication, on
 `/auth/token` as well as on the data routes.
@@ -37,7 +53,8 @@ auth:
 ```
 
 Off by default. When `enabled` is false the route does not exist — `POST
-/auth/token` returns `404` — and only the static token authenticates.
+/auth/token` returns `404` — and the static token is the installation's only
+credential.
 
 **Request**
 
@@ -104,8 +121,10 @@ cutover-seed.exe -auth-user bfl-reads
 ```
 
 which generates the password and the secret and prints the credentials to hand
-to the calling backend. Add `-auth-password` to set one yourself, `-auth-ttl` to
-override the lifetime.
+to the calling backend. On a fresh install it does **not** also generate a static
+token — one credential, not two. Add `-auth-password` to set one yourself,
+`-auth-ttl` to override the lifetime, and `-clear-bearer-token` to retire the
+static token on an installation that already has one.
 
 Either way the connector refuses to start, and the GUI refuses to save, if
 `enabled` is true with a blank username or password. A half-configured block
@@ -136,7 +155,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/j
      -d '{"username":"digitrade","password":"123456"}' $BASE/auth/token
 # 3. a data route with the issued token → 200
 curl -s -H "Authorization: Bearer $ISSUED" $BASE/api/custom_sql
-# 4. the same with the static token → 200 (dual acceptance)
+# 4. the same with the static token → 200, if this install still has one
 curl -s -H "Authorization: Bearer $BEARER" $BASE/api/custom_sql
 # 5. anything else → 401
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer wrong' $BASE/api/custom_sql
@@ -158,8 +177,9 @@ want the database checked too.
 |---|---|
 | `internal/auth/token.go` | HS256 sign/verify, secret and password generation |
 | `internal/api/handlers/auth.go` | `POST /auth/token`, `GET /api/ping` |
-| `internal/api/middleware/auth.go` | dual acceptance, constant-time compare |
+| `internal/api/middleware/auth.go` | credential check: constant-time static compare, then signature |
 | `internal/config/model.go` | `AuthConfig`, `Validate`, `TTL` |
+| `internal/api/server.go` | the at-least-one-credential rule and the both-configured warning |
 | `cmd/digi-erp-connectord/app.go` | first-run secret generation |
 | `internal/api/auth_exchange_test.go` | the contract, pinned |
 

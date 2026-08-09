@@ -9,9 +9,10 @@ Every `/api/*` route requires `Authorization: Bearer <credential>` and is
 rate-limited per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate
 limiting is applied **before** authentication.
 
-Two credentials are accepted and behave identically: the static `bearerToken`,
-and a token obtained from `POST /auth/token` when the credential exchange is
-enabled. See [authentication.md](authentication.md).
+An installation is configured with one credential, of one of two kinds: the
+static `bearerToken`, or a token obtained from `POST /auth/token` when the
+credential exchange is enabled. They behave identically on every route. See
+[authentication.md](authentication.md).
 
 Errors are always `{ "error": "<message>", "code": "<CODE>", "details": {} }`.
 Branch on `code`, not on the message — messages may be reworded, codes are stable.

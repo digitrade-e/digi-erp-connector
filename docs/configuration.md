@@ -64,7 +64,7 @@ the exchange ships; leave it out unless a caller needs it.
 | `erp` | `hasavshevet` | `hasavshevet`, `sap`, or `priority` (selectable, not implemented). Decides which price/stock backend runs and whether the order pipeline is usable. |
 | `apiListen` | `127.0.0.1:8080` | `host:port` to bind. **Required.** See below. |
 | `debug` | `false` | Verbose request logging. Never logs the token or DB password. |
-| `bearerToken` | — | The API credential. **Required** — the daemon refuses to start without it. Generate with the GUI's "Generate key" (32 random bytes, hex). |
+| `bearerToken` | — | The static API credential. **Required unless the `auth` block below is enabled** — an installation must have one credential or the other. Generate with the GUI's "Generate key" (32 random bytes, hex). |
 | `erpUser` | `""` | Hasavshevet login name written into order files. The GUI's "Test user" checks it exists in the customer's `USERS` table. |
 | `imageFolders` | `[]` | Absolute paths served by `/api/folders/list` and `/api/file`. Nothing outside this list is reachable. |
 
@@ -168,6 +168,11 @@ auth:
 `enabled: true` with a blank `username` or `password` **stops the service** — the
 same reasoning as the `tls` pair above. An exchange that accepts blanks is worse
 than no exchange.
+
+An installation is meant to use **one** credential: either this block or
+`bearerToken`. Neither configured stops the service; both configured works and
+logs a warning on every start, which is the state a box passes through while
+migrating from one to the other. Clear `bearerToken` to finish the move.
 
 The password and the secret sit in `config.yaml` in the clear, protected only by
 its 0600 mode. That is deliberate: the operator has to read the password back to

@@ -50,7 +50,7 @@ Every route is wrapped in the same chain, outermost first
 request
   └─ Logging      method, path, status, duration — never the token or DB password
       └─ RateLimit  per-IP token bucket, 25 rps / burst 50 → 429 RATE_LIMITED
-          └─ Auth     static bearer token OR an issued token → 401 UNAUTHORIZED
+          └─ Auth     the installation's credential → 401 UNAUTHORIZED
               └─ handler
 ```
 
@@ -58,7 +58,8 @@ request
 credential check — but it keeps Logging and RateLimit. The Auth step compares the
 presented credential against `bearerToken` in constant time and, if the exchange
 is enabled, verifies it as an HS256 token; either match authenticates, and every
-failure is the same flat 401.
+failure is the same flat 401. An installation normally configures one of the two;
+`NewServer` requires at least one and warns when both are live.
 
 Rate limiting sits **before** auth deliberately: an unauthenticated flood is
 exactly what you want to shed cheaply, and it means brute-forcing the token is

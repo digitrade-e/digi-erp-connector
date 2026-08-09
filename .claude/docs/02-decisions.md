@@ -305,3 +305,42 @@ out of band, erp-manager updates ClientConnection rows 67 (`:8082`) and 76
 (`:8083`, BFL-SendOrders), **and only then** is the connector deployed. Reversed,
 BFL's screens go blank until the rows catch up. Until it ships, b4l stays on
 1.0.4 — an installer without `/auth/token` breaks that box.
+
+## 16. One credential per installation, not two (2026-08-09)
+
+Decision 15 left every box accepting two credentials at once. The user's
+objection was blunt and correct: "I don't want 2 options of auth, I want only
+one." Two live credentials is two things to rotate, two ways in, and no way to
+tell from the outside which one a caller is actually using.
+
+The two cannot be collapsed into one *product-wide*, because the callers differ:
+erp-manager can only do the username/password exchange, and the B2B backend on
+the customer VM — plus every operator probe and script — uses the static token.
+Deleting either breaks a real caller today.
+
+So the rule is per installation rather than per product: **at least one
+credential, and normally exactly one.**
+
+- `NewServer` refuses to start with neither. That case used to be impossible
+  (`bearerToken` was mandatory); now that the exchange can stand alone, a box
+  with no credential at all would 401 every request and look exactly like a
+  credential bug.
+- `bearerToken` is no longer required when the exchange is enabled. The static
+  comparison is skipped outright when there is no token, rather than relying on
+  a length mismatch — a future refactor could make an empty configured token
+  match an empty presented one.
+- Both configured still works, and logs a warning on every start. That is
+  deliberate: it is the state a box passes through while migrating from one to
+  the other, and BFL is in it right now. Refusing it would have forced a
+  flag-day cutover on a box whose static-token callers are not yet enumerated.
+- `cutover-seed` no longer generates a bearer token when `-auth-user` is given,
+  and grew `-clear-bearer-token` to retire one on an existing install. It
+  refuses to clear the last credential.
+
+The intended end state per node: BFL reads (`:8082`, erp-manager) → exchange
+only; order/B2B nodes and new installs → static token only.
+
+Before clearing BFL's static token, turn on `debug: true` and read `server.log`
+for a while. The B2B backend sends orders to the write node, but nothing has yet
+proven it does not also read through `:8082`, and "no log lines" is not evidence
+when request logging is off — the same trap as decision 14.

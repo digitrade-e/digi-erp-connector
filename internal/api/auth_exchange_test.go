@@ -215,6 +215,65 @@ func TestExchangeRequiresCompleteConfig(t *testing.T) {
 	}
 }
 
+// An installation authenticates with one credential. Which one is a deployment
+// decision, so both fields exist — but a server with neither would 401 every
+// request, which reads as a credential problem and sends whoever debugs it
+// somewhere else entirely.
+func TestAtLeastOneCredentialIsRequired(t *testing.T) {
+	cfg := config.Default()
+	cfg.BearerToken = ""
+
+	if _, err := newServerForTest(t, cfg); err == nil {
+		t.Fatal("expected NewServer to refuse a config with no credential at all")
+	} else if !strings.Contains(err.Error(), "no credential configured") {
+		t.Errorf("error %q should say no credential is configured", err)
+	}
+}
+
+// Exchange-only: no static token at all. This is what a box serving erp-manager
+// runs, and the empty bearerToken must not become a credential of its own — an
+// empty or absent Authorization value has to fail like any other.
+func TestExchangeOnlyInstallation(t *testing.T) {
+	cfg := authConfig(t)
+	cfg.BearerToken = ""
+	h := mustServer(t, cfg).Handler
+
+	signer, _ := auth.NewSigner(testAuthSecret)
+	issued, _, err := signer.Sign(testAuthUser, time.Minute)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		credential string
+		wantAuthed bool
+	}{
+		{"issued token", issued, true},
+		{"the retired static token", testStaticToken, false},
+		{"empty credential", "", false},
+		{"a single space", " ", false},
+		{"garbage", "nonsense", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/folders/list", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.credential)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			authed := rec.Code != http.StatusUnauthorized
+			if authed != tc.wantAuthed {
+				t.Errorf("status %d: authenticated=%v, want %v", rec.Code, authed, tc.wantAuthed)
+			}
+		})
+	}
+
+	// The exchange itself still works — it is the only way in.
+	if rec := postToken(t, h, `{"username":"`+testAuthUser+`","password":"`+testAuthPass+`"}`); rec.Code != http.StatusOK {
+		t.Errorf("exchange on an exchange-only install = %d, want 200", rec.Code)
+	}
+}
+
 // R4: /api/ping answers without touching the database, so an operator checking a
 // connection gets a clear answer even while SQL Server is down. It is
 // authenticated and rate-limited like everything else.

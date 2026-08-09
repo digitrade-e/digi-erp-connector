@@ -17,12 +17,14 @@ import (
 // token only".
 type TokenVerifier func(credential string) error
 
-// AuthWithExchange accepts either the static bearer token or, when verify is
-// non-nil, a credential that verify accepts — the two credentials described in
-// docs/authentication.md.
+// AuthWithExchange accepts the static bearer token, or a credential that verify
+// accepts, or both — whichever the installation configured. An empty token means
+// this installation has no static credential; a nil verify means it has no
+// exchange. `NewServer` guarantees at least one of the two is present, because a
+// server that accepts neither would answer 401 to everything.
 //
 // The static comparison runs first and is constant-time, so a wrong token cannot
-// be discovered by timing and enabling the exchange cannot weaken or slow down
+// be discovered by timing and configuring the exchange cannot weaken or slow down
 // the primary path.
 //
 // Every failure is a flat 401: missing, malformed and incorrect are deliberately
@@ -40,7 +42,9 @@ func AuthWithExchange(token string, verify TokenVerifier, next http.Handler) htt
 		}
 
 		credential := parts[1]
-		if subtle.ConstantTimeCompare([]byte(credential), expected) == 1 {
+		// Skipped explicitly when no static token is configured, rather than
+		// relying on a length mismatch to fail the comparison.
+		if len(expected) > 0 && subtle.ConstantTimeCompare([]byte(credential), expected) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}

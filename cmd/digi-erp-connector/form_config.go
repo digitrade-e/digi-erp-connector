@@ -67,6 +67,12 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 			"credential exchange: token lifetime %q is not a duration — use a value like 30m or 1h, or leave it blank",
 			cfg.Auth.TokenTTL)
 	}
+	// One credential is the intent; none is a service that refuses every request.
+	if cfg.BearerToken == "" && !cfg.Auth.Enabled {
+		return config.Config{}, "", fmt.Errorf(
+			"no credential configured: generate a bearer token, or enable the credential exchange " +
+				"and set a username and password")
+	}
 
 	// The database is optional. A connector deployed only to write order files
 	// may have no database of its own, and refusing to save left such a node

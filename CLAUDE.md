@@ -108,7 +108,9 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 
 ## Authentication
 
-Two credentials, both presented as `Authorization: Bearer <credential>`, both granting the same access. `middleware/auth.go` compares against config `BearerToken` with `subtle.ConstantTimeCompare` first, then — when the exchange is enabled — verifies the credential as a token this installation signed. Every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
+**One credential per installation, of one of two kinds** — the static `bearerToken`, or the `POST /auth/token` exchange. Both are presented as `Authorization: Bearer <credential>` and grant identical access. `middleware/auth.go` compares against `BearerToken` with `subtle.ConstantTimeCompare` first (skipped entirely when no static token is configured), then — when the exchange is enabled — verifies the credential as a token this installation signed. Every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
+
+**At least one credential is required**: `NewServer` refuses to start with neither, because a connector that accepts nothing 401s every request and reads as a credential bug. Configuring both is allowed (it is how a box migrates from one to the other) but logs a warning every start — it is not a destination.
 
 `POST /auth/token` (config block `auth:`) exchanges a username and password for a short-lived HS256 token. It is optional and off by default; when disabled the route does not exist. Hard rules:
 

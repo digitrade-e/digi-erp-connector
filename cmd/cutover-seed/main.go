@@ -41,6 +41,8 @@ func main() {
 	authUser := flag.String("auth-user", "", "enable POST /auth/token with this username (see -auth-password)")
 	authPassword := flag.String("auth-password", "", "password for the credential exchange; blank generates one and prints it")
 	authTTL := flag.String("auth-ttl", "", "issued token lifetime (e.g. 30m); blank uses the default")
+	clearBearer := flag.Bool("clear-bearer-token", false,
+		"remove the static bearerToken, leaving the credential exchange as the only credential")
 	flag.Parse()
 
 	cfg, err := config.LoadOrDefault()
@@ -69,16 +71,6 @@ func main() {
 	cfg.DB.Driver = config.DBDriverMSSQL
 	cfg.DB.Encrypt = *encrypt
 	cfg.DB.TrustServerCertificate = *trust
-
-	// Never regenerate an existing token: the backend may already hold it.
-	if cfg.BearerToken == "" {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			fail("generate bearer token", err)
-		}
-		cfg.BearerToken = hex.EncodeToString(b)
-		fmt.Println("generated a new bearerToken")
-	}
 
 	// The credential exchange, for backends that authenticate with a username and
 	// password rather than a static token. Off unless -auth-user is given.
@@ -117,6 +109,31 @@ func main() {
 		}
 	}
 
+	// Retiring the static token is how an existing install becomes exchange-only.
+	// Verify nothing still presents it before doing this — every caller that does
+	// starts getting 401.
+	if *clearBearer {
+		if !cfg.Auth.Enabled {
+			fail("clear-bearer-token", fmt.Errorf(
+				"refusing to leave this installation with no credential at all; enable the exchange with -auth-user first"))
+		}
+		cfg.BearerToken = ""
+	}
+
+	// The static token is the default credential, but not when the exchange is
+	// being configured: an installation uses one credential, and generating a
+	// second here would quietly make it two.
+	//
+	// Never regenerate an existing token either — the backend may already hold it.
+	if cfg.BearerToken == "" && !cfg.Auth.Enabled {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			fail("generate bearer token", err)
+		}
+		cfg.BearerToken = hex.EncodeToString(b)
+		fmt.Println("generated a new bearerToken")
+	}
+
 	if err := config.Save(cfg); err != nil {
 		fail("save config", err)
 	}
@@ -125,7 +142,11 @@ func main() {
 	fmt.Printf("  apiListen=%s erp=%s db=%s:%d/%s user=%s encrypt=%v trust=%v\n",
 		cfg.APIListen, cfg.ERP, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database, cfg.DB.User,
 		cfg.DB.Encrypt, cfg.DB.TrustServerCertificate)
-	fmt.Printf("  bearerToken=%s\n", cfg.BearerToken)
+	if cfg.BearerToken != "" {
+		fmt.Printf("  bearerToken=%s\n", cfg.BearerToken)
+	} else {
+		fmt.Println("  bearerToken: none — the credential exchange is this installation's only credential")
+	}
 	if cfg.Auth.Enabled {
 		fmt.Println("credential exchange enabled at POST /auth/token — give the calling backend:")
 		fmt.Printf("  username=%s\n", cfg.Auth.Username)
