@@ -40,7 +40,18 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.ERP = config.ERPType(comboValue(f.erpCombo, config.ErpOption()))
 	cfg.APIListen = f.apiListenEdit.Text()
 	cfg.Debug = f.debugCheck.Checked()
-	cfg.BearerToken = strings.TrimSpace(f.bearerTokenEdit.Text())
+	// Authentication: the selected method decides which credential is written,
+	// and clears the other. Leaving a stale credential in config.yaml would mean
+	// the window says one thing and the service accepts another.
+	method := f.authMethodCombo.CurrentIndex()
+	cfg.BearerToken = ""
+	if method == authMethodToken || method == authMethodBoth {
+		cfg.BearerToken = strings.TrimSpace(f.bearerTokenEdit.Text())
+		if cfg.BearerToken == "" {
+			return config.Config{}, "", fmt.Errorf(
+				"bearer token is empty — press Generate key, or switch the authentication method to username and password")
+		}
+	}
 	cfg.DB.Driver = config.DBDriver(comboValue(f.driverCombo, config.DBDriverOptions()))
 	cfg.DB.Host = f.hostEdit.Text()
 	cfg.DB.Port = port
@@ -49,7 +60,7 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	cfg.ERPUser = strings.TrimSpace(f.erpUserEdit.Text())
 
 	cfg.Auth = config.AuthConfig{
-		Enabled:  f.authEnabledCheck.Checked(),
+		Enabled:  method == authMethodExchange || method == authMethodBoth,
 		Username: strings.TrimSpace(f.authUserEdit.Text()),
 		Password: strings.TrimSpace(f.authPassEdit.Text()),
 		Secret:   strings.TrimSpace(f.authSecretEdit.Text()),
@@ -60,18 +71,12 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	// service will not start on.
 	if err := cfg.Auth.Validate(); err != nil {
 		return config.Config{}, "", fmt.Errorf(
-			"credential exchange: set both a username and a password, or untick Enabled (%w)", err)
+			"set both a username and a password, or choose a different authentication method (%w)", err)
 	}
 	if !cfg.Auth.TokenTTLValid() {
 		return config.Config{}, "", fmt.Errorf(
-			"credential exchange: token lifetime %q is not a duration — use a value like 30m or 1h, or leave it blank",
+			"token lifetime %q is not a duration — use a value like 30m or 1h, or leave it blank",
 			cfg.Auth.TokenTTL)
-	}
-	// One credential is the intent; none is a service that refuses every request.
-	if cfg.BearerToken == "" && !cfg.Auth.Enabled {
-		return config.Config{}, "", fmt.Errorf(
-			"no credential configured: generate a bearer token, or enable the credential exchange " +
-				"and set a username and password")
 	}
 
 	// The database is optional. A connector deployed only to write order files
