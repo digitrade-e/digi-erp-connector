@@ -19,11 +19,12 @@ import folder are on the same machine.
 
 ## B. Split read/write across two servers
 
-The situation this exists for: the database is on one server, the Hasavshevet
-import folder and importer are on another, and the connector cannot be installed
-"for orders only" on the second one because **order building needs the
-database** — `processOrderWithNumber` looks up the customer account
-(`queryAccount`, mandatory) and the currency rate before it can build IMOVEIN.
+The situation this exists for: the database is on one server, and the Hasavshevet
+import folder and importer are on another.
+
+Order building needs the seven customer fields that normally come from
+`[dbo].[Accounts]`, so the write node needs *a* source for them. There are two,
+and **Option 1 needs no database on the write node at all**.
 
 ```
                  ┌─ reads  ─────► READ NODE   (192.168.0.5)
@@ -32,7 +33,8 @@ backend ─────────┤                   ├─ saved queries, p
                  │
                  └─ orders ─────► WRITE NODE  (192.168.0.7)
                                      ├─ POST /api/sendOrder only
-                                     ├─ MSSQL over the network -> 192.168.0.5:1433
+                                     ├─ no database (Option 1) or MSSQL over
+                                     │  the network (Option 2)
                                      └─ sendOrderDir = C:\xampp\htdocs\herp  (LOCAL)
                                         + the importer that already runs there
 ```
@@ -67,10 +69,9 @@ The write node needs the customer details that normally come from
 erp: hasavshevet
 apiListen: '[::]:8082'
 bearerToken: <its own token>
-sendOrderDir: C:
-mpphtdocsherp
-hasBatFile: C:Hash7digi.bat        # only if the importer runs here
-# no db: block
+sendOrderDir: C:\xampp\htdocs\herp
+hasBatFile: C:\Hash7\digi.bat        # only if the importer runs here
+# no db: block at all
 ```
 
 The backend adds an `account` object to `POST /api/sendOrder`:
