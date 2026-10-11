@@ -51,7 +51,11 @@ Filename: "{cmd}"; Parameters: "/C sc.exe description {#ServiceName} ""Digi ERP 
 Filename: "{cmd}"; Parameters: "/C sc.exe start {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
 
 ; No [UninstallRun]: stopping, waiting for STOPPED and deleting the service are
-; done in that order by CurUninstallStepChanged in [Code]
+; done in that order by CurUninstallStepChanged in the Code section below.
+; "sc stop" returns at once, and an [UninstallRun] "sc delete" right after it
+; would run while the daemon is still draining.
+
+[Code]
 // Stopping the service is graceful: the daemon lets a receipt being written
 // finish and writes every queued order before it exits, which can take up to
 // 150 s (autostart.StopTimeout). Setup and the uninstaller only ask it to stop

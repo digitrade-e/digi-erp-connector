@@ -139,7 +139,7 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 `POST /api/sendReceipt` → `ReceiptWriter.Write`, synchronously, under the **import lock shared with the order worker** (`importmu.go`). Full doc: `docs/hasavshevet-send-receipt.md`.
 
 - The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` creates it (write-if-absent).
-- One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt.
+- One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt. Never restore or copy `DataDir/receipts` while the service runs — stop it first (a running writer trusts its in-memory recovery state).
 - 4xx only for request faults; `CardNamesConfigError`, a stored request that no longer builds (`ErrStoredReceiptUnbuildable`) and every other connector fault are 5xx. The response never carries `ReceiptResult.Files`.
 - Config guard `hasavshevet.ValidateReceiptConfig` (sendReceiptDir ≠ sendOrderDir, card names writable) is called by both `api.NewServer` and the GUI save.
 - Contract pinned by `handlers/send_receipt_test.go` against the backend's golden `testdata/receipt/wire.json` (byte copy, sha256 checked).

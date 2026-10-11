@@ -197,10 +197,9 @@ func (c Config) ReceiptsConfigured() bool {
 }
 
 // ValidateReceipts refuses a relative sendReceiptDir, and one that is the
-// sendOrderDir. Both
-// importers write fixed-name files into their folder and run from it, and the
-// receipt folder sits under a web root on a real install; sharing one would
-// mix the two imports. The comparison is after Clean and symlink resolution,
+// sendOrderDir. Both importers write fixed-name files into their folder and run
+// from it, and the receipt folder sits under a web root on a real install;
+// sharing one would mix the two imports. The comparison is after Clean and symlink resolution,
 // and case-insensitive on Windows, so a trailing slash, a "..", a link or a
 // different case cannot sneak the same folder past it.
 //

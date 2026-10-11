@@ -186,6 +186,12 @@ this: **a lost index turns a retry into a second receipt**. Back up
 `DataDir/receipts/` with the data directory, and restore it together with the
 store.
 
+**Never restore or copy `DataDir/receipts` while the service runs — stop it
+first.** A running writer trusts its in-memory recovery state: it recovers once
+at startup (or after a failed write), not before every new number, so index
+files or a store swapped in underneath it are not re-checked and a number can
+be issued twice.
+
 ## Concurrency
 
 Receipts and orders share one process-wide import lock: an order job (IMOVEIN +
