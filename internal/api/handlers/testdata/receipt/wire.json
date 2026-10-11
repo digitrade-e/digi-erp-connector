@@ -1,0 +1,38 @@
+{
+    "idempotencyKey": "3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17",
+    "account": {
+        "syncKey": "40217",
+        "name": "בנייני לוי בע\"מ",
+        "address": "הרצל 1",
+        "city": "חיפה",
+        "phone": "04-8123456",
+        "agentSyncKey": "7"
+    },
+    "email": "dana@levi-building.example",
+    "settledAt": "2026-10-08",
+    "amountMinor": 694700,
+    "currency": "ILS",
+    "installments": 1,
+    "firstPaymentMinor": null,
+    "cardBrand": "2",
+    "cardIssuer": "2",
+    "last4": "4580",
+    "confirmationCode": "0123456",
+    "authorizationRef": "26100809142708822928912",
+    "providerTransactionId": "81122394",
+    "details": [
+        {
+            "reference": "26004295",
+            "amountMinor": 710700
+        },
+        {
+            "reference": "19057",
+            "amountMinor": -17500
+        },
+        {
+            "reference": "OI-77",
+            "amountMinor": 1500
+        }
+    ],
+    "remarkSuffix": "2824019"
+}

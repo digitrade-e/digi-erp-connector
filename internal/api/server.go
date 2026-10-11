@@ -34,6 +34,10 @@ type ServerDeps struct {
 	Logger         logger.LoggerService
 	SendOrderQueue *hasavshevet.OrderQueue
 	QueryStore     *queries.Store
+	// ReceiptWriter serves POST /api/sendReceipt. Required when the config
+	// has receipts (erp: hasavshevet + sendReceiptDir); leave it nil (not a
+	// typed nil) otherwise, and the route answers 503.
+	ReceiptWriter handlers.ReceiptWriter
 }
 
 func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
@@ -59,6 +63,16 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	signer, err := auth.NewSigner(cfg.Auth.Secret)
 	if err != nil {
 		return nil, err
+	}
+
+	// Receipts: the same check the GUI makes before it saves (sendReceiptDir
+	// is not sendOrderDir; every card-name override can be written).
+	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return nil, err
+	}
+	receiptsConfigured := cfg.ReceiptsConfigured()
+	if receiptsConfigured && deps.ReceiptWriter == nil {
+		return nil, errors.New("sendReceiptDir is set but no receipt writer was built")
 	}
 
 	mux := http.NewServeMux()
@@ -89,6 +103,7 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	ordersConfigured := cfg.ERP == config.ERPHasavshevet && strings.TrimSpace(cfg.SendOrderDir) != ""
 	sendOrderHandler := handlers.NewSendOrderHandler(deps.SendOrderQueue, ordersConfigured)
 	sendOrderStatusHandler := handlers.NewSendOrderStatusHandler(deps.SendOrderQueue)
+	sendReceiptHandler := handlers.NewSendReceiptHandler(deps.ReceiptWriter, receiptsConfigured, deps.Logger)
 	createQueryHandler := handlers.NewCreateCustomSQLHandler(deps.QueryStore)
 	listQueryHandler := handlers.NewListCustomSQLHandler(deps.QueryStore)
 	getQueryHandler := handlers.NewGetCustomSQLHandler(deps.QueryStore)
@@ -121,6 +136,9 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	mux.Handle("POST /api/file", wrap(fileHandler))
 	mux.Handle("POST /api/sendOrder", wrap(sendOrderHandler))
 	mux.Handle("GET /api/sendOrder/{jobId}", wrap(sendOrderStatusHandler))
+	// Synchronous, unlike sendOrder: the caller needs the receipt number. It
+	// extends its own write deadline to handlers.ReceiptWriteDeadline.
+	mux.Handle("POST /api/sendReceipt", wrap(sendReceiptHandler))
 	mux.Handle("POST /api/priceAndStockHandler", wrap(priceStockHandler))
 
 	mux.Handle("/api/", wrap(http.HandlerFunc(NotFound)))

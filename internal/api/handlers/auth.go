@@ -8,6 +8,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
+	"github.com/digitrade-e/digi-erp-connector/internal/buildinfo"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
@@ -92,8 +93,9 @@ func unauthorizedCredentials(w http.ResponseWriter, log logger.LoggerService, us
 func NewPingHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		respond.JSON(w, http.StatusOK, dto.PingResponse{
-			OK: true,
-			TS: time.Now().UnixMilli(),
+			OK:      true,
+			TS:      time.Now().UnixMilli(),
+			Version: buildinfo.Version,
 		})
 	}
 }
