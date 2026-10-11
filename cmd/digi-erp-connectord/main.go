@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 )
 
 func dbPasswordKey(erp config.ERPType) string {
@@ -38,7 +38,7 @@ func main() {
 		}
 	case sig := <-sigCh:
 		app.Logger().Info(fmt.Sprintf("shutdown signal: %s", sig))
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), autostart.StopTimeout)
 		defer cancel()
 		app.Stop(ctx)
 		if err := <-app.Errors(); err != nil && !errors.Is(err, http.ErrServerClosed) {

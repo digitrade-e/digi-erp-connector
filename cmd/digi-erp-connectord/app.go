@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api"
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
@@ -24,6 +25,11 @@ import (
 )
 
 const windowsServiceName = "digi-erp-connectord"
+
+// orderDrainTimeout bounds how long Stop waits for queued orders to be
+// written. It sits inside autostart.StopTimeout, which also covers the HTTP
+// shutdown (a receipt being written can hold that up to 120 s).
+const orderDrainTimeout = 120 * time.Second
 
 type serverApp struct {
 	cfg         config.Config
@@ -143,6 +149,34 @@ func (a *serverApp) Start() error {
 	a.orderQueue = queue
 	a.queueCancel = queueCancel
 
+	// Receipts (POST /api/sendReceipt): only with erp: hasavshevet and a
+	// sendReceiptDir. Recover finishes any receipt a crash left half-written
+	// before the route serves; if it cannot, the route retries it on each
+	// request and answers an error until it succeeds — orders and queries
+	// are not held hostage to it.
+	var receiptWriter *hasavshevet.ReceiptWriter
+	if cfg.ReceiptsConfigured() {
+		if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+			logSvc.Error("receipt configuration invalid", err)
+			a.Stop(context.Background())
+			return err
+		}
+		receiptWriter, err = hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfigFrom(cfg, paths.DataDir()), logSvc)
+		if err != nil {
+			logSvc.Error("receipt writer", err)
+			a.Stop(context.Background())
+			return err
+		}
+		if recErr := receiptWriter.Recover(); recErr != nil {
+			logSvc.Error("receipt recovery failed; sendReceipt answers an error until it succeeds", recErr)
+		}
+		model := "a (files only)"
+		if strings.TrimSpace(cfg.HasReceiptBatFile) != "" {
+			model = "b (runs hasReceiptBatFile)"
+		}
+		logSvc.Info(fmt.Sprintf("receipts configured: sendReceiptDir=%q model %s", cfg.SendReceiptDir, model))
+	}
+
 	queryStorePath := filepath.Join(paths.DataDir(), "queries.json")
 	queryStore, err := queries.NewStore(queryStorePath)
 	if err != nil {
@@ -152,13 +186,17 @@ func (a *serverApp) Start() error {
 	}
 	logSvc.Info(fmt.Sprintf("saved queries store loaded: path=%s count=%d", queryStorePath, queryStore.Count()))
 
-	srv, err := api.NewServer(cfg, api.ServerDeps{
+	deps := api.ServerDeps{
 		DBPassword:     a.dbPassStr,
 		DB:             dbConn,
 		Logger:         logSvc,
 		SendOrderQueue: queue,
 		QueryStore:     queryStore,
-	})
+	}
+	if receiptWriter != nil {
+		deps.ReceiptWriter = receiptWriter // never a typed nil in the interface
+	}
+	srv, err := api.NewServer(cfg, deps)
 	if err != nil {
 		logSvc.Error("config validation error", err)
 		a.Stop(context.Background())
@@ -189,15 +227,35 @@ func (a *serverApp) Start() error {
 	return nil
 }
 
+// Stop shuts down in the order that loses nothing:
+//
+//  1. the HTTP server stops accepting and waits for requests in flight — a
+//     receipt being written, an order being accepted;
+//  2. the order queue is closed and the worker finishes every order already
+//     queued (each was answered 202), for up to orderDrainTimeout;
+//  3. only then is the worker's context cancelled.
+//
+// It used to cancel the queue first, which dropped every queued order.
+// ctx bounds the whole stop (autostart.StopTimeout from the service).
 func (a *serverApp) Stop(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if a.srv != nil {
+		if err := a.srv.Shutdown(ctx); err != nil && a.logSvc != nil {
+			a.logSvc.Error("HTTP shutdown did not finish cleanly", err)
+		}
+	}
+	if a.orderQueue != nil {
+		drainCtx, cancel := context.WithTimeout(ctx, orderDrainTimeout)
+		if err := a.orderQueue.Drain(drainCtx); err != nil && a.logSvc != nil {
+			a.logSvc.Error(fmt.Sprintf("stopping with %d queued order(s) not written; their numbers were already given to the caller",
+				a.orderQueue.Pending()), err)
+		}
+		cancel()
+	}
 	if a.queueCancel != nil {
 		a.queueCancel()
-	}
-	if a.srv != nil {
-		_ = a.srv.Shutdown(ctx)
 	}
 	if a.dbConn != nil {
 		_ = a.dbConn.Close()

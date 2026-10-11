@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
 
 	"golang.org/x/sys/windows/svc"
 )
@@ -41,7 +40,7 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status 
 			case svc.Interrogate:
 				status <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
-				status <- svc.Status{State: svc.StopPending}
+				status <- svc.Status{State: svc.StopPending, WaitHint: uint32(stopWaitHint.Milliseconds())}
 				h.stopApp()
 				status <- svc.Status{State: svc.Stopped}
 				return false, 0
@@ -50,7 +49,7 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status 
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				h.logError("server stopped", err)
 			}
-			status <- svc.Status{State: svc.StopPending}
+			status <- svc.Status{State: svc.StopPending, WaitHint: uint32(stopWaitHint.Milliseconds())}
 			h.stopApp()
 			status <- svc.Status{State: svc.Stopped}
 			return false, 1
@@ -58,8 +57,10 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status 
 	}
 }
 
+// stopApp gives the app StopTimeout: long enough for a receipt in flight to
+// finish and the order queue to drain (see serverApp.Stop).
 func (h *serviceHandler) stopApp() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	h.app.Stop(ctx)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -47,10 +48,19 @@ type OrderQueue struct {
 	ch     chan orderJob
 	sender *Sender
 	log    logger.LoggerService
+	done   chan struct{} // closed when the worker exits
 
 	mu   sync.RWMutex
 	jobs map[string]*JobResult
+
+	// closeMu guards closed and every send on ch, so Submit never sends on a
+	// closed channel and Stop never closes it twice.
+	closeMu sync.Mutex
+	closed  bool
 }
+
+// ErrQueueClosed is Submit's answer once the queue is draining or stopped.
+var ErrQueueClosed = errors.New("order queue is closed (the connector is stopping)")
 
 // NewOrderQueue creates a new queue. Call Start to begin processing.
 func NewOrderQueue(sender *Sender, log logger.LoggerService) *OrderQueue {
@@ -59,6 +69,7 @@ func NewOrderQueue(sender *Sender, log logger.LoggerService) *OrderQueue {
 		sender: sender,
 		log:    log,
 		jobs:   make(map[string]*JobResult),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -69,6 +80,7 @@ func (q *OrderQueue) Start(ctx context.Context) {
 }
 
 func (q *OrderQueue) run(ctx context.Context) {
+	defer close(q.done)
 	for {
 		select {
 		case <-ctx.Done():
@@ -99,6 +111,9 @@ func (q *OrderQueue) run(ctx context.Context) {
 // In normal runtime this ID is the reserved lastOrderNumber as a decimal string.
 // Returns an error if the queue is full.
 func (q *OrderQueue) Submit(req OrderRequest) (string, error) {
+	if q.isClosed() {
+		return "", ErrQueueClosed // before a number is reserved
+	}
 	jobID, orderNumber, err := q.reserveJobIdentity()
 	if err != nil {
 		return "", err
@@ -114,16 +129,35 @@ func (q *OrderQueue) Submit(req OrderRequest) (string, error) {
 	}
 	q.mu.Unlock()
 
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	if q.closed {
+		q.forget(jobID)
+		return "", ErrQueueClosed
+	}
 	select {
 	case q.ch <- job:
 		return jobID, nil
 	default:
-		q.mu.Lock()
-		delete(q.jobs, jobID)
-		q.mu.Unlock()
+		q.forget(jobID)
 		return "", fmt.Errorf("order queue full (capacity %d)", defaultQueueSize)
 	}
 }
+
+func (q *OrderQueue) forget(jobID string) {
+	q.mu.Lock()
+	delete(q.jobs, jobID)
+	q.mu.Unlock()
+}
+
+func (q *OrderQueue) isClosed() bool {
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	return q.closed
+}
+
+// Pending is the number of orders accepted but not yet started.
+func (q *OrderQueue) Pending() int { return len(q.ch) }
 
 // reserveJobIdentity reserves the next order number when available and uses it
 // as the externally visible job ID (for backward compatibility with clients
@@ -152,9 +186,30 @@ func (q *OrderQueue) Status(jobID string) (*JobResult, bool) {
 	return r, ok
 }
 
-// Stop closes the job channel, causing the worker to exit after the current job.
+// Stop closes the queue: Submit answers ErrQueueClosed from now on, and the
+// worker exits once it has processed every job already queued. Safe to call
+// more than once.
 func (q *OrderQueue) Stop() {
-	close(q.ch)
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	if !q.closed {
+		q.closed = true
+		close(q.ch)
+	}
+}
+
+// Drain stops the queue and waits until the worker has finished every order
+// already queued — orders the caller was told were accepted (202) — or until
+// ctx ends. Cancel the worker's context only after Drain: cancelling first is
+// what lost queued orders on shutdown before.
+func (q *OrderQueue) Drain(ctx context.Context) error {
+	q.Stop()
+	select {
+	case <-q.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (q *OrderQueue) setStatus(id string, status JobStatus, orderNumber int64, files []string, err error) {
