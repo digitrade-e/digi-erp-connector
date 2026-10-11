@@ -17,8 +17,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,42 +34,71 @@ import (
 )
 
 func main() {
-	listen := flag.String("listen", "", "apiListen host:port (e.g. [::]:8082)")
-	erp := flag.String("erp", "hasavshevet", "erp type")
-	dbHost := flag.String("db-host", "", "db host")
-	dbPort := flag.Int("db-port", 0, "db port")
-	dbUser := flag.String("db-user", "", "db user")
-	dbName := flag.String("db-name", "", "db database")
-	dbPassword := flag.String("db-password", "", "db password (stored via DPAPI, not in yaml)")
-	encrypt := flag.Bool("encrypt", false, "set db.encrypt")
-	trust := flag.Bool("trust", false, "set db.trustServerCertificate")
-	queriesFrom := flag.String("queries-from", "", "import saved queries from this file")
-	authUser := flag.String("auth-user", "", "username the calling backend posts to /auth/token")
-	authPassword := flag.String("auth-password", "", "its password; blank generates one and prints it")
-	authTTL := flag.String("auth-ttl", "", "issued token lifetime (e.g. 30m); blank uses the default")
-	receiptSeed := flag.Int64("receipt-seed", 0,
+	e := env{
+		dataDir:    paths.DataDir(),
+		loadConfig: config.LoadOrDefault,
+		saveConfig: config.Save,
+		out:        os.Stdout,
+	}
+	if err := run(os.Args[1:], e); err != nil {
+		fmt.Fprintf(os.Stderr, "cutover-seed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// env is what run touches outside its arguments, so a test can point it at a
+// temp directory and see whether config.yaml would have been written.
+type env struct {
+	dataDir    string
+	loadConfig func() (config.Config, error)
+	saveConfig func(config.Config) error
+	out        io.Writer
+}
+
+func run(args []string, e env) error {
+	fs := flag.NewFlagSet("cutover-seed", flag.ContinueOnError)
+	listen := fs.String("listen", "", "apiListen host:port (e.g. [::]:8082)")
+	erp := fs.String("erp", "hasavshevet", "erp type")
+	dbHost := fs.String("db-host", "", "db host")
+	dbPort := fs.Int("db-port", 0, "db port")
+	dbUser := fs.String("db-user", "", "db user")
+	dbName := fs.String("db-name", "", "db database")
+	dbPassword := fs.String("db-password", "", "db password (stored via DPAPI, not in yaml)")
+	encrypt := fs.Bool("encrypt", false, "set db.encrypt")
+	trust := fs.Bool("trust", false, "set db.trustServerCertificate")
+	queriesFrom := fs.String("queries-from", "", "import saved queries from this file")
+	authUser := fs.String("auth-user", "", "username the calling backend posts to /auth/token")
+	authPassword := fs.String("auth-password", "", "its password; blank generates one and prints it")
+	authTTL := fs.String("auth-ttl", "", "issued token lifetime (e.g. 30m); blank uses the default")
+	receiptSeed := fs.Int64("receipt-seed", 0,
 		"create the receipt number store with N as the NEXT receipt number (N > 0); only when no store exists. "+
 			"A mode of its own: touches nothing else")
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	// The receipt seed is its own mode. Run with the provisioning flags it
 	// would also re-save config.yaml with their defaults (db.encrypt=false,
 	// …) on a box that only wanted a seed.
-	if *receiptSeed != 0 {
-		if others := otherFlagsSet(flag.CommandLine, "receipt-seed"); len(others) > 0 {
-			fail("receipt seed", fmt.Errorf("-receipt-seed runs alone; also given: -%s", strings.Join(others, ", -")))
+	//
+	// The mode is chosen by whether the flag was GIVEN, not by its value:
+	// "-receipt-seed 0" (an empty script variable) must be refused as a seed,
+	// not fall through to provisioning and rewrite config.yaml.
+	if flagGiven(fs, "receipt-seed") {
+		if others := otherFlagsSet(fs, "receipt-seed"); len(others) > 0 {
+			return fmt.Errorf("receipt seed: -receipt-seed runs alone; also given: -%s", strings.Join(others, ", -"))
 		}
-		if err := seedReceipts(paths.DataDir(), *receiptSeed); err != nil {
-			fail("receipt seed", err)
+		if err := seedReceipts(e.dataDir, *receiptSeed); err != nil {
+			return fmt.Errorf("receipt seed: %w", err)
 		}
-		fmt.Printf("receipt number store created: %s — the next receipt is %d\n",
-			hasavshevet.ReceiptNumberStorePath(paths.DataDir()), *receiptSeed)
-		return
+		fmt.Fprintf(e.out, "receipt number store created: %s — the next receipt is %d\n",
+			hasavshevet.ReceiptNumberStorePath(e.dataDir), *receiptSeed)
+		return nil
 	}
 
-	cfg, err := config.LoadOrDefault()
+	cfg, err := e.loadConfig()
 	if err != nil {
-		fail("load config", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	if *listen != "" {
@@ -108,7 +139,7 @@ func main() {
 	if cfg.Auth.Password == "" {
 		pw, err := auth.NewPassword()
 		if err != nil {
-			fail("generate auth password", err)
+			return fmt.Errorf("generate auth password: %w", err)
 		}
 		cfg.Auth.Password = pw
 	}
@@ -116,62 +147,63 @@ func main() {
 	if cfg.Auth.Secret == "" {
 		secret, err := auth.NewSecret()
 		if err != nil {
-			fail("generate auth signing secret", err)
+			return fmt.Errorf("generate auth signing secret: %w", err)
 		}
 		cfg.Auth.Secret = secret
-		fmt.Println("generated this installation's signing secret")
+		fmt.Fprintln(e.out, "generated this installation's signing secret")
 	}
 	if err := cfg.Auth.Validate(); err != nil {
-		fail("auth settings", fmt.Errorf("%w — pass -auth-user", err))
+		return fmt.Errorf("auth settings: %w — pass -auth-user", err)
 	}
 	if !cfg.Auth.TokenTTLValid() {
-		fail("auth settings", fmt.Errorf("-auth-ttl %q is not a positive duration", *authTTL))
+		return fmt.Errorf("auth settings: -auth-ttl %q is not a positive duration", *authTTL)
 	}
 
-	if err := config.Save(cfg); err != nil {
-		fail("save config", err)
+	if err := e.saveConfig(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
 	}
 	cfgPath, _ := paths.ConfigFilePath()
-	fmt.Printf("config written: %s\n", cfgPath)
-	fmt.Printf("  apiListen=%s erp=%s db=%s:%d/%s user=%s encrypt=%v trust=%v\n",
+	fmt.Fprintf(e.out, "config written: %s\n", cfgPath)
+	fmt.Fprintf(e.out, "  apiListen=%s erp=%s db=%s:%d/%s user=%s encrypt=%v trust=%v\n",
 		cfg.APIListen, cfg.ERP, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database, cfg.DB.User,
 		cfg.DB.Encrypt, cfg.DB.TrustServerCertificate)
-	fmt.Println("give the calling backend these — it posts them to /auth/token:")
-	fmt.Printf("  username=%s\n", cfg.Auth.Username)
-	fmt.Printf("  password=%s\n", cfg.Auth.Password)
+	fmt.Fprintln(e.out, "give the calling backend these — it posts them to /auth/token:")
+	fmt.Fprintf(e.out, "  username=%s\n", cfg.Auth.Username)
+	fmt.Fprintf(e.out, "  password=%s\n", cfg.Auth.Password)
 
 	if *dbPassword != "" {
 		key := "db_password_" + string(cfg.ERP)
 		if err := secrets.Set(key, []byte(*dbPassword)); err != nil {
-			fail("store db password", err)
+			return fmt.Errorf("store db password: %w", err)
 		}
 		got, err := secrets.Get(key)
 		if err != nil {
-			fail("verify db password", err)
+			return fmt.Errorf("verify db password: %w", err)
 		}
 		if string(got) != *dbPassword {
-			fail("verify db password", fmt.Errorf("round-trip mismatch"))
+			return errors.New("verify db password: round-trip mismatch")
 		}
-		fmt.Printf("db password stored and verified via DPAPI (key=%s, %d bytes)\n", key, len(got))
+		fmt.Fprintf(e.out, "db password stored and verified via DPAPI (key=%s, %d bytes)\n", key, len(got))
 	}
 
 	if *queriesFrom != "" {
-		target := filepath.Join(paths.DataDir(), "queries.json")
+		target := filepath.Join(e.dataDir, "queries.json")
 		data, err := os.ReadFile(*queriesFrom)
 		if err != nil {
-			fail("read source queries", err)
+			return fmt.Errorf("read source queries: %w", err)
 		}
 		if err := os.WriteFile(target, data, 0o600); err != nil {
-			fail("write queries.json", err)
+			return fmt.Errorf("write queries.json: %w", err)
 		}
 		// Parse it back through the real store so a bad import fails here and
 		// not at daemon startup.
 		store, err := queries.NewStore(target)
 		if err != nil {
-			fail("validate queries.json", err)
+			return fmt.Errorf("validate queries.json: %w", err)
 		}
-		fmt.Printf("queries imported: %s -> %s (%d queries parsed)\n", *queriesFrom, target, store.Count())
+		fmt.Fprintf(e.out, "queries imported: %s -> %s (%d queries parsed)\n", *queriesFrom, target, store.Count())
 	}
+	return nil
 }
 
 // seedReceipts creates the receipt number store with next as the first
@@ -189,6 +221,18 @@ func seedReceipts(dataDir string, next int64) error {
 	return hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(dataDir)).Seed(next)
 }
 
+// flagGiven reports whether name was given on the command line, whatever its
+// value.
+func flagGiven(fs *flag.FlagSet, name string) bool {
+	given := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			given = true
+		}
+	})
+	return given
+}
+
 // otherFlagsSet lists the flags given on the command line other than except.
 func otherFlagsSet(fs *flag.FlagSet, except string) []string {
 	var out []string
@@ -198,9 +242,4 @@ func otherFlagsSet(fs *flag.FlagSet, except string) []string {
 		}
 	})
 	return out
-}
-
-func fail(what string, err error) {
-	fmt.Fprintf(os.Stderr, "cutover-seed: %s: %v\n", what, err)
-	os.Exit(1)
 }
