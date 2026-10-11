@@ -50,23 +50,19 @@ Filename: "{cmd}"; Parameters: "/C sc.exe create {#ServiceName} binPath= ""{app}
 Filename: "{cmd}"; Parameters: "/C sc.exe description {#ServiceName} ""Digi ERP Connector API Service"" >nul 2>&1 & exit /b 0"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/C sc.exe start {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
 
-[UninstallRun]
-Filename: "{cmd}"; Parameters: "/C sc.exe stop {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
-Filename: "{cmd}"; Parameters: "/C sc.exe delete {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
-
-[Code]
-// Before any file is replaced, stop the running service and wait until it has
-// really stopped. The daemon's own stop is graceful: it lets a receipt being
-// written finish and writes every queued order before it exits, and it can take
-// up to 150 s (autostart.StopTimeout). Replacing digi-erp-connectord.exe while
-// it still runs would fail, or would cut that work short. This only asks the
-// service to stop (sc stop) and waits for it; the draining is the daemon's.
+; No [UninstallRun]: stopping, waiting for STOPPED and deleting the service are
+; done in that order by CurUninstallStepChanged in [Code]
+// Stopping the service is graceful: the daemon lets a receipt being written
+// finish and writes every queued order before it exits, which can take up to
+// 150 s (autostart.StopTimeout). Setup and the uninstaller only ask it to stop
+// (sc stop) and wait up to 180 s for STOPPED - never replace or delete it under
+// that work.
 const
   StopWaitSeconds = 180;
   ScServiceDoesNotExist = 1060;
 
 // QueryService runs "sc query" for the service. Exists is false when it is not
-// installed (a fresh install). Stopped is true when its STATE is STOPPED.
+// installed. Stopped is true when its STATE is STOPPED.
 procedure QueryService(var Exists: Boolean; var Stopped: Boolean);
 var
   OutFile: String;
@@ -87,12 +83,14 @@ begin
     Stopped := Pos('STOPPED', Output) > 0;
 end;
 
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+// StopServiceAndWait asks the service to stop and waits up to StopWaitSeconds
+// for STOPPED. True when it is stopped or not installed.
+function StopServiceAndWait(): Boolean;
 var
   Exists, Stopped: Boolean;
   ResultCode, Waited: Integer;
 begin
-  Result := '';
+  Result := True;
   QueryService(Exists, Stopped);
   if (not Exists) or Stopped then
     Exit;
@@ -109,9 +107,36 @@ begin
     if (not Exists) or Stopped then
       Exit;
   end;
+  Result := False;
+end;
 
-  Result := 'The {#ServiceName} service did not stop within ' + IntToStr(StopWaitSeconds) +
-    ' seconds, so Setup has not replaced it.' + #13#10#13#10 +
-    'It may still be finishing a receipt or writing queued orders. Wait until it shows as ' +
-    'Stopped in Services (services.msc), or stop it there, then run Setup again.';
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not StopServiceAndWait() then
+    Result := 'The {#ServiceName} service did not stop within ' + IntToStr(StopWaitSeconds) +
+      ' seconds, so Setup has not replaced it.' + #13#10#13#10 +
+      'It may still be finishing a receipt or writing queued orders. Wait until it shows as ' +
+      'Stopped in Services (services.msc), or stop it there, then run Setup again.';
+end;
+
+// Uninstall: stop and wait first, then delete the service, then the files go.
+// The uninstaller cannot be aborted at this point, so a service that will not
+// stop is reported and deleted anyway (Windows removes it once it exits).
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+  if not StopServiceAndWait() then
+  begin
+    Log('{#ServiceName} did not stop within ' + IntToStr(StopWaitSeconds) + ' s; deleting it anyway');
+    if not UninstallSilent() then
+      MsgBox('The {#ServiceName} service did not stop within ' + IntToStr(StopWaitSeconds) +
+        ' seconds. It will be removed once it stops; some files may stay behind until then.',
+        mbInformation, MB_OK);
+  end;
+  Exec(ExpandConstant('{cmd}'), '/C sc.exe delete {#ServiceName} >nul 2>&1', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
 end;
