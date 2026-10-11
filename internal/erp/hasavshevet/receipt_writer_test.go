@@ -750,3 +750,62 @@ func TestCanonicalReceiptKey(t *testing.T) {
 		}
 	}
 }
+
+// Model (b): a receipt that Recover finished never had its BAT run, and no
+// repeat runs it. Without a note the backend would read import "not_run" as an
+// ordinary model-(a) answer, so the entry carries a warning that every replay
+// returns. Model (a) — where not_run is the normal state — gets no such note.
+func TestReceiptWriter_RecoveredReceiptWarnsTheBatWasNotRun(t *testing.T) {
+	for _, modelB := range []bool{true, false} {
+		t.Run(fmt.Sprintf("modelB=%v", modelB), func(t *testing.T) {
+			h := newReceiptHarness(t, 1000)
+			if modelB {
+				h.cfg.HasReceiptBatFile = filepath.Join(h.sendDir, "kupain.bat")
+			}
+			req := receiptFor(testKey(1))
+
+			w := h.writer()
+			w.crashPoint = func(p string) {
+				if p == crashAfterStoreAdvanced {
+					panic("killed")
+				}
+			}
+			func() {
+				defer func() { _ = recover() }()
+				_, _ = w.Write(context.Background(), req)
+			}()
+
+			var calls atomic.Int32
+			countBat := func(context.Context, string) (int, string, error) { calls.Add(1); return 0, "", nil }
+
+			w2 := h.writer() // Recover finishes 1000
+			w2.runBat = countBat
+			for i := 0; i < 2; i++ {
+				w3 := h.writer() // and survives a restart
+				w3.runBat = countBat
+				for _, ww := range []*ReceiptWriter{w2, w3} {
+					res := mustWrite(t, ww, req)
+					if res.ReceiptNumber != 1000 || res.Import != ImportNotRun || !res.Replayed {
+						t.Fatalf("replay = %+v; want replayed 1000 / not_run", res)
+					}
+					got := hasWarningContaining(res.Warnings, "the receipt BAT was not run")
+					if got != modelB {
+						t.Errorf("warnings %q: recovery note present = %v; want %v", res.Warnings, got, modelB)
+					}
+				}
+			}
+			if c := calls.Load(); c != 0 {
+				t.Errorf("the BAT ran %d times for a recovered receipt; want never", c)
+			}
+		})
+	}
+}
+
+func hasWarningContaining(warnings []string, sub string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, sub) {
+			return true
+		}
+	}
+	return false
+}

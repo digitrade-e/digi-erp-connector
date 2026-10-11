@@ -104,7 +104,7 @@ Per idempotency key, in `DataDir/receipts/index/<key>.json`:
 
 | `import` | Meaning |
 |---|---|
-| `not_run` | No BAT run: model (a), or a receipt finished by recovery. Imported by hand. |
+| `not_run` | No BAT run: model (a), or a receipt finished by recovery (in model (b) its `warnings` then say so on every replay). Imported by hand. |
 | `started` | The BAT was started and the process died before its outcome was recorded. It may or may not have imported. **Never re-run** for this key — a person checks Hashavshevet. |
 | `ok` | The BAT exited 0. |
 | `failed` | The BAT exited non-zero, failed to start, or ran past 90 s. The receipt is still written; import it by hand. Never re-run. |
@@ -175,8 +175,11 @@ whatever its key — finishes n before issuing n+1, so the importer never sees n
 while n is missing.
 
 `Recover()` runs at daemon startup: it finishes every `reserved` receipt (files
-only — never the BAT; a warning in `server.log` says to import it by hand in
-model (b)) and moves the store past every indexed number. If it fails, the
+only — never the BAT) and moves the store past every indexed number. In model
+(b) such a receipt keeps `import: not_run`, which on its own reads like a
+model-(a) answer, so recovery also stores a warning on its index entry ("…the
+receipt BAT was not run for it — import it by hand") that **every replay of the
+key returns in `warnings`**, besides the line in `server.log`. If it fails, the
 daemon still starts (orders and queries are unaffected) and each receipt request
 retries it.
 

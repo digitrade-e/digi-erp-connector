@@ -33,6 +33,10 @@ const (
 	crashAfterStoreAdvanced = "store-advanced" // the store has moved on; no file is in place yet
 )
 
+// recoveredWithoutBatWarning is stored on a model-(b) receipt that Recover
+// finished: its BAT was never run and never will be.
+const recoveredWithoutBatWarning = "this receipt was completed by recovery after an interrupted write; the receipt BAT was not run for it — import it by hand"
+
 // ErrStoredReceiptUnbuildable means a receipt request already stored in the
 // index — being finished by Recover or by a repeat — no longer builds. It is
 // the connector's fault (an index written by another version, a hand edit),
@@ -183,7 +187,15 @@ func (w *ReceiptWriter) recoverLocked() error {
 		if e.State != receiptReserved {
 			continue
 		}
-		if err := w.complete(e); err != nil {
+		// Model (b): Recover never runs the BAT and no repeat will either, so
+		// import stays not_run — which the backend would otherwise read as an
+		// ordinary model-(a) answer. The note is saved with state written, so
+		// every replay of the key returns it.
+		var notes []string
+		if w.batConfigured() {
+			notes = append(notes, recoveredWithoutBatWarning)
+		}
+		if err := w.complete(e, notes...); err != nil {
 			return fmt.Errorf("recover receipt %d (key %s): %w", e.Number, e.Key, err)
 		}
 		msg := fmt.Sprintf("recovered receipt %d key=%s: file written after an interrupted write", e.Number, e.Key)
@@ -287,8 +299,10 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 }
 
 // complete is steps 4–5: files in place, then state written. It is safe to
-// repeat: a file already holding the right bytes is not rewritten.
-func (w *ReceiptWriter) complete(e *receiptIndexEntry) error {
+// repeat: a file already holding the right bytes is not rewritten. notes are
+// stored with the builder's warnings in the same save as state written, so
+// every later answer for the key carries them.
+func (w *ReceiptWriter) complete(e *receiptIndexEntry, notes ...string) error {
 	doc, warnings, err := generateKUPAINDOC(e.Request, e.Number, w.cfg.CardNames)
 	if err != nil {
 		var fe *FieldError
@@ -325,7 +339,7 @@ func (w *ReceiptWriter) complete(e *receiptIndexEntry) error {
 
 	e.State = receiptWritten
 	e.Files = []string{docPath, prmPath, histDoc, histPrm}
-	e.Warnings = warnings
+	e.Warnings = append(warnings, notes...)
 	e.WrittenAt = time.Now().UTC().Format(time.RFC3339)
 	return w.index.save(e)
 }
