@@ -7,6 +7,10 @@
 // scriptable. The GUI remains the supported way to configure an installation
 // interactively; this is an operator tool, not part of the service.
 //
+// -receipt-seed N is a separate mode: it only creates the receipt number store
+// (DataDir/receipts/receiptNumber.json) with N as the next receipt number, and
+// refuses to run alongside any other flag.
+//
 // Note it takes the DB password as a flag, so it lands in shell history and is
 // briefly visible in the process list. Acceptable on a box where you are already
 // reading the old app's plaintext config; do not use it on shared machines.
@@ -17,9 +21,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 	"github.com/digitrade-e/digi-erp-connector/internal/secrets"
@@ -39,7 +45,25 @@ func main() {
 	authUser := flag.String("auth-user", "", "username the calling backend posts to /auth/token")
 	authPassword := flag.String("auth-password", "", "its password; blank generates one and prints it")
 	authTTL := flag.String("auth-ttl", "", "issued token lifetime (e.g. 30m); blank uses the default")
+	receiptSeed := flag.Int64("receipt-seed", 0,
+		"create the receipt number store with N as the NEXT receipt number (N > 0); only when no store exists. "+
+			"A mode of its own: touches nothing else")
 	flag.Parse()
+
+	// The receipt seed is its own mode. Run with the provisioning flags it
+	// would also re-save config.yaml with their defaults (db.encrypt=false,
+	// …) on a box that only wanted a seed.
+	if *receiptSeed != 0 {
+		if others := otherFlagsSet(flag.CommandLine, "receipt-seed"); len(others) > 0 {
+			fail("receipt seed", fmt.Errorf("-receipt-seed runs alone; also given: -%s", strings.Join(others, ", -")))
+		}
+		if err := seedReceipts(paths.DataDir(), *receiptSeed); err != nil {
+			fail("receipt seed", err)
+		}
+		fmt.Printf("receipt number store created: %s — the next receipt is %d\n",
+			hasavshevet.ReceiptNumberStorePath(paths.DataDir()), *receiptSeed)
+		return
+	}
 
 	cfg, err := config.LoadOrDefault()
 	if err != nil {
@@ -148,6 +172,32 @@ func main() {
 		}
 		fmt.Printf("queries imported: %s -> %s (%d queries parsed)\n", *queriesFrom, target, store.Count())
 	}
+}
+
+// seedReceipts creates the receipt number store with next as the first
+// receipt number. The store writes only when no store file exists, so a seed
+// can never lower the numbering or paper over a damaged store: an existing
+// one is an error, left exactly as it was.
+//
+// Pick N in a range the legacy writer cannot reach (plan 005 Q-J6), and seed
+// before the first receipt — an unseeded connector answers sendReceipt 503
+// RECEIPT_NUMBER_STORE_UNAVAILABLE rather than start at 1.
+func seedReceipts(dataDir string, next int64) error {
+	if next <= 0 {
+		return fmt.Errorf("-receipt-seed must be greater than 0, got %d", next)
+	}
+	return hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(dataDir)).Seed(next)
+}
+
+// otherFlagsSet lists the flags given on the command line other than except.
+func otherFlagsSet(fs *flag.FlagSet, except string) []string {
+	var out []string
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name != except {
+			out = append(out, f.Name)
+		}
+	})
+	return out
 }
 
 func fail(what string, err error) {

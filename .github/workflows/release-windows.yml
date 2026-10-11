@@ -62,8 +62,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/bin
-          go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/bin/digi-erp-connector.exe" ./cmd/digi-erp-connector
-          go build -trimpath -ldflags "-s -w" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
+          # Stamp the release tag into the binaries; GET /api/ping returns it as
+          # "version" ("dev" in any build without this).
+          version_flag="-X github.com/digitrade-e/digi-erp-connector/internal/buildinfo.Version=${VERSION}"
+          go build -trimpath -ldflags "-s -w -H=windowsgui ${version_flag}" -o "dist/bin/digi-erp-connector.exe" ./cmd/digi-erp-connector
+          go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
 
       - name: Build installer
         shell: powershell

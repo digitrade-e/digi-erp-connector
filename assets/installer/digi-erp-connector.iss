@@ -53,3 +53,65 @@ Filename: "{cmd}"; Parameters: "/C sc.exe start {#ServiceName} >nul 2>&1 & exit 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C sc.exe stop {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/C sc.exe delete {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
+
+[Code]
+// Before any file is replaced, stop the running service and wait until it has
+// really stopped. The daemon's own stop is graceful: it lets a receipt being
+// written finish and writes every queued order before it exits, and it can take
+// up to 150 s (autostart.StopTimeout). Replacing digi-erp-connectord.exe while
+// it still runs would fail, or would cut that work short. This only asks the
+// service to stop (sc stop) and waits for it; the draining is the daemon's.
+const
+  StopWaitSeconds = 180;
+  ScServiceDoesNotExist = 1060;
+
+// QueryService runs "sc query" for the service. Exists is false when it is not
+// installed (a fresh install). Stopped is true when its STATE is STOPPED.
+procedure QueryService(var Exists: Boolean; var Stopped: Boolean);
+var
+  OutFile: String;
+  Output: AnsiString;
+  ResultCode: Integer;
+begin
+  Exists := False;
+  Stopped := False;
+  OutFile := ExpandConstant('{tmp}\sc-query.txt');
+  DeleteFile(OutFile);
+  if not Exec(ExpandConstant('{cmd}'), '/C sc.exe query {#ServiceName} > "' + OutFile + '" 2>&1',
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if ResultCode = ScServiceDoesNotExist then
+    Exit;
+  Exists := True;
+  if LoadStringFromFile(OutFile, Output) then
+    Stopped := Pos('STOPPED', Output) > 0;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Exists, Stopped: Boolean;
+  ResultCode, Waited: Integer;
+begin
+  Result := '';
+  QueryService(Exists, Stopped);
+  if (not Exists) or Stopped then
+    Exit;
+
+  Exec(ExpandConstant('{cmd}'), '/C sc.exe stop {#ServiceName} >nul 2>&1', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+
+  Waited := 0;
+  while Waited < StopWaitSeconds do
+  begin
+    Sleep(1000);
+    Waited := Waited + 1;
+    QueryService(Exists, Stopped);
+    if (not Exists) or Stopped then
+      Exit;
+  end;
+
+  Result := 'The {#ServiceName} service did not stop within ' + IntToStr(StopWaitSeconds) +
+    ' seconds, so Setup has not replaced it.' + #13#10#13#10 +
+    'It may still be finishing a receipt or writing queued orders. Wait until it shows as ' +
+    'Stopped in Services (services.msc), or stop it there, then run Setup again.';
+end;
