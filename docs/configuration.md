@@ -102,7 +102,7 @@ omitted from the file when unset, and without `sendReceiptDir` the route answers
 
 | Key | Meaning |
 |---|---|
-| `sendReceiptDir` | The receipt importer's folder: only `KUPAIN_{n}.doc` and `KUPAIN.prm` are written here. **Must not be `sendOrderDir`** (compared after resolving `..`, trailing separators and symlinks; case-insensitively on Windows) — the daemon will not start and the GUI will not save. Receipts are configured only with `erp: hasavshevet` and this set. |
+| `sendReceiptDir` | The receipt importer's folder: only `KUPAIN_{n}.doc` and `KUPAIN.prm` are written here. **Must be absolute and must not be `sendOrderDir`** (compared after resolving `..`, trailing separators and symlinks; case-insensitively on Windows) — the daemon will not start and the GUI will not save. Receipts are configured only with `erp: hasavshevet` and this set. |
 | `hasReceiptBatFile` | Model (b): this BAT runs once (via `cmd.exe /C`, from its own folder, 90 s cap) after each receipt is written. Empty is model (a): files only, imported by hand. |
 | `receiptCardNames` | `{issuer: {code: name}, brand: {code: name}}` — overrides of the receipt's card name (F17), keyed by the raw HYP code. A name that is not Windows-1255 or is wider than 25 bytes, or a blank code, stops the daemon and the GUI save. |
 

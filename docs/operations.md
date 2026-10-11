@@ -77,8 +77,9 @@ port rule.
 Installers built with sendReceipt (DIG-929) **stop the service themselves**: before
 replacing any file they run `sc stop` and wait up to 180 s for `STOPPED`, and abort
 with a message if it has not stopped. The daemon's own stop is graceful — it lets a
-receipt in flight finish and writes every queued order (≤150 s) before it exits —
-so the wait can be long on a busy box. Older installers did not stop it, and a
+receipt in flight finish and then writes every queued order (≤120 s, within a
+150 s stop budget) before it exits — so the wait can be long on a busy box. The
+uninstaller now also waits for STOPPED before deleting the service. Older installers did not stop it, and a
 running executable cannot be overwritten; stopping it first is still harmless:
 
 ```powershell

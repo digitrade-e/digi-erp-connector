@@ -41,6 +41,7 @@ Content-Type: application/json
 | `503` | `RECEIPT_WRITER_BUSY` | Another import held the lock for 20 s. Nothing reserved — retry with the same key. |
 | `500` | `RECEIPT_CONFIG_INVALID` | A `receiptCardNames` override cannot be written. The daemon refuses such a config at startup, so this should never be seen. |
 | `500` | `RECEIPT_INDEX_UNREADABLE` | An index entry is corrupt, or two keys hold one number. A person must look. |
+| `500` | `RECEIPT_STORED_REQUEST_INVALID` | A receipt reserved earlier (being finished by recovery or a repeat) no longer builds. The connector's index is at fault, not this request — never a 400. |
 | `500` | `RECEIPT_WRITE_FAILED` | The disk. The number stays with the key; a repeat (or the next receipt) finishes it. |
 
 Rules the backend relies on:
@@ -59,8 +60,10 @@ Rules the backend relies on:
 
 ## Request fields
 
-The body is decoded **strictly**: an unknown field, a wrong type, or trailing
-data is `400` naming the field. Nullable fields accept `null` or absence. The
+The body is decoded **strictly**: an unknown field, a wrong type, trailing
+data, a key given twice, or a key that matches a field only in another case
+(`AmountMinor`) is `400` naming the field by its path (`account/city`).
+`encoding/json` alone would accept the last two silently. Nullable fields accept `null` or absence. The
 authoritative table is plan 005 §2; KUPAIN positions are in
 `internal/erp/hasavshevet/kupain.go`.
 
@@ -135,8 +138,10 @@ Create it once, before the first receipt, with the service stopped or running:
 cutover-seed.exe -receipt-seed 5000000
 ```
 
-`-receipt-seed` is a mode of its own: it refuses any other flag (they would
-re-save `config.yaml` with their defaults), requires N > 0, and writes **only when
+`-receipt-seed` is a mode of its own, chosen by the flag being given — so
+`-receipt-seed 0` (an empty script variable) is refused, not taken for
+provisioning. It refuses any other flag (they would re-save `config.yaml` with
+their defaults), requires N > 0 and exits non-zero otherwise, and writes **only when
 no store exists** — a second seed, higher or lower, is an error and changes
 nothing, so the numbering can never be lowered. Choose N in a range the legacy
 writer cannot reach (see [Open questions](#open-questions)).
@@ -193,13 +198,20 @@ the order import ends.
 
 ## Shutdown and upgrades
 
-`Stop()` (service stop, Ctrl-C) shuts down in the order that loses nothing:
-HTTP shutdown first (a receipt being written finishes), then the order queue
-drains (≤ 120 s: every order already answered 202 is written), then the worker
-is cancelled. The whole stop is bounded by 150 s; the Windows service reports
-`StopPending` with a 160 s wait hint. The installer runs `sc stop` and waits up
-to 180 s for `STOPPED` before replacing any binary, and aborts with a message if
-the service has not stopped.
+`Stop()` (service stop, Ctrl-C) shuts down in the order that loses nothing,
+all within one **150 s** stop budget (`autostart.StopTimeout`):
+
+1. HTTP shutdown — a receipt being written finishes and gets its answer;
+2. the order queue drains — every order already answered 202 is written. The
+   drain gets **at most 120 s, and never more than what is left of the 150 s**
+   after step 1;
+3. the worker is cancelled.
+
+The Windows service reports `StopPending` with a 160 s wait hint. The installer
+runs `sc stop` and waits up to 180 s for `STOPPED` before replacing any binary,
+and aborts with a message if the service has not stopped. The uninstaller does
+the same stop-and-wait before `sc delete`; it cannot abort, so a service that
+has not stopped by then is reported and deleted anyway.
 
 ## Configuration
 
@@ -213,7 +225,9 @@ receiptCardNames:                          # optional overrides of F17
     "6": מקס
 ```
 
-`sendReceiptDir` must not be `sendOrderDir` — compared after resolving `..`,
+`sendReceiptDir` must be an absolute path (a relative one would resolve against
+the service's working directory) and must not be `sendOrderDir` — compared after
+resolving `..`,
 trailing separators and symlinks, case-insensitively on Windows. The daemon
 refuses to start on it and the GUI refuses to save it, as it does a
 `receiptCardNames` name that cannot be written in F17 (not Windows-1255, or wider

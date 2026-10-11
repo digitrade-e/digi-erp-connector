@@ -74,11 +74,12 @@ See `saved-queries.md` for the full model.
 
 `POST /api/sendReceipt` → `200 {"receiptNumber":"1000","written":true,"idempotencyKey":"<uuid>","import":"not_run|started|ok|failed","warnings":[]}`.
 Synchronous (up to 120 s), one KUPAIN receipt per `idempotencyKey`; a repeat of
-the key answers the same receipt. The body is decoded strictly — an unknown field
-or a wrong type is a 400. Errors: `VALIDATION_ERROR` (400, `details.field`),
+the key answers the same receipt. The body is decoded strictly — an unknown field,
+a wrong type, a duplicate key or a key in the wrong case is a 400. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
 `RECEIPT_WRITER_BUSY` (503), `RECEIPT_CONFIG_INVALID` /
-`RECEIPT_INDEX_UNREADABLE` / `RECEIPT_WRITE_FAILED` (500). Full contract, field
+`RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
+`RECEIPT_WRITE_FAILED` (500). Full contract, field
 table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
 
 ## Price & stock
@@ -130,4 +131,5 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `RECEIPT_WRITER_BUSY` | 503 | Another import held the import lock for 20 s. Nothing reserved; retry with the same key. |
 | `RECEIPT_CONFIG_INVALID` | 500 | A `receiptCardNames` override cannot be written. Refused at startup, so not expected. |
 | `RECEIPT_INDEX_UNREADABLE` | 500 | A receipt index entry is corrupt, or two keys hold one number. A person must look; never delete index files. |
+| `RECEIPT_STORED_REQUEST_INVALID` | 500 | A receipt reserved by an earlier request no longer builds while being finished. The connector's index is at fault, not this request. |
 | `RECEIPT_WRITE_FAILED` | 500 | The receipt files could not be written (disk, permissions). The number stays with the key; a retry finishes it. |
