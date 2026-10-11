@@ -15,7 +15,8 @@ import (
 // document, so a value that does not fit or cannot be represented is refused
 // and the caller is told which field, rather than written damaged.
 
-// strippedRunes are bidi formatting controls. They are invisible, they reach
+// strippedRunes are bidi formatting controls and other invisible characters
+// (zero-width joiners, BOM, soft hyphen). They are invisible, they reach
 // us from copy-pasted Hebrew text, and two of them (LRM, RLM) are even
 // representable in Windows-1255 (0xFD, 0xFE) — which would put invisible bytes
 // into a fixed-width field. They are removed, never encoded. The apostrophe is
@@ -33,6 +34,10 @@ var strippedRunes = map[rune]bool{
 	'\u2068': true, // FIRST STRONG ISOLATE
 	'\u2069': true, // POP DIRECTIONAL ISOLATE
 	'\u061C': true, // ARABIC LETTER MARK
+	'\u200C': true, // ZERO WIDTH NON-JOINER
+	'\u200D': true, // ZERO WIDTH JOINER
+	'\uFEFF': true, // BYTE ORDER MARK / ZERO WIDTH NO-BREAK SPACE
+	'\u00AD': true, // SOFT HYPHEN
 	'\'':     true,
 }
 
@@ -40,7 +45,7 @@ var strippedRunes = map[rune]bool{
 // decomposed input encode to the same bytes, and Hebrew presentation forms
 // become base letter + mark), bidi controls and apostrophes removed, every
 // line break (\r\n, \r, \n) written as ". " so a value can never break the
-// one-record-per-line file, and a tab written as a space.
+// one-record-per-line file, and a tab or no-break space written as a space.
 func normalize1255(s string) string {
 	s = norm.NFC.String(s)
 	var b strings.Builder
@@ -53,7 +58,7 @@ func normalize1255(s string) string {
 			size++
 		case r == '\r' || r == '\n':
 			b.WriteString(". ")
-		case r == '\t':
+		case r == '\t' || r == '\u00A0': // tab, NO-BREAK SPACE
 			b.WriteByte(' ')
 		case strippedRunes[r]:
 		default:

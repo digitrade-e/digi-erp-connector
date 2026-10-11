@@ -97,7 +97,8 @@ func goldenReceipt() ReceiptRequest {
 		AmountMinor:           710700,
 		Currency:              "ILS",
 		Installments:          1,
-		CardIssuer:            "2",
+		CardIssuer:            "2", // HYP Issuer 2 → ויזה …
+		CardBrand:             "2", // … and Brand 2 (Visa), which the legacy table has no name for; the issuer wins
 		Last4:                 "1234",
 		ConfirmationCode:      "0123456",
 		AuthorizationRef:      "26101112345678901234567",
@@ -501,6 +502,11 @@ func TestNormalize1255_LineBreaksApostrophesTabs(t *testing.T) {
 		"צ'ק":      "צק",
 		"it's":     "its",
 		"a\tb":     "a b",
+		"a\u00A0b": "a b",  // NBSP is a space
+		"a\u00ADb": "ab",   // soft hyphen
+		"a\u200Cb": "ab",   // ZWNJ
+		"a\u200Db": "ab",   // ZWJ
+		"\uFEFFab": "ab",   // BOM
 		`בע"מ`:     `בע"מ`, // gershayim stay
 	}
 	for in, want := range cases {
@@ -640,32 +646,44 @@ func TestKUPAINRecord_ReceiptNumberRange(t *testing.T) {
 
 // ---------------------------------------------------------------- card name
 
-func TestCardName_LegacyTable(t *testing.T) {
+func TestCardName_EveryLegacyCode(t *testing.T) {
 	cases := []struct {
-		issuer, brand, want string
+		issuer, brand, want, from string
 	}{
-		{"1", "", "ישראכרט"},
-		{"2", "", "ויזה"},
-		{"5", "", "אלפא קארד/לאומי קארד"},
-		{"", "4", "אמריקן אקספרס"},
-		{"", "3", "דיינרס"},
-		{"2", "4", "ויזה"},     // issuer is preferred over brand, as in the legacy
-		{"9", "3", "דיינרס"},   // unknown issuer falls through to the brand
-		{" 1 ", "", "ישראכרט"}, // codes are trimmed
+		// every issuer code the legacy names (global_api.php:5339-5344)
+		{"1", "", "ישראכרט", "cardIssuer"},
+		{"2", "", "ויזה", "cardIssuer"},
+		{"5", "", "אלפא קארד/לאומי קארד", "cardIssuer"},
+		// the only brand codes the legacy names (:5345-5348)
+		{"", "4", "אמריקן אקספרס", "cardBrand"},
+		{"", "3", "דיינרס", "cardBrand"},
+		// issuer first: a known issuer wins over a known brand
+		{"2", "4", "ויזה", "cardIssuer"},
+		{"1", "3", "ישראכרט", "cardIssuer"},
+		{"5", "4", "אלפא קארד/לאומי קארד", "cardIssuer"},
+		// an issuer the table does not know falls through to the brand
+		{"9", "3", "דיינרס", "cardBrand"},
+		{" 1 ", "", "ישראכרט", "cardIssuer"}, // codes are trimmed
 	}
 	for _, c := range cases {
-		got, warn := cardName(c.issuer, c.brand, ReceiptCardNames{})
-		if got != c.want || warn != "" {
-			t.Errorf("cardName(%q, %q) = %q, %q; want %q and no warning", c.issuer, c.brand, got, warn, c.want)
+		got, from, warn := cardName(c.issuer, c.brand, ReceiptCardNames{})
+		if got != c.want || from != c.from || warn != "" {
+			t.Errorf("cardName(%q, %q) = %q from %q, warning %q; want %q from %q, no warning",
+				c.issuer, c.brand, got, from, warn, c.want, c.from)
 		}
 	}
 }
 
 func TestCardName_UnknownIsBlankWithWarning(t *testing.T) {
-	for _, c := range [][2]string{{"", "1"}, {"7", "6"}, {"", ""}} {
-		got, warn := cardName(c[0], c[1], ReceiptCardNames{})
+	// {"", "2"} is the brand-only path: issuer null, HYP Brand 2 (Visa). The
+	// legacy names no brand but 3 and 4, and wrote "JCB" for the rest.
+	for _, c := range [][2]string{{"", "2"}, {"", "1"}, {"7", "6"}, {"", ""}} {
+		got, _, warn := cardName(c[0], c[1], ReceiptCardNames{})
 		if got != "" || warn == "" {
 			t.Errorf("cardName(%q, %q) = %q, %q; want blank and a warning", c[0], c[1], got, warn)
+		}
+		if got == "JCB" {
+			t.Errorf("cardName(%q, %q) fell back to the legacy JCB", c[0], c[1])
 		}
 	}
 }
@@ -675,35 +693,127 @@ func TestCardName_Overrides(t *testing.T) {
 		Issuer: map[string]string{"2": "ויזה כאל"},
 		Brand:  map[string]string{"1": "מאסטרקארד"},
 	}
-	if got, _ := cardName("2", "", names); got != "ויזה כאל" {
+	if got, _, _ := cardName("2", "", names); got != "ויזה כאל" {
 		t.Errorf("issuer override = %q", got)
 	}
-	if got, _ := cardName("", "1", names); got != "מאסטרקארד" {
+	if got, _, _ := cardName("", "1", names); got != "מאסטרקארד" {
 		t.Errorf("brand override = %q", got)
 	}
-	if got, _ := cardName("1", "", names); got != "ישראכרט" {
+	if got, _, _ := cardName("1", "", names); got != "ישראכרט" {
 		t.Errorf("built-in lost when another code is overridden: %q", got)
+	}
+}
+
+// TestKUPAINRecord_BrandOnlyPath is the golden record with the issuer missing
+// and HYP Brand 2: everything is byte-identical to the legacy golden except
+// F17, which is blank, and the builder reports why.
+func TestKUPAINRecord_BrandOnlyPath(t *testing.T) {
+	r := goldenReceipt()
+	r.CardIssuer = ""
+	r.CardBrand = "2"
+	rec, warns := mustBuild(t, r)
+
+	want := bytes.Clone(readGolden(t, "KUPAIN_redacted.doc")[:1259])
+	s := goldenSpans(t)[17]
+	copy(want[s.start-1:s.end], blank(s.end-s.start+1))
+	if !bytes.Equal(rec, want) {
+		t.Fatalf("brand-only record differs from the golden with F17 blanked\n got: %q\nwant: %q",
+			decode1255(t, rec), decode1255(t, want))
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], `"2"`) {
+		t.Fatalf("warnings = %q, want one naming brand \"2\"", warns)
+	}
+}
+
+func TestKUPAINRecord_IssuerWinsOverBrand(t *testing.T) {
+	r := goldenReceipt()
+	r.CardIssuer, r.CardBrand = "1", "4" // Isracard issuer, Amex brand
+	rec, warns := mustBuild(t, r)
+	if got := field(t, rec, 17); !bytes.Equal(got, padded(t, "ישראכרט", 25)) {
+		t.Errorf("F17 = %q, want the issuer's name", decode1255(t, got))
+	}
+	if len(warns) != 0 {
+		t.Errorf("unexpected warnings %q", warns)
 	}
 }
 
 func TestKUPAINRecord_UnknownCardBlankF17AndWarns(t *testing.T) {
 	r := goldenReceipt()
-	r.CardIssuer = ""
-	r.CardBrand = "1" // Mastercard brand, no issuer: the legacy would have written "JCB"
+	r.CardIssuer = "7"
+	r.CardBrand = "6"
 	rec, warns := mustBuild(t, r)
 	if got := field(t, rec, 17); !bytes.Equal(got, blank(25)) {
 		t.Errorf("F17 = %q, want blank", decode1255(t, got))
 	}
-	if len(warns) == 0 {
-		t.Fatal("no warning for an unknown card code")
-	}
-	if !strings.Contains(strings.Join(warns, "\n"), "1") {
-		t.Errorf("warning %q does not name the code", warns)
+	if len(warns) != 1 || !strings.Contains(warns[0], `"7"`) || !strings.Contains(warns[0], `"6"`) {
+		t.Fatalf("warnings = %q, want one naming both codes", warns)
 	}
 }
 
-func TestKUPAINRecord_CardNameOverrideTooWide(t *testing.T) {
+func TestValidateReceiptCardNames(t *testing.T) {
+	ok := ReceiptCardNames{
+		Issuer: map[string]string{"2": "ויזה כאל", "6": strings.Repeat("ו", 25)},
+		Brand:  map[string]string{"1": "מאסטרקארד", "9": ""}, // "" = no override
+	}
+	if err := ValidateReceiptCardNames(ok); err != nil {
+		t.Fatalf("valid names rejected: %v", err)
+	}
+	if err := ValidateReceiptCardNames(ReceiptCardNames{}); err != nil {
+		t.Fatalf("zero value rejected: %v", err)
+	}
+	bad := []ReceiptCardNames{
+		{Issuer: map[string]string{"2": strings.Repeat("ו", 26)}},
+		{Brand: map[string]string{"1": "ماستركارد"}},
+		{Brand: map[string]string{" ": "x"}},
+	}
+	for i, n := range bad {
+		if err := ValidateReceiptCardNames(n); err == nil {
+			t.Errorf("bad[%d] accepted", i)
+		}
+	}
+}
+
+// An over-wide override is the operator's configuration, not the caller's
+// request: it must not come back as a FieldError (which the route turns into
+// a 400 blaming the request).
+func TestKUPAINRecord_BadCardNameOverrideIsNotAFieldError(t *testing.T) {
 	names := ReceiptCardNames{Issuer: map[string]string{"2": strings.Repeat("ו", 26)}}
-	_, _, err := buildKUPAINRecord(goldenReceipt(), goldenReceiptNumber, names)
-	wantFieldError(t, err, "cardIssuer")
+	rec, _, err := buildKUPAINRecord(goldenReceipt(), goldenReceiptNumber, names)
+	if err == nil || rec != nil {
+		t.Fatalf("over-wide override accepted: %v", err)
+	}
+	var fe *FieldError
+	if errors.As(err, &fe) {
+		t.Fatalf("over-wide override reported as a request FieldError: %v", err)
+	}
+	var ce *CardNamesConfigError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want *CardNamesConfigError, got %T: %v", err, err)
+	}
+}
+
+// ---------------------------------------------------------------- trimming
+
+func TestKUPAINRecord_IdentifiersAreTrimmed(t *testing.T) {
+	r := goldenReceipt()
+	r.Account.SyncKey = "  " + strings.Repeat("K", 15) + " \t"
+	r.Account.AgentSyncKey = "\u00A017 "
+	r.ConfirmationCode = " 012345678 "
+	rec, _ := mustBuild(t, r) // 15 and 9 bytes once trimmed: not over width
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{2, strings.Repeat("K", 15)},
+		{20, "17"},
+		{22, "012345678"},
+		{43, "012345678"},
+	}
+	spans := goldenSpans(t)
+	for _, c := range cases {
+		width := spans[c.n].end - spans[c.n].start + 1
+		if got := field(t, rec, c.n); !bytes.Equal(got, padded(t, c.want, width)) {
+			t.Errorf("F%d = %q, want %q", c.n, got, c.want)
+		}
+	}
 }

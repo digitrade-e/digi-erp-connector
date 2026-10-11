@@ -2,6 +2,7 @@ package hasavshevet
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,7 +30,8 @@ import (
 // or cannot be encoded are refused (the legacy truncated and transliterated),
 // F3 is the connector's receipt number (the legacy used its own row id), F26
 // carries the city (the legacy always left it blank), and an unknown card code
-// leaves F17 blank with a warning (the legacy wrote "JCB").
+// leaves F17 blank with a warning (the legacy wrote "JCB"; see the card-name
+// table below for why that fallback is rejected).
 
 // FieldError names the wire field whose value cannot be written. The route
 // answers it as 400 VALIDATION_ERROR with details.field = Field.
@@ -194,7 +196,12 @@ func generateKUPAINDOC(req ReceiptRequest, receiptNumber int64, cardNames Receip
 // buildKUPAINRecord builds the 1259-byte record for one receipt. It never
 // truncates and never substitutes: any value that does not fit its field or
 // cannot be written in Windows-1255 is a *FieldError naming the wire field.
-// Warnings are things written blank that a person may want to know about.
+// An unusable card-name override is a *CardNamesConfigError instead.
+//
+// The second result is the receipt's warnings — things written blank that a
+// person may want to know about (today: F17 when no card code has a name).
+// They are part of the result, not just a log line: the route returns them in
+// its 200 body as "warnings".
 func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames ReceiptCardNames) ([]byte, []string, error) {
 	var warnings []string
 	vals := make(map[int][]byte, len(kupainFields))
@@ -205,6 +212,12 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 		}
 		vals[num] = b
 		return nil
+	}
+	// putTrimmed is put for identifiers (F2, F20, F22, F43): surrounding
+	// whitespace is not part of a key, so it is dropped before the width check
+	// and the trimmed value is what is written.
+	putTrimmed := func(num int, wire, value string) error {
+		return put(num, wire, strings.TrimSpace(normalize1255(value)))
 	}
 	required := func(wire, value string) error {
 		if strings.TrimSpace(normalize1255(value)) == "" {
@@ -217,7 +230,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if err := required("account/syncKey", req.Account.SyncKey); err != nil {
 		return nil, nil, err
 	}
-	if err := put(2, "account/syncKey", req.Account.SyncKey); err != nil {
+	if err := putTrimmed(2, "account/syncKey", req.Account.SyncKey); err != nil {
 		return nil, nil, err
 	}
 
@@ -275,22 +288,30 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if _, err := encodeField("cardBrand", req.CardBrand, maxCardCodeBytes); err != nil {
 		return nil, nil, err
 	}
-	name, from, warning := resolveCardName(req.CardIssuer, req.CardBrand, cardNames)
+	name, from, warning := cardName(req.CardIssuer, req.CardBrand, cardNames)
 	if warning != "" {
 		warnings = append(warnings, warning)
 	}
 	if err := put(17, from, name); err != nil {
-		return nil, nil, err
+		// The name came from the operator's override table, not the request:
+		// a bad one is a configuration fault, never a 400 blaming the caller.
+		// ValidateReceiptCardNames is meant to stop it at config load.
+		reason := err.Error()
+		var fe *FieldError
+		if errors.As(err, &fe) {
+			reason = fe.Reason // never wrap the FieldError: errors.As must not find one
+		}
+		return nil, nil, &CardNamesConfigError{Table: from, Name: name, Reason: reason}
 	}
 
 	// F20 agent, F22 confirmation code, F23 authorization ref
-	if err := put(20, "account/agentSyncKey", req.Account.AgentSyncKey); err != nil {
+	if err := putTrimmed(20, "account/agentSyncKey", req.Account.AgentSyncKey); err != nil {
 		return nil, nil, err
 	}
 	if err := required("confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
-	if err := put(22, "confirmationCode", req.ConfirmationCode); err != nil {
+	if err := putTrimmed(22, "confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
 	if err := put(23, "authorizationRef", req.AuthorizationRef); err != nil {
@@ -327,7 +348,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if err := put(42, "email", req.Email); err != nil {
 		return nil, nil, err
 	}
-	if err := put(43, "confirmationCode", req.ConfirmationCode); err != nil {
+	if err := putTrimmed(43, "confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
 
@@ -427,14 +448,59 @@ func isFourASCIIDigits(s string) bool {
 
 // ReceiptCardNames overrides the built-in card-name table, keyed by the raw
 // HYP code as a string. The zero value means "built-ins only". An override
-// replaces the built-in for that code and leaves the others alone.
+// replaces the built-in for that code and leaves the others alone; an empty
+// name means "no override". Check a configured table with
+// ValidateReceiptCardNames when it is loaded.
 type ReceiptCardNames struct {
 	Issuer map[string]string
 	Brand  map[string]string
 }
 
-// Built-in card names: the legacy createReceiptBat table, which looked at the
-// HYP Issuer first (stored as CredType) and then the Brand (stored as Tranmode).
+// CardNamesConfigError reports a card-name override that cannot be written in
+// F17. The operator's configuration is at fault, not the request.
+type CardNamesConfigError struct {
+	Table  string // "cardIssuer" or "cardBrand": which table the name came from
+	Name   string
+	Reason string
+}
+
+func (e *CardNamesConfigError) Error() string {
+	return fmt.Sprintf("receipt card-name override %q (%s table) cannot be written in F17: %s", e.Name, e.Table, e.Reason)
+}
+
+// ValidateReceiptCardNames checks a configured override table: every code is
+// non-blank, and every name can be written in Windows-1255 within F17's width.
+func ValidateReceiptCardNames(names ReceiptCardNames) error {
+	width := kupainWidth(17)
+	for _, table := range []struct {
+		label string
+		m     map[string]string
+	}{{"issuer", names.Issuer}, {"brand", names.Brand}} {
+		for code, name := range table.m {
+			if strings.TrimSpace(code) == "" {
+				return fmt.Errorf("receipt card names: blank %s code", table.label)
+			}
+			if name == "" {
+				continue
+			}
+			if _, err := encodeField("card name", name, width); err != nil {
+				return fmt.Errorf("receipt card names: %s %q: %w", table.label, code, err)
+			}
+		}
+	}
+	return nil
+}
+
+// Built-in card names: exactly the legacy createReceiptBat table
+// (global_api.php:5338-5348), which looked at the HYP Issuer first (stored as
+// CredType) and only then at the Brand (stored as Tranmode). No brand code the
+// legacy did not name is added here.
+//
+// The legacy's fallback — "JCB" for every card neither table named — is
+// deliberately NOT kept: it printed a false card name on every receipt whose
+// issuer it did not know (a Visa or Mastercard brand with no known issuer, for
+// one), and a wrong name on a legal document is worse than a blank one plus a
+// warning the caller gets back.
 var (
 	defaultIssuerCardNames = map[string]string{
 		"1": "ישראכרט",
@@ -457,17 +523,10 @@ func lookupCardName(code string, override, builtin map[string]string) string {
 	return builtin[code]
 }
 
-// cardName returns the F17 card name for an issuer/brand pair, issuer first,
-// and a warning when neither code has a name (F17 is then left blank — the
-// legacy wrote "JCB" for every unknown card, which was false for most).
-func cardName(issuer, brand string, names ReceiptCardNames) (string, string) {
-	name, _, warning := resolveCardName(issuer, brand, names)
-	return name, warning
-}
-
-// resolveCardName is cardName plus the wire field the name came from, so an
-// over-wide override is reported against the right field.
-func resolveCardName(issuer, brand string, names ReceiptCardNames) (name, from, warning string) {
+// cardName returns the F17 card name for an issuer/brand pair — issuer first,
+// then brand, as the legacy did — with the wire field it came from and, when
+// neither code has a name, a warning (F17 is then left blank).
+func cardName(issuer, brand string, names ReceiptCardNames) (name, from, warning string) {
 	issuer, brand = strings.TrimSpace(issuer), strings.TrimSpace(brand)
 	if n := lookupCardName(issuer, names.Issuer, defaultIssuerCardNames); n != "" {
 		return n, "cardIssuer", ""
