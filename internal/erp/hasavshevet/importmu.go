@@ -1,6 +1,9 @@
 package hasavshevet
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // importLock serialises everything that writes Hashavshevet import files and
 // runs its importer: the order worker (IMOVEIN + has.exe / digi.bat) and the
@@ -29,3 +32,16 @@ func lockImport(ctx context.Context) error {
 
 // unlockImport releases the lock taken by lockImport.
 func unlockImport() { <-importLock }
+
+// HoldImports takes the import lock and returns the function that releases
+// it, or ctx's error. While it is held no order job and no receipt runs. It
+// exists for tests outside this package that need the importer idle (the
+// daemon's shutdown test holds queued orders behind it); production code takes
+// the lock only through the order worker and the receipt writer.
+func HoldImports(ctx context.Context) (release func(), err error) {
+	if err := lockImport(ctx); err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(unlockImport) }, nil
+}

@@ -149,32 +149,11 @@ func (a *serverApp) Start() error {
 	a.orderQueue = queue
 	a.queueCancel = queueCancel
 
-	// Receipts (POST /api/sendReceipt): only with erp: hasavshevet and a
-	// sendReceiptDir. Recover finishes any receipt a crash left half-written
-	// before the route serves; if it cannot, the route retries it on each
-	// request and answers an error until it succeeds — orders and queries
-	// are not held hostage to it.
-	var receiptWriter *hasavshevet.ReceiptWriter
-	if cfg.ReceiptsConfigured() {
-		if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
-			logSvc.Error("receipt configuration invalid", err)
-			a.Stop(context.Background())
-			return err
-		}
-		receiptWriter, err = hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfigFrom(cfg, paths.DataDir()), logSvc)
-		if err != nil {
-			logSvc.Error("receipt writer", err)
-			a.Stop(context.Background())
-			return err
-		}
-		if recErr := receiptWriter.Recover(); recErr != nil {
-			logSvc.Error("receipt recovery failed; sendReceipt answers an error until it succeeds", recErr)
-		}
-		model := "a (files only)"
-		if strings.TrimSpace(cfg.HasReceiptBatFile) != "" {
-			model = "b (runs hasReceiptBatFile)"
-		}
-		logSvc.Info(fmt.Sprintf("receipts configured: sendReceiptDir=%q model %s", cfg.SendReceiptDir, model))
+	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), logSvc)
+	if err != nil {
+		logSvc.Error("receipt configuration", err)
+		a.Stop(context.Background())
+		return err
 	}
 
 	queryStorePath := filepath.Join(paths.DataDir(), "queries.json")
@@ -263,6 +242,37 @@ func (a *serverApp) Stop(ctx context.Context) {
 	if a.logSvc != nil {
 		_ = a.logSvc.Close()
 	}
+}
+
+// buildReceiptWriter builds the writer behind POST /api/sendReceipt, or
+// returns nil when receipts are not configured (erp: hasavshevet and a
+// sendReceiptDir). An invalid receipt config is an error: the daemon does not
+// start on it, as the GUI does not save it.
+//
+// Recover finishes any receipt a crash left half-written before the route
+// serves. If it fails the writer is still returned: the route retries
+// recovery on each request and answers an error until it succeeds, and orders
+// and queries are not held hostage to it.
+func buildReceiptWriter(cfg config.Config, dataDir string, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
+	if !cfg.ReceiptsConfigured() {
+		return nil, nil
+	}
+	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return nil, err
+	}
+	w, err := hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfigFrom(cfg, dataDir), log)
+	if err != nil {
+		return nil, err
+	}
+	if err := w.Recover(); err != nil {
+		log.Error("receipt recovery failed; sendReceipt answers an error until it succeeds", err)
+	}
+	model := "a (files only)"
+	if strings.TrimSpace(cfg.HasReceiptBatFile) != "" {
+		model = "b (runs hasReceiptBatFile)"
+	}
+	log.Info(fmt.Sprintf("receipts configured: sendReceiptDir=%q model %s", strings.TrimSpace(cfg.SendReceiptDir), model))
+	return w, nil
 }
 
 func (a *serverApp) Errors() <-chan error {
