@@ -23,7 +23,8 @@ is rejected), and driver errors are never returned to callers.
 
 - [Authentication](#authentication) · [Health](#health) ·
   [Saved queries](#saved-queries) · [Files](#files) ·
-  [Orders](#orders-hasavshevet) · [Price & stock](#price--stock) ·
+  [Orders](#orders-hasavshevet) · [Receipts](#receipts-hasavshevet) ·
+  [Price & stock](#price--stock) ·
   [Error codes](#error-code-reference)
 
 ## Authentication
@@ -39,9 +40,11 @@ credential** — every other route requires the token it returns.
 
 `GET /api/health` → `{"status":"ok"}` | `503 DB_UNAVAILABLE` — pings the database.
 
-`GET /api/ping` → `{"ok":true,"ts":1786283101465}` — **no database touch**. Use it
-to check that the service is up and a credential is valid; use `/api/health` when
-you also want the database checked. `ts` is epoch milliseconds.
+`GET /api/ping` → `{"ok":true,"ts":1786283101465,"version":"v1.0.18"}` — **no
+database touch**. Use it to check that the service is up and a credential is
+valid; use `/api/health` when you also want the database checked. `ts` is epoch
+milliseconds. `version` is the release tag the binary was built from (`"dev"`
+for a local build); a connector without it predates `POST /api/sendReceipt`.
 
 ## Saved queries
 
@@ -66,6 +69,17 @@ See `saved-queries.md` for the full model.
 
 `POST /api/sendOrder` → `202 {"status":"queued","jobId":"<orderNumber>"}`; `VALIDATION_ERROR`, `QUEUE_FULL` (503).
 `GET /api/sendOrder/{jobId}` → `{"jobId","status":"queued|running|done|failed","orderNumber","writtenFiles"}`; `NOT_FOUND`.
+
+## Receipts (Hasavshevet)
+
+`POST /api/sendReceipt` → `200 {"receiptNumber":"1000","written":true,"idempotencyKey":"<uuid>","import":"not_run|started|ok|failed","warnings":[]}`.
+Synchronous (up to 120 s), one KUPAIN receipt per `idempotencyKey`; a repeat of
+the key answers the same receipt. The body is decoded strictly — an unknown field
+or a wrong type is a 400. Errors: `VALIDATION_ERROR` (400, `details.field`),
+`RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
+`RECEIPT_WRITER_BUSY` (503), `RECEIPT_CONFIG_INVALID` /
+`RECEIPT_INDEX_UNREADABLE` / `RECEIPT_WRITE_FAILED` (500). Full contract, field
+table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
 
 ## Price & stock
 
@@ -105,9 +119,15 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `FILE_PATH_ERROR` | 500 | Unexpected failure resolving the path. |
 | `FOLDER_CONFIG_INVALID` | 500 | `imageFolders` could not be canonicalised at startup — fix the config. |
 | `FOLDER_LIST_FAILED` | 500 | A configured folder could not be listed (removed? permissions?). |
-| `VALIDATION_ERROR` | 400 | Order request failed validation. `details` names the missing or invalid fields. |
+| `VALIDATION_ERROR` | 400 | Order or receipt request failed validation. For receipts `details.field` names the field (`account/name`, `details/reference`, `body` for the document as a whole). |
 | `QUEUE_FULL` | 503 | More than 64 orders queued. |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |
 | `ORDERS_NOT_CONFIGURED` | 501 | This connector cannot send orders: it needs `erp: hasavshevet` and a `sendOrderDir`. Expected on a read-only node - see [deployment-topologies.md](deployment-topologies.md). |
+| `RECEIPTS_NOT_CONFIGURED` | 503 | This connector does not write receipts: it needs `erp: hasavshevet` and a `sendReceiptDir`. Nothing was read or written. |
+| `RECEIPT_NUMBER_STORE_UNAVAILABLE` | 503 | The receipt number store is not seeded (`cutover-seed -receipt-seed N`), unreadable, exhausted, or was moved back. Never falls back to 1. |
+| `RECEIPT_WRITER_BUSY` | 503 | Another import held the import lock for 20 s. Nothing reserved; retry with the same key. |
+| `RECEIPT_CONFIG_INVALID` | 500 | A `receiptCardNames` override cannot be written. Refused at startup, so not expected. |
+| `RECEIPT_INDEX_UNREADABLE` | 500 | A receipt index entry is corrupt, or two keys hold one number. A person must look; never delete index files. |
+| `RECEIPT_WRITE_FAILED` | 500 | The receipt files could not be written (disk, permissions). The number stays with the key; a retry finishes it. |

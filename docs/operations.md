@@ -74,19 +74,27 @@ port rule.
 
 ## Upgrading
 
-The installer **does not stop the service**, and a running executable cannot be
-overwritten. Stop it first:
+Installers built with sendReceipt (DIG-929) **stop the service themselves**: before
+replacing any file they run `sc stop` and wait up to 180 s for `STOPPED`, and abort
+with a message if it has not stopped. The daemon's own stop is graceful — it lets a
+receipt in flight finish and writes every queued order (≤150 s) before it exits —
+so the wait can be long on a busy box. Older installers did not stop it, and a
+running executable cannot be overwritten; stopping it first is still harmless:
 
 ```powershell
-Stop-Service digi-erp-connectord
+Stop-Service digi-erp-connectord      # waits for the graceful stop
 Start-Process .\digi-erp-connector-setup-<version>.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
 Start-Service digi-erp-connectord     # the installer also tries to start it
 ```
 
+After an upgrade, `GET /api/ping` returns the installed release in `version`.
+
 What survives an upgrade:
 
-- **Everything in the data directory** — config, queries, secrets, logs. The
-  installer only writes to `C:\Program Files\…`.
+- **Everything in the data directory** — config, queries, secrets, logs, and the
+  receipt number store, index and history (`receipts/`, `history/receipts/`).
+  The installer only writes to `C:\Program Files\…`. Back `receipts/` up with
+  the rest: a lost index turns a receipt retry into a second receipt.
 - **The service definition**, including `depend=` and the recovery actions. The
   installer's `sc create` fails harmlessly when the service already exists. Only a
   full *uninstall* removes the service and therefore the hardening.

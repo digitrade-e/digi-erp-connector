@@ -45,6 +45,7 @@ internal/
       price_stock.go    ← POST /api/priceAndStockHandler
       send_order.go     ← POST /api/sendOrder (async queue)
       send_order_status.go ← GET /api/sendOrder/{jobId}
+      send_receipt.go   ← POST /api/sendReceipt (synchronous, strict decode)
     middleware/
       auth.go           ← verifies the issued token on every route
       ratelimit.go      ← Per-IP token bucket (429 RATE_LIMITED)
@@ -58,7 +59,9 @@ internal/
   auth/                 ← HS256 sign/verify + secret/password generation (no deps)
   config/               ← YAML config (atomic write, 0o600)
   db/                   ← MSSQL pool
-  erp/hasavshevet/      ← Complete order pipeline (IMOVEIN, queue, GPRICE)
+  erp/hasavshevet/      ← Order pipeline (IMOVEIN, queue, GPRICE) + receipts
+                          (KUPAIN, number store, idempotency index, writer)
+  buildinfo/            ← Version, stamped by the release build (-X)
   erp/sap/              ← SAP B1 price/stock query
   files/                ← Path traversal prevention
   logger/               ← LoggerService interface
@@ -77,7 +80,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 |-------|--------|--------------|
 | `/auth/token` | POST | **Unauthenticated** (it is the credential check). Username+password → short-lived token. The only way in. |
 | `/api/health` | GET | Pings DB; `{"status":"ok"}` or 503 |
-| `/api/ping` | GET | Liveness + credential check; **no DB touch**. `{"ok":true,"ts":<epoch ms>}` |
+| `/api/ping` | GET | Liveness + credential check; **no DB touch**. `{"ok":true,"ts":<epoch ms>,"version":"<tag or dev>"}` |
 | `/api/custom_sql` | POST | Create saved query `{name, description, sql, params}` (409 on duplicate) |
 | `/api/create_custom_sql` | POST | Legacy alias of the above (electron-mssql-app compat) |
 | `/api/custom_sql` | GET | List saved queries |
@@ -88,6 +91,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/priceAndStockHandler` | POST | Hasavshevet or SAP price/stock fetch |
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
+| `/api/sendReceipt` | POST | **Synchronous** (≤120 s): one KUPAIN receipt per `idempotencyKey` → `200 {receiptNumber, written, idempotencyKey, import, warnings}`; strict decode; 503 when `sendReceiptDir` unset or the number store unseeded. `docs/hasavshevet-send-receipt.md` |
 
 ## Saved-query model — hard constraints, NEVER bypass
 
@@ -128,6 +132,18 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 
 **Single-worker constraint:** never make the order queue concurrent — IMOVEIN files are shared.
 
+**Shutdown order (`serverApp.Stop`):** `srv.Shutdown` → `orderQueue.Drain` (≤120 s) → cancel the worker. Never cancel first — that dropped every queued order (pinned by `cmd/digi-erp-connectord/app_test.go`).
+
+## Hasavshevet send-receipt flow
+
+`POST /api/sendReceipt` → `ReceiptWriter.Write`, synchronously, under the **import lock shared with the order worker** (`importmu.go`). Full doc: `docs/hasavshevet-send-receipt.md`.
+
+- The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` creates it (write-if-absent).
+- One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt.
+- 4xx only for request faults; `CardNamesConfigError` and every connector fault are 5xx. The response never carries `ReceiptResult.Files`.
+- Config guard `hasavshevet.ValidateReceiptConfig` (sendReceiptDir ≠ sendOrderDir, card names writable) is called by both `api.NewServer` and the GUI save.
+- Contract pinned by `handlers/send_receipt_test.go` against the backend's golden `testdata/receipt/wire.json` (byte copy, sha256 checked).
+
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.
@@ -163,6 +179,8 @@ production backend. Covered by `queries/normalize_test.go`:
 - **Decode request bodies with `decodeJSONBody`** (handlers/json.go): it applies
   the shared 1 MiB limit, rejects trailing data and keeps numbers exact. Do not
   reintroduce per-handler decoders or per-handler size constants.
+  `decodeJSONBodyStrict` is the same plus `DisallowUnknownFields`, for contract
+  bodies (sendReceipt).
 - **`respond.JSON` / `respond.Error` only** — no direct `json.NewEncoder(w)` in
   handlers. There is exactly one error envelope; do not add a second shape.
 - **`readFormConfig` must start from `f.cfg`**, never a zero `config.Config`.
