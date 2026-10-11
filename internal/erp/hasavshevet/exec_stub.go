@@ -15,3 +15,8 @@ func runImporter(_ context.Context, _, _, _ string) (int, string, error) {
 func runBatFile(_ context.Context, _ string) (int, string, error) {
 	return 0, "BAT execution skipped (non-Windows build)", nil
 }
+
+// runReceiptBatFile is a no-op on non-Windows platforms.
+func runReceiptBatFile(_ context.Context, _ string) (int, string, error) {
+	return 0, "receipt BAT execution skipped (non-Windows build)", nil
+}

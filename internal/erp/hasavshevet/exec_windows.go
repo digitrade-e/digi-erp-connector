@@ -4,7 +4,6 @@ package hasavshevet
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -17,15 +16,7 @@ func runImporter(ctx context.Context, hasExePath, paramFile, workDir string) (in
 	if strings.TrimSpace(paramFile) != "" {
 		args = append(args, paramFile)
 	}
-	cmd := exec.CommandContext(ctx, hasExePath, args...)
-	cmd.Dir = workDir
-
-	out, err := cmd.CombinedOutput()
-	exitCode := 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
-	return exitCode, strings.TrimSpace(string(out)), err
+	return runCommand(ctx, 0, workDir, hasExePath, args...)
 }
 
 // runBatFile invokes a Masofon-generated BAT file via cmd.exe /C.
@@ -33,13 +24,11 @@ func runImporter(ctx context.Context, hasExePath, paramFile, workDir string) (in
 // paths inside the BAT (e.g. -p"digi.bat") resolve correctly.
 // Returns the process exit code, combined output, and any exec error.
 func runBatFile(ctx context.Context, batPath string) (int, string, error) {
-	cmd := exec.CommandContext(ctx, "cmd.exe", "/C", batPath)
-	cmd.Dir = filepath.Dir(batPath)
+	return runCommand(ctx, 0, filepath.Dir(batPath), "cmd.exe", "/C", batPath)
+}
 
-	out, err := cmd.CombinedOutput()
-	exitCode := 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
-	return exitCode, strings.TrimSpace(string(out)), err
+// runReceiptBatFile is runBatFile for the receipt BAT, with a wait delay so its
+// timeout holds even when cmd.exe leaves the importer running (exec_cmd.go).
+func runReceiptBatFile(ctx context.Context, batPath string) (int, string, error) {
+	return runCommand(ctx, receiptBatWaitDelay, filepath.Dir(batPath), "cmd.exe", "/C", batPath)
 }

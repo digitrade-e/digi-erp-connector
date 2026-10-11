@@ -97,7 +97,9 @@ func (ix receiptIndex) save(e *receiptIndexEntry) error {
 }
 
 // all returns every entry, sorted by number. Any unreadable entry fails the
-// whole call: recovery must not proceed past a key it cannot account for.
+// whole call: recovery must not proceed past a key it cannot account for. So
+// do two entries holding one number — two keys answering the same receipt —
+// which no correct run produces.
 func (ix receiptIndex) all() ([]*receiptIndexEntry, error) {
 	dirEntries, err := os.ReadDir(ix.dir)
 	if err != nil {
@@ -124,6 +126,12 @@ func (ix receiptIndex) all() ([]*receiptIndexEntry, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	for i := 1; i < len(out); i++ {
+		if out[i].Number == out[i-1].Number {
+			return nil, fmt.Errorf("%w: keys %s and %s both hold receipt %d",
+				ErrReceiptIndexUnreadable, out[i-1].Key, out[i].Key, out[i].Number)
+		}
+	}
 	return out, nil
 }
 

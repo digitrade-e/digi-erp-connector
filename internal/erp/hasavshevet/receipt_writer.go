@@ -128,7 +128,7 @@ func NewReceiptWriter(cfg ReceiptWriterConfig, log logger.LoggerService) (*Recei
 		index:      receiptIndex{dir: filepath.Join(cfg.DataDir, "receipts", "index")},
 		historyDir: filepath.Join(cfg.DataDir, "history", "receipts"),
 		log:        log,
-		runBat:     runBatFile,
+		runBat:     runReceiptBatFile,
 		batTimeout: receiptBatTimeout,
 	}, nil
 }
@@ -239,6 +239,15 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 	if err != nil {
 		return nil, err
 	}
+	// A history folder for a number the store calls fresh means the store was
+	// moved back (a partial restore, a hand edit) and n was issued before.
+	// Never write over a receipt already given; a person sorts out the store.
+	if _, err := os.Lstat(w.historyPath(n)); err == nil {
+		return nil, fmt.Errorf("%w: the store offers %d, but %s already exists — receipt %d was issued before; move the store past it",
+			ErrStoreUnavailable, n, w.historyPath(n), n)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w: check %s: %v", ErrStoreUnavailable, w.historyPath(n), err)
+	}
 	e = &receiptIndexEntry{
 		Key:        key,
 		Number:     n,
@@ -260,6 +269,9 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 	w.crash(crashAfterStoreAdvanced)
 
 	if err := w.complete(e); err != nil {
+		// n stays reserved. Have the next Write — whatever its key — finish
+		// n before issuing n+1, so the importer never sees a gap closed late.
+		w.recovered = false
 		return nil, err
 	}
 	notes := w.runImport(ctx, e)
@@ -277,7 +289,7 @@ func (w *ReceiptWriter) complete(e *receiptIndexEntry) error {
 	prm := generateKUPAINPRM()
 
 	base := "KUPAIN_" + strconv.FormatInt(e.Number, 10)
-	histDir := filepath.Join(w.historyDir, strconv.FormatInt(e.Number, 10))
+	histDir := w.historyPath(e.Number)
 	histDoc := filepath.Join(histDir, base+".doc")
 	histPrm := filepath.Join(histDir, base+".prm")
 	prmPath := filepath.Join(w.cfg.SendReceiptDir, KUPAINPRMName)
@@ -350,6 +362,11 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 		return []string{fmt.Sprintf("the import outcome (%s) could not be recorded; a repeat of this key will report the import as started", e.Import)}
 	}
 	return nil
+}
+
+// historyPath is DataDir/history/receipts/{n}.
+func (w *ReceiptWriter) historyPath(n int64) string {
+	return filepath.Join(w.historyDir, strconv.FormatInt(n, 10))
 }
 
 func (w *ReceiptWriter) batConfigured() bool {
