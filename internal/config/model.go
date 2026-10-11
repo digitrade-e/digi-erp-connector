@@ -2,6 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -152,11 +155,88 @@ type Config struct {
 	// each order's IMOVEIN files are written. Takes precedence over HasExePath.
 	// The BAT is executed from its own directory so relative paths inside it
 	// (e.g. -p"digi.bat") resolve correctly.
-	HasBatFile string        `yaml:"hasBatFile"`
-	DB         DBConfig      `yaml:"db"`
-	TLS        TLSConfig     `yaml:"tls"`
-	Auth       AuthConfig    `yaml:"auth"`
-	Queries    QueriesConfig `yaml:"queries"`
+	HasBatFile string `yaml:"hasBatFile"`
+
+	// SendReceiptDir is the folder Hashavshevet's receipt importer reads
+	// (KUPAIN_{n}.doc + KUPAIN.prm) — POST /api/sendReceipt. Unset means this
+	// installation does not write receipts: the route answers 503
+	// RECEIPTS_NOT_CONFIGURED and touches no disk. It must not be
+	// SendOrderDir (ValidateReceipts). The receipt number store, the
+	// idempotency index and the history copies live in the data directory,
+	// never here. See docs/hasavshevet-send-receipt.md.
+	SendReceiptDir string `yaml:"sendReceiptDir,omitempty"`
+	// HasReceiptBatFile switches receipts to model (b): this BAT is run (via
+	// cmd.exe /C, from its own folder, 90 s cap) once after each receipt file
+	// is written. Empty is model (a): files only, imported by hand.
+	HasReceiptBatFile string `yaml:"hasReceiptBatFile,omitempty"`
+	// ReceiptCardNames overrides the built-in card-name table used for the
+	// receipt's card name (KUPAIN F17), keyed by the raw HYP code.
+	ReceiptCardNames ReceiptCardNamesConfig `yaml:"receiptCardNames,omitempty"`
+
+	DB      DBConfig      `yaml:"db"`
+	TLS     TLSConfig     `yaml:"tls"`
+	Auth    AuthConfig    `yaml:"auth"`
+	Queries QueriesConfig `yaml:"queries"`
+}
+
+// ReceiptCardNamesConfig is the receiptCardNames block: HYP Issuer and Brand
+// codes (as strings) to the card name written in the receipt. An entry
+// replaces the built-in name for that code only; an empty name means no
+// override. hasavshevet.ValidateReceiptConfig refuses a name that cannot be
+// written (not Windows-1255, wider than the field).
+type ReceiptCardNamesConfig struct {
+	Issuer map[string]string `yaml:"issuer,omitempty"`
+	Brand  map[string]string `yaml:"brand,omitempty"`
+}
+
+// ReceiptsConfigured reports whether this installation writes receipts: it
+// needs erp: hasavshevet and a sendReceiptDir. Derived, like orders, so a
+// switch and the folder can never disagree.
+func (c Config) ReceiptsConfigured() bool {
+	return c.ERP == ERPHasavshevet && strings.TrimSpace(c.SendReceiptDir) != ""
+}
+
+// ValidateReceipts refuses a sendReceiptDir that is the sendOrderDir. Both
+// importers write fixed-name files into their folder and run from it, and the
+// receipt folder sits under a web root on a real install; sharing one would
+// mix the two imports. The comparison is after Clean and symlink resolution,
+// and case-insensitive on Windows, so a trailing slash, a "..", a link or a
+// different case cannot sneak the same folder past it.
+//
+// The daemon (api.NewServer) and the GUI save path both call it, through
+// hasavshevet.ValidateReceiptConfig.
+func (c Config) ValidateReceipts() error {
+	order, receipt := strings.TrimSpace(c.SendOrderDir), strings.TrimSpace(c.SendReceiptDir)
+	if order == "" || receipt == "" {
+		return nil
+	}
+	if sameDir(order, receipt, runtime.GOOS == "windows") {
+		return fmt.Errorf("sendReceiptDir %q is the sendOrderDir: receipts need a folder of their own", receipt)
+	}
+	return nil
+}
+
+// sameDir reports whether a and b name the same folder after Abs, Clean and
+// (when the path exists) symlink resolution; foldCase compares ignoring case.
+func sameDir(a, b string, foldCase bool) bool {
+	ca, cb := canonicalDir(a), canonicalDir(b)
+	if foldCase {
+		return strings.EqualFold(ca, cb)
+	}
+	return ca == cb
+}
+
+func canonicalDir(p string) string {
+	p = filepath.Clean(strings.TrimSpace(p))
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	// A folder that does not exist yet has nothing to resolve; its cleaned
+	// absolute form is what it will be.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return p
 }
 
 func ErpValues() []ERPType {

@@ -87,6 +87,13 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 		cfg.HasBatFile = ""
 	}
 
+	// The receipt keys have no widget, but the order folder does: moving it
+	// onto sendReceiptDir, or a bad receiptCardNames entry carried over from
+	// config.yaml, would stop the daemon starting. Same check as the daemon.
+	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return config.Config{}, "", fmt.Errorf("receipts: %w", err)
+	}
+
 	return cfg, f.passEdit.Text(), nil
 }
 
