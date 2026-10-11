@@ -24,3 +24,7 @@
 *.ico  binary
 *.syso binary
 *.exe  binary
+
+# Byte-exact Windows-1255 goldens written by the legacy receipt writer. Text
+# detection would happily "normalise" them; they must stay exactly as written.
+internal/erp/hasavshevet/testdata/kupain/* binary
