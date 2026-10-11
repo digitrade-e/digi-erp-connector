@@ -1,0 +1,394 @@
+package hasavshevet
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/logger"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
+)
+
+// KUPAINPRMName is the parameter file the receipt importer reads beside the
+// KUPAIN_{n}.doc files.
+const KUPAINPRMName = "KUPAIN.prm"
+
+// receiptBatTimeout bounds one run of the receipt BAT (model (b)). It sits
+// inside the route's 120 s write deadline.
+const receiptBatTimeout = 90 * time.Second
+
+// maxImportDetail caps the BAT output kept in the index entry.
+const maxImportDetail = 1000
+
+// Crash points for tests: where a process kill is simulated.
+const (
+	crashAfterIndexReserved = "index-reserved" // the index owns the number; the store has not moved on
+	crashAfterStoreAdvanced = "store-advanced" // the store has moved on; no file is in place yet
+)
+
+// ReceiptNumberStorePath is where the receipt number store lives inside the
+// connector's data directory. cutover-seed writes the seed here.
+func ReceiptNumberStorePath(dataDir string) string {
+	return filepath.Join(dataDir, "receipts", "receiptNumber.json")
+}
+
+// ReceiptWriterConfig is what the writer needs from the connector's config.
+type ReceiptWriterConfig struct {
+	// SendReceiptDir is the folder the receipt importer reads (herp). Only
+	// KUPAIN_{n}.doc and KUPAIN.prm are ever written to it.
+	SendReceiptDir string
+	// DataDir is the connector's data directory (paths.DataDir()). The number
+	// store, the idempotency index and the history copies live under it — never
+	// in SendReceiptDir, which on a real install sits under a web root.
+	DataDir string
+	// HasReceiptBatFile switches on model (b): when set, the BAT is run once
+	// after each receipt is written. Empty is model (a): files only.
+	HasReceiptBatFile string
+	// CardNames overrides the built-in card-name table for F17.
+	CardNames ReceiptCardNames
+}
+
+// ReceiptResult is what a Write produced or, on a repeat, what the key's first
+// Write produced. The route answers it as
+// {receiptNumber, written:true, idempotencyKey, import, warnings}.
+type ReceiptResult struct {
+	ReceiptNumber  int64
+	IdempotencyKey string // canonical (lower-case) form
+	Written        bool   // always true on success: the file is in place
+	Import         ImportState
+	// Warnings are the builder's (e.g. F17 left blank) plus anything this call
+	// noticed (a repeat whose body differs from the stored one, an import
+	// outcome that could not be recorded).
+	Warnings []string
+	Files    []string
+	// Replayed is true when the key had been seen before; the stored request,
+	// not this call's, is what the receipt holds.
+	Replayed bool
+}
+
+// ReceiptWriter turns a validated receipt request into exactly one KUPAIN
+// receipt per idempotency key, with gapless numbers and files that appear
+// whole.
+//
+// One Write, under the import lock shared with the order worker:
+//
+//  1. validate the request in full — before any number is touched;
+//  2. a key already written answers its stored number and import state, and
+//     touches nothing; a key only reserved (a crash) is finished with its
+//     stored request and number;
+//  3. otherwise take the store's next number: persist the index entry that owns
+//     it (state reserved), then move the store on;
+//  4. write the history copies, KUPAIN.prm if it is missing or different, and
+//     last KUPAIN_{n}.doc — each by atomic rename, so a poller sees a whole
+//     file or none, and the .doc appears only when everything else is ready;
+//  5. persist state written;
+//  6. model (b) only: persist import started, run the BAT, persist ok/failed.
+//     A key whose import has started never runs the BAT again.
+//
+// Recover, run at startup (and by the first Write if it has not succeeded),
+// finishes every reserved entry with steps 4–5 and moves the store past every
+// number the index owns.
+type ReceiptWriter struct {
+	cfg        ReceiptWriterConfig
+	store      *ReceiptNumberStore
+	index      receiptIndex
+	historyDir string
+	log        logger.LoggerService
+
+	// recovered is guarded by importLock. False until Recover succeeds, and
+	// set back to false when the store could not be moved past a reserved
+	// number, so no new number is issued until Recover has repaired it.
+	recovered bool
+
+	// Test seams.
+	crashPoint func(point string)
+	runBat     func(ctx context.Context, batPath string) (int, string, error)
+	batTimeout time.Duration
+}
+
+// NewReceiptWriter builds a writer. It touches nothing on disk; call Recover
+// before serving.
+func NewReceiptWriter(cfg ReceiptWriterConfig, log logger.LoggerService) (*ReceiptWriter, error) {
+	if strings.TrimSpace(cfg.SendReceiptDir) == "" {
+		return nil, errors.New("receipt writer: sendReceiptDir is not configured")
+	}
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		return nil, errors.New("receipt writer: data directory is not set")
+	}
+	return &ReceiptWriter{
+		cfg:        cfg,
+		store:      NewReceiptNumberStore(ReceiptNumberStorePath(cfg.DataDir)),
+		index:      receiptIndex{dir: filepath.Join(cfg.DataDir, "receipts", "index")},
+		historyDir: filepath.Join(cfg.DataDir, "history", "receipts"),
+		log:        log,
+		runBat:     runBatFile,
+		batTimeout: receiptBatTimeout,
+	}, nil
+}
+
+// Recover finishes every receipt a crash left reserved and makes sure the
+// store is past every number the index owns. It never runs the receipt BAT.
+// An install with no receipts yet recovers without touching the store, so an
+// unseeded connector still starts (and answers receipts 503).
+func (w *ReceiptWriter) Recover() error {
+	if err := lockImport(context.Background()); err != nil {
+		return err
+	}
+	defer unlockImport()
+	return w.recoverLocked()
+}
+
+func (w *ReceiptWriter) recoverLocked() error {
+	entries, err := w.index.all()
+	if err != nil {
+		return fmt.Errorf("recover receipts: %w", err)
+	}
+	if len(entries) == 0 {
+		w.recovered = true
+		return nil
+	}
+
+	highest := entries[len(entries)-1]
+	next, err := w.store.Peek()
+	if err != nil {
+		return fmt.Errorf("recover receipts: %w", err)
+	}
+	if next <= highest.Number {
+		if highest.State == receiptWritten {
+			// Not a crash: the store was moved back (restored, hand-edited).
+			// Moving it forward is safe — it never reissues a number — but a
+			// person should know.
+			w.log.Warn(fmt.Sprintf("receipt number store offered %d but receipt %d is already written; moving the store past it", next, highest.Number))
+		}
+		if err := w.store.advancePast(highest.Number); err != nil {
+			return fmt.Errorf("recover receipts: %w", err)
+		}
+	}
+
+	for _, e := range entries {
+		if e.State != receiptReserved {
+			continue
+		}
+		if err := w.complete(e); err != nil {
+			return fmt.Errorf("recover receipt %d (key %s): %w", e.Number, e.Key, err)
+		}
+		msg := fmt.Sprintf("recovered receipt %d key=%s: file written after an interrupted write", e.Number, e.Key)
+		if w.batConfigured() {
+			msg += "; the receipt BAT was NOT run for it — import it by hand"
+		}
+		w.log.Warn(msg)
+	}
+	w.recovered = true
+	return nil
+}
+
+// Write produces the receipt for req, or answers the one its idempotency key
+// already has. Errors: *FieldError and *CardNamesConfigError (nothing
+// reserved), ErrStoreUnavailable, ErrReceiptIndexUnreadable, ctx's error while
+// waiting for the import lock (nothing reserved), or a filesystem error (the
+// number stays owned by the key; a repeat or Recover finishes it).
+func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*ReceiptResult, error) {
+	key, ok := canonicalReceiptKey(req.IdempotencyKey)
+	if !ok {
+		return nil, &FieldError{Field: "idempotencyKey", Reason: fmt.Sprintf("must be a UUID (8-4-4-4-12 hex digits), got %q", req.IdempotencyKey)}
+	}
+	// Full validation before any number is touched. The receipt number only
+	// fills F3, so any in-range number gives the same verdict.
+	if _, _, err := buildKUPAINRecord(req, 1, w.cfg.CardNames); err != nil {
+		return nil, err
+	}
+
+	if err := lockImport(ctx); err != nil {
+		return nil, err
+	}
+	defer unlockImport()
+
+	if !w.recovered {
+		if err := w.recoverLocked(); err != nil {
+			return nil, err
+		}
+	}
+
+	e, found, err := w.index.load(key)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		var notes []string
+		if !sameReceiptRequest(e.Request, req, key) {
+			notes = append(notes, fmt.Sprintf("this request differs from the one first sent with idempotency key %s; receipt %d was written from the first", key, e.Number))
+			w.log.Warn(fmt.Sprintf("receipt key=%s repeated with a different body; answering receipt %d as first written", key, e.Number))
+		}
+		if e.State == receiptReserved {
+			if err := w.complete(e); err != nil {
+				return nil, err
+			}
+			notes = append(notes, w.runImport(ctx, e)...)
+		}
+		return w.result(e, true, notes), nil
+	}
+
+	n, err := w.store.Peek()
+	if err != nil {
+		return nil, err
+	}
+	e = &receiptIndexEntry{
+		Key:        key,
+		Number:     n,
+		State:      receiptReserved,
+		Request:    req,
+		Import:     ImportNotRun,
+		ReservedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := w.index.save(e); err != nil {
+		return nil, err
+	}
+	w.crash(crashAfterIndexReserved)
+	if err := w.store.advancePast(n); err != nil {
+		// The index owns n but the store still offers it. Issue nothing more
+		// until Recover has moved the store past it.
+		w.recovered = false
+		return nil, fmt.Errorf("receipt %d reserved for key %s, but the number store could not move on: %w", n, key, err)
+	}
+	w.crash(crashAfterStoreAdvanced)
+
+	if err := w.complete(e); err != nil {
+		return nil, err
+	}
+	notes := w.runImport(ctx, e)
+	w.log.Success(fmt.Sprintf("receipt %d written key=%s import=%s", e.Number, key, e.Import))
+	return w.result(e, false, notes), nil
+}
+
+// complete is steps 4–5: files in place, then state written. It is safe to
+// repeat: a file already holding the right bytes is not rewritten.
+func (w *ReceiptWriter) complete(e *receiptIndexEntry) error {
+	doc, warnings, err := generateKUPAINDOC(e.Request, e.Number, w.cfg.CardNames)
+	if err != nil {
+		return fmt.Errorf("build receipt %d: %w", e.Number, err)
+	}
+	prm := generateKUPAINPRM()
+
+	base := "KUPAIN_" + strconv.FormatInt(e.Number, 10)
+	histDir := filepath.Join(w.historyDir, strconv.FormatInt(e.Number, 10))
+	histDoc := filepath.Join(histDir, base+".doc")
+	histPrm := filepath.Join(histDir, base+".prm")
+	prmPath := filepath.Join(w.cfg.SendReceiptDir, KUPAINPRMName)
+	docPath := filepath.Join(w.cfg.SendReceiptDir, base+".doc")
+
+	// History first and the .doc last: its rename is the moment the importer
+	// can see the receipt, so everything it depends on is in place before it.
+	for _, f := range []struct {
+		path string
+		data []byte
+	}{
+		{histDoc, doc},
+		{histPrm, prm},
+		{prmPath, prm},
+		{docPath, doc},
+	} {
+		if err := writeIfDifferent(f.path, f.data); err != nil {
+			return err
+		}
+	}
+
+	e.State = receiptWritten
+	e.Files = []string{docPath, prmPath, histDoc, histPrm}
+	e.Warnings = warnings
+	e.WrittenAt = time.Now().UTC().Format(time.RFC3339)
+	return w.index.save(e)
+}
+
+// runImport is step 6 (model (b) only). It returns notes for the caller.
+func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []string {
+	if !w.batConfigured() || e.Import != ImportNotRun {
+		return nil
+	}
+	e.Import = ImportStarted
+	if err := w.index.save(e); err != nil {
+		// Unrecorded, a crash during the BAT would let a repeat run it again.
+		e.Import = ImportNotRun
+		w.log.Error(fmt.Sprintf("receipt %d: BAT not run, could not record that the import started", e.Number), err)
+		return []string{"the receipt BAT was not run: the connector could not record that the import started"}
+	}
+
+	// The import outlives the HTTP request: a caller that hangs up must not
+	// kill Hashavshevet half-way through an import.
+	batCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.batTimeout)
+	defer cancel()
+	start := time.Now()
+	exitCode, output, execErr := w.runBat(batCtx, w.cfg.HasReceiptBatFile)
+	w.log.Info(fmt.Sprintf("receipt BAT exit=%d durationMs=%d output=%q receiptNumber=%d",
+		exitCode, time.Since(start).Milliseconds(), output, e.Number))
+
+	if execErr != nil || exitCode != 0 {
+		e.Import = ImportFailed
+		detail := fmt.Sprintf("exit=%d", exitCode)
+		if execErr != nil {
+			detail += " error=" + execErr.Error()
+		}
+		if output != "" {
+			detail += " output=" + output
+		}
+		if len(detail) > maxImportDetail {
+			detail = detail[:maxImportDetail]
+		}
+		e.ImportDetail = detail
+		w.log.Error(fmt.Sprintf("receipt BAT failed receiptNumber=%d exit=%d", e.Number, exitCode), execErr)
+	} else {
+		e.Import = ImportOK
+	}
+	if err := w.index.save(e); err != nil {
+		w.log.Error(fmt.Sprintf("receipt %d: could not record the import outcome %s", e.Number, e.Import), err)
+		return []string{fmt.Sprintf("the import outcome (%s) could not be recorded; a repeat of this key will report the import as started", e.Import)}
+	}
+	return nil
+}
+
+func (w *ReceiptWriter) batConfigured() bool {
+	return strings.TrimSpace(w.cfg.HasReceiptBatFile) != ""
+}
+
+func (w *ReceiptWriter) result(e *receiptIndexEntry, replayed bool, notes []string) *ReceiptResult {
+	warnings := append(append([]string{}, e.Warnings...), notes...)
+	return &ReceiptResult{
+		ReceiptNumber:  e.Number,
+		IdempotencyKey: e.Key,
+		Written:        true,
+		Import:         e.Import,
+		Warnings:       warnings,
+		Files:          append([]string(nil), e.Files...),
+		Replayed:       replayed,
+	}
+}
+
+func (w *ReceiptWriter) crash(point string) {
+	if w.crashPoint != nil {
+		w.crashPoint(point)
+	}
+}
+
+// sameReceiptRequest compares a repeat with the stored request, ignoring how
+// the key itself was spelled (its case).
+func sameReceiptRequest(stored, got ReceiptRequest, key string) bool {
+	stored.IdempotencyKey, got.IdempotencyKey = key, key
+	a, errA := json.Marshal(stored)
+	b, errB := json.Marshal(got)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
+}
+
+// writeIfDifferent atomically writes data to path unless path already holds
+// exactly data, in which case the file (and its mtime) is left alone.
+func writeIfDifferent(path string, data []byte) error {
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+		return nil
+	}
+	return atomicfile.Write(path, data, 0o644)
+}

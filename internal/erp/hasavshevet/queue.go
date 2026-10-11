@@ -77,8 +77,13 @@ func (q *OrderQueue) run(ctx context.Context) {
 			if !ok {
 				return
 			}
+			// One import at a time across orders and receipts (importmu.go).
+			if err := lockImport(ctx); err != nil {
+				return // ctx cancelled while a receipt held the lock
+			}
 			q.setStatus(job.id, JobStatusRunning, job.orderNumber, nil, nil)
 			result, err := q.sender.processOrderWithNumber(ctx, job.req, job.orderNumber)
+			unlockImport()
 			if err != nil {
 				q.log.Error(fmt.Sprintf("order job %s failed", job.id), err)
 				q.setStatus(job.id, JobStatusFailed, job.orderNumber, nil, err)
