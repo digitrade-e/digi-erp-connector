@@ -109,10 +109,21 @@ func (q *OrderQueue) run(ctx context.Context) {
 
 // Submit enqueues an order request and returns a job ID.
 // In normal runtime this ID is the reserved lastOrderNumber as a decimal string.
-// Returns an error if the queue is full.
+// Returns ErrQueueClosed once the queue is stopping, or an error if it is full;
+// neither refusal reserves an order number.
+//
+// The whole of Submit runs under closeMu: the closed and capacity checks, the
+// reservation and the send. Checked before taking closeMu, a Stop landing
+// between the check and the send burned the number just reserved. Only Submit
+// sends on ch, so a free slot seen under closeMu is still free at the send.
 func (q *OrderQueue) Submit(req OrderRequest) (string, error) {
-	if q.isClosed() {
-		return "", ErrQueueClosed // before a number is reserved
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	if q.closed {
+		return "", ErrQueueClosed
+	}
+	if len(q.ch) >= cap(q.ch) {
+		return "", fmt.Errorf("order queue full (capacity %d)", defaultQueueSize)
 	}
 	jobID, orderNumber, err := q.reserveJobIdentity()
 	if err != nil {
@@ -129,16 +140,10 @@ func (q *OrderQueue) Submit(req OrderRequest) (string, error) {
 	}
 	q.mu.Unlock()
 
-	q.closeMu.Lock()
-	defer q.closeMu.Unlock()
-	if q.closed {
-		q.forget(jobID)
-		return "", ErrQueueClosed
-	}
 	select {
 	case q.ch <- job:
 		return jobID, nil
-	default:
+	default: // unreachable while only Submit sends, and only under closeMu
 		q.forget(jobID)
 		return "", fmt.Errorf("order queue full (capacity %d)", defaultQueueSize)
 	}
@@ -148,12 +153,6 @@ func (q *OrderQueue) forget(jobID string) {
 	q.mu.Lock()
 	delete(q.jobs, jobID)
 	q.mu.Unlock()
-}
-
-func (q *OrderQueue) isClosed() bool {
-	q.closeMu.Lock()
-	defer q.closeMu.Unlock()
-	return q.closed
 }
 
 // Pending is the number of orders accepted but not yet started.

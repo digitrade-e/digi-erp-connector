@@ -2,6 +2,7 @@ package hasavshevet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -107,5 +108,90 @@ func TestOrderQueue_DrainHonoursItsDeadline(t *testing.T) {
 	defer cancel()
 	if err := q.Drain(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Drain = %v; want the deadline", err)
+	}
+}
+
+// lastOrderNumber reads the order counter file (0 when nothing was reserved).
+func lastOrderNumber(t *testing.T, dir string) int64 {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "lastOrderNumber.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f orderNumberFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	return f.LastOrderNumber
+}
+
+// A Stop that lands while Submit is reserving its number must not burn that
+// number: either the order is accepted with it, or nothing is reserved. Submit
+// is held inside the reservation (the number store's lock) while Stop is
+// called, then released.
+func TestOrderQueue_StopDuringSubmitBurnsNoNumber(t *testing.T) {
+	q, dir, _ := drainTestQueue(t)
+	if err := lockImport(context.Background()); err != nil { // keep the job queued
+		t.Fatal(err)
+	}
+	defer unlockImport()
+
+	store := q.sender.numberStore
+	store.mu.Lock()
+	type outcome struct {
+		id  string
+		err error
+	}
+	submitted := make(chan outcome, 1)
+	go func() {
+		id, err := q.Submit(drainTestOrder(1))
+		submitted <- outcome{id, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // Submit is now waiting on the number store
+	stopped := make(chan struct{})
+	go func() { q.Stop(); close(stopped) }()
+	time.Sleep(50 * time.Millisecond) // Stop has run, or is waiting for Submit
+	store.mu.Unlock()
+
+	got := <-submitted
+	<-stopped
+	n := lastOrderNumber(t, dir)
+	switch {
+	case got.err == nil:
+		if got.id != strconv.FormatInt(n, 10) {
+			t.Errorf("accepted job %q but the counter is at %d", got.id, n)
+		}
+	case errors.Is(got.err, ErrQueueClosed):
+		if n != 0 {
+			t.Errorf("Submit was refused but order number %d was reserved — burned", n)
+		}
+	default:
+		t.Fatalf("Submit: %v", got.err)
+	}
+}
+
+// A full queue refuses before reserving, so the refusal burns no number.
+func TestOrderQueue_FullQueueBurnsNoNumber(t *testing.T) {
+	q, dir, _ := drainTestQueue(t)
+	if err := lockImport(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer unlockImport()
+	// The worker takes one job and then waits on the import lock; the rest fill
+	// the channel.
+	accepted := 0
+	for i := 0; i < defaultQueueSize+5; i++ {
+		if _, err := q.Submit(drainTestOrder(i)); err == nil {
+			accepted++
+		}
+	}
+	if accepted > defaultQueueSize+1 {
+		t.Fatalf("accepted %d orders; capacity is %d plus the one the worker holds", accepted, defaultQueueSize)
+	}
+	if n := lastOrderNumber(t, dir); n != int64(accepted) {
+		t.Errorf("counter is at %d after %d accepted orders; refusals burned numbers", n, accepted)
 	}
 }
