@@ -33,6 +33,13 @@ const (
 	crashAfterStoreAdvanced = "store-advanced" // the store has moved on; no file is in place yet
 )
 
+// ErrStoredReceiptUnbuildable means a receipt request already stored in the
+// index — being finished by Recover or by a repeat — no longer builds. It is
+// the connector's fault (an index written by another version, a hand edit),
+// never the current caller's: the FieldError that caused it is kept out of the
+// error chain so the route cannot answer it as a 400.
+var ErrStoredReceiptUnbuildable = errors.New("stored receipt request cannot be built")
+
 // ReceiptNumberStorePath is where the receipt number store lives inside the
 // connector's data directory. cutover-seed writes the seed here.
 func ReceiptNumberStorePath(dataDir string) string {
@@ -284,7 +291,12 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 func (w *ReceiptWriter) complete(e *receiptIndexEntry) error {
 	doc, warnings, err := generateKUPAINDOC(e.Request, e.Number, w.cfg.CardNames)
 	if err != nil {
-		return fmt.Errorf("build receipt %d: %w", e.Number, err)
+		var fe *FieldError
+		if errors.As(err, &fe) {
+			// %v, not %w: no FieldError may be found in this chain.
+			return fmt.Errorf("%w: receipt %d (key %s): %v", ErrStoredReceiptUnbuildable, e.Number, e.Key, err)
+		}
+		return fmt.Errorf("build receipt %d: %w", e.Number, err) // a CardNamesConfigError stays a config fault
 	}
 	prm := generateKUPAINPRM()
 

@@ -1,6 +1,10 @@
 package hasavshevet
 
-import "github.com/digitrade-e/digi-erp-connector/internal/config"
+import (
+	"strings"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+)
 
 // ValidateReceiptConfig is every startup precondition of the receipt keys, in
 // one function that both the daemon (api.NewServer) and the GUI save path
@@ -17,12 +21,13 @@ func ValidateReceiptConfig(cfg config.Config) error {
 }
 
 // ReceiptWriterConfigFrom is the writer's view of the connector config;
-// dataDir is paths.DataDir().
+// dataDir is paths.DataDir(). Paths are trimmed: the validator compared the
+// trimmed folder, so that is the one the writer must use.
 func ReceiptWriterConfigFrom(cfg config.Config, dataDir string) ReceiptWriterConfig {
 	return ReceiptWriterConfig{
-		SendReceiptDir:    cfg.SendReceiptDir,
+		SendReceiptDir:    strings.TrimSpace(cfg.SendReceiptDir),
 		DataDir:           dataDir,
-		HasReceiptBatFile: cfg.HasReceiptBatFile,
+		HasReceiptBatFile: strings.TrimSpace(cfg.HasReceiptBatFile),
 		CardNames:         cardNamesFrom(cfg.ReceiptCardNames),
 	}
 }

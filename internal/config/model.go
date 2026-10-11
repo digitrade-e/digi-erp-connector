@@ -196,7 +196,8 @@ func (c Config) ReceiptsConfigured() bool {
 	return c.ERP == ERPHasavshevet && strings.TrimSpace(c.SendReceiptDir) != ""
 }
 
-// ValidateReceipts refuses a sendReceiptDir that is the sendOrderDir. Both
+// ValidateReceipts refuses a relative sendReceiptDir, and one that is the
+// sendOrderDir. Both
 // importers write fixed-name files into their folder and run from it, and the
 // receipt folder sits under a web root on a real install; sharing one would
 // mix the two imports. The comparison is after Clean and symlink resolution,
@@ -207,7 +208,16 @@ func (c Config) ReceiptsConfigured() bool {
 // hasavshevet.ValidateReceiptConfig.
 func (c Config) ValidateReceipts() error {
 	order, receipt := strings.TrimSpace(c.SendOrderDir), strings.TrimSpace(c.SendReceiptDir)
-	if order == "" || receipt == "" {
+	if receipt == "" {
+		return nil
+	}
+	// A relative folder would resolve against the service's working
+	// directory — System32 under the service manager — not where the
+	// operator meant.
+	if !filepath.IsAbs(receipt) {
+		return fmt.Errorf("sendReceiptDir %q must be an absolute path", receipt)
+	}
+	if order == "" {
 		return nil
 	}
 	if sameDir(order, receipt, runtime.GOOS == "windows") {

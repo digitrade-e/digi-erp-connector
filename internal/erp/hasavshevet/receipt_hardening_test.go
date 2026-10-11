@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
 
 // A fresh number whose history folder already exists means the store was moved
@@ -151,5 +153,62 @@ func TestReceiptWriter_UsesTheWaitDelayedBatRunner(t *testing.T) {
 	w := newReceiptHarness(t, 1).newWriter()
 	if reflect.ValueOf(w.runBat).Pointer() != reflect.ValueOf(runReceiptBatFile).Pointer() {
 		t.Error("the receipt writer does not run its BAT with runReceiptBatFile")
+	}
+}
+
+// A stored request that no longer builds (written by an older connector, or a
+// hand-edited index) is the connector's problem, never the current caller's:
+// no FieldError may surface from finishing it, or the route would answer 400
+// to a request that is fine.
+func TestReceiptWriter_UnbuildableStoredRequestIsInternal(t *testing.T) {
+	bad := receiptFor(testKey(1))
+	bad.Last4 = "12a4"
+
+	plant := func(t *testing.T) (*receiptHarness, *ReceiptWriter) {
+		h := newReceiptHarness(t, 1000)
+		w := h.newWriter()
+		if err := w.index.save(&receiptIndexEntry{
+			Key: testKey(1), Number: 1000, State: receiptReserved, Request: bad,
+			Import: ImportNotRun, ReservedAt: "2026-10-11T00:00:00Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return h, w
+	}
+
+	t.Run("recovery before a fresh key", func(t *testing.T) {
+		_, w := plant(t)
+		_, err := w.Write(context.Background(), receiptFor(testKey(2)))
+		assertInternalStoredError(t, err)
+	})
+	t.Run("a repeat of the reserved key", func(t *testing.T) {
+		h, _ := plant(t)
+		w := h.newWriter()
+		w.recovered = true // reach the repeat path, not recovery
+		_, err := w.Write(context.Background(), receiptFor(testKey(1)))
+		assertInternalStoredError(t, err)
+	})
+	t.Run("Recover", func(t *testing.T) {
+		_, w := plant(t)
+		assertInternalStoredError(t, w.Recover())
+	})
+}
+
+func assertInternalStoredError(t *testing.T, err error) {
+	t.Helper()
+	var fe *FieldError
+	if err == nil || errors.As(err, &fe) {
+		t.Fatalf("err = %v; want an internal error with no FieldError in its chain", err)
+	}
+	if !errors.Is(err, ErrStoredReceiptUnbuildable) {
+		t.Errorf("err = %v; want ErrStoredReceiptUnbuildable", err)
+	}
+}
+
+// What the config holds is trimmed before the writer uses it.
+func TestReceiptWriterConfigFrom_Trims(t *testing.T) {
+	got := ReceiptWriterConfigFrom(config.Config{SendReceiptDir: "  /srv/herp \t", HasReceiptBatFile: " /x/k.bat "}, "/data")
+	if got.SendReceiptDir != "/srv/herp" || got.HasReceiptBatFile != "/x/k.bat" {
+		t.Errorf("writer config = %q / %q; want trimmed", got.SendReceiptDir, got.HasReceiptBatFile)
 	}
 }

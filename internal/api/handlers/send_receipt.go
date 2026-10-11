@@ -125,6 +125,10 @@ func writeReceiptError(w http.ResponseWriter, log logger.LoggerService, key stri
 	case errors.Is(err, hasavshevet.ErrStoreUnavailable):
 		status, code, msg = http.StatusServiceUnavailable, "RECEIPT_NUMBER_STORE_UNAVAILABLE",
 			"The receipt number store is not available (not seeded, unreadable or exhausted); see the connector log"
+	case errors.Is(err, hasavshevet.ErrStoredReceiptUnbuildable):
+		// A receipt already reserved (by an earlier request) no longer builds:
+		// the connector's index is at fault, not this request.
+		code, msg = "RECEIPT_STORED_REQUEST_INVALID", "A receipt already reserved by this connector cannot be finished; see the connector log"
 	case errors.Is(err, hasavshevet.ErrReceiptIndexUnreadable):
 		code, msg = "RECEIPT_INDEX_UNREADABLE", "The receipt idempotency index cannot be trusted; see the connector log"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
@@ -140,6 +144,13 @@ func writeReceiptError(w http.ResponseWriter, log logger.LoggerService, key stri
 // describeReceiptDecodeError names the field a decode error is about ("body"
 // when it is about the document as a whole).
 func describeReceiptDecodeError(err error) (field, msg string) {
+	var ke *jsonKeyError
+	if errors.As(err, &ke) {
+		if ke.Duplicate {
+			return ke.Path, "is given more than once"
+		}
+		return ke.Path, "is not a sendReceipt field (keys are case-sensitive)"
+	}
 	if name := unknownJSONField(err); name != "" {
 		return name, "is not a sendReceipt field"
 	}

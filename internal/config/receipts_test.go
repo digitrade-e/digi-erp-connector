@@ -130,3 +130,16 @@ receiptCardNames:
 		t.Errorf("card names = %+v", cfg.ReceiptCardNames)
 	}
 }
+
+// A relative sendReceiptDir would resolve against the service's working
+// directory (System32 under the SCM). Daemon and GUI share this refusal.
+func TestValidateReceipts_RefusesARelativeFolder(t *testing.T) {
+	for _, dir := range []string{"herp", `.\herp`, "./herp", "../x/herp"} {
+		if err := (Config{SendReceiptDir: dir}).ValidateReceipts(); err == nil || !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("ValidateReceipts(%q) = %v; want refused as not absolute", dir, err)
+		}
+	}
+	if err := (Config{SendReceiptDir: "  " + t.TempDir() + " "}).ValidateReceipts(); err != nil {
+		t.Errorf("an absolute folder with spaces around it was refused: %v", err)
+	}
+}

@@ -28,6 +28,10 @@ const (
 	wireKey           = "3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17"
 )
 
+// wireGolden is the fixture as read at package init, for table cases that
+// edit its text; wireBytes re-reads and re-checks it.
+var wireGolden, _ = os.ReadFile(wireFixture)
+
 func wireBytes(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile(wireFixture)
@@ -225,8 +229,16 @@ func TestSendReceipt_RequestFaultsAre400NamingTheField(t *testing.T) {
 		field  string
 	}{
 		{"unknown top-level field", set("surprise", 1), "", "surprise"},
-		{"unknown account field", set("account/surprise", 1), "", "surprise"},
-		{"unknown detail field", set("details/surprise", 1), "", "surprise"},
+		{"unknown account field", set("account/surprise", 1), "", "account/surprise"},
+		{"unknown detail field", set("details/surprise", 1), "", "details/surprise"},
+		// encoding/json would match these case-insensitively and fill the field.
+		{"key in another case", nil, strings.Replace(string(wireGolden), `"amountMinor": 694700`, `"AmountMinor": 694700`, 1), "AmountMinor"},
+		{"nested key in another case", nil, strings.Replace(string(wireGolden), `"syncKey"`, `"SYNCKEY"`, 1), "account/SYNCKEY"},
+		// encoding/json would keep the last of two keys.
+		{"duplicate top-level key", nil, strings.Replace(string(wireGolden), `"currency": "ILS",`, `"currency": "ILS", "currency": "USD",`, 1), "currency"},
+		{"duplicate nested key", nil, strings.Replace(string(wireGolden), `"city": "חיפה",`, `"city": "חיפה", "city": "תל אביב",`, 1), "account/city"},
+		{"duplicate key in a detail", nil, strings.Replace(string(wireGolden), `"reference": "19057",`, `"reference": "19057", "reference": "X",`, 1), "details/reference"},
+		{"body over 1 MiB", nil, `{"remarkSuffix":"` + strings.Repeat("a", 1<<20) + `"}`, "body"},
 		{"missing idempotencyKey", del("idempotencyKey"), "", "idempotencyKey"},
 		{"missing account", del("account"), "", "account"},
 		{"missing account/syncKey", del("account/syncKey"), "", "account/syncKey"},
@@ -378,6 +390,7 @@ func TestSendReceipt_InternalFaultsAre5xx(t *testing.T) {
 		{"card-name config", &hasavshevet.CardNamesConfigError{Table: "cardIssuer", Name: "x", Reason: "too wide"}, 500, "RECEIPT_CONFIG_INVALID"},
 		{"store unavailable", fmt.Errorf("wrapped: %w", hasavshevet.ErrStoreUnavailable), 503, "RECEIPT_NUMBER_STORE_UNAVAILABLE"},
 		{"index unreadable", fmt.Errorf("%w: /secret/data/receipts/index/x.json", hasavshevet.ErrReceiptIndexUnreadable), 500, "RECEIPT_INDEX_UNREADABLE"},
+		{"stored request no longer builds", fmt.Errorf("%w: receipt 9 (key k): last4: must be exactly 4 digits", hasavshevet.ErrStoredReceiptUnbuildable), 500, "RECEIPT_STORED_REQUEST_INVALID"},
 		{"lock wait ran out", context.DeadlineExceeded, 503, "RECEIPT_WRITER_BUSY"},
 		{"disk", errors.New("open /secret/herp/KUPAIN_1.doc: permission denied"), 500, "RECEIPT_WRITE_FAILED"},
 	} {
@@ -447,5 +460,36 @@ func TestSendReceipt_MapsTheWireToTheWriter(t *testing.T) {
 		got.Details[1] != (hasavshevet.ReceiptDetail{Reference: "19057", AmountMinor: -17500}) ||
 		got.Details[2] != (hasavshevet.ReceiptDetail{Reference: "OI-77", AmountMinor: 1500}) {
 		t.Errorf("details = %+v", got.Details)
+	}
+}
+
+// End to end: a reserved receipt whose stored request no longer builds is a
+// 500 for whoever comes next — never a 400 blaming a request that is fine.
+func TestSendReceipt_UnbuildableStoredReceiptIs500(t *testing.T) {
+	in := newReceiptInstall(t, 1000)
+	stored := `{"key":"00000000-0000-4000-8000-000000000001","number":1000,"state":"reserved",` +
+		`"request":{"idempotencyKey":"00000000-0000-4000-8000-000000000001","account":{"syncKey":"1","name":"n","address":"","city":"","phone":"","agentSyncKey":""},` +
+		`"email":"","settledAt":"2026-10-08","amountMinor":100,"currency":"ILS","installments":1,"firstPaymentMinor":null,` +
+		`"cardBrand":"","cardIssuer":"","last4":"12a4","confirmationCode":"1","authorizationRef":"","providerTransactionId":"1",` +
+		`"details":[{"reference":"r","amountMinor":100}],"remarkSuffix":""},"files":null,"import":"not_run","reservedAt":"2026-10-11T00:00:00Z"}`
+	idx := filepath.Join(in.dataDir, "receipts", "index", "00000000-0000-4000-8000-000000000001.json")
+	if err := os.MkdirAll(filepath.Dir(idx), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(idx, []byte(stored), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A restart: a fresh writer, whose first Write recovers the planted entry.
+	w, err := hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfig{SendReceiptDir: in.sendDir, DataDir: in.dataDir}, &noopLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := postReceipt(t, NewSendReceiptHandler(w, true, &noopLogger{}), wireBytes(t))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d (%s); want 500", rec.Code, rec.Body.String())
+	}
+	if e := decodeError(t, rec); e.Code != "RECEIPT_STORED_REQUEST_INVALID" {
+		t.Errorf("code = %q; want RECEIPT_STORED_REQUEST_INVALID", e.Code)
 	}
 }

@@ -20,6 +20,7 @@ func TestValidateReceiptConfig(t *testing.T) {
 		wantErr string
 	}{
 		{"no receipt keys (v1.0.17)", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders}, ""},
+		{"relative receipt folder", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: "herp"}, "absolute"},
 		{"separate folders", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: herp}, ""},
 		{"same folder", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: orders + "/"}, "sendReceiptDir"},
 		{"a card name that fits", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{

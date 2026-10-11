@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
@@ -33,7 +35,14 @@ const maxRequestBody = 1 << 20 // 1 MiB
 //
 // The request body is not closed here: net/http closes it for the handler.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	return decode(w, r, dst, false)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	return ensureEOF(dec)
 }
 
 // decodeJSONBodyStrict is decodeJSONBody that also refuses fields dst does not
@@ -45,22 +54,141 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
 // An unknown field is reported as an error whose text is
 // `json: unknown field "<name>"` (unknownJSONField extracts the name); a wrong
 // type as *json.UnmarshalTypeError.
+//
+// Before decoding it walks the document's tokens against dst's type and refuses
+// what encoding/json would silently accept: a key given twice (it keeps the
+// last) and a key that matches a field only case-insensitively (it fills the
+// field anyway). Both come back as *jsonKeyError naming the key's path
+// ("account/city"), as does a key dst does not declare at all. The shared size
+// limit applies to the whole body as before.
 func decodeJSONBodyStrict(w http.ResponseWriter, r *http.Request, dst any) error {
-	return decode(w, r, dst, true)
-}
-
-func decode(w http.ResponseWriter, r *http.Request, dst any, strict bool) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-
-	dec := json.NewDecoder(r.Body)
-	dec.UseNumber()
-	if strict {
-		dec.DisallowUnknownFields()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	if err != nil {
+		return err
 	}
+	if err := checkJSONKeys(body, reflect.TypeOf(dst)); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
 	return ensureEOF(dec)
+}
+
+// jsonKeyError is a key decodeJSONBodyStrict refuses. Path is slash-joined
+// ("details/reference"; array elements add nothing).
+type jsonKeyError struct {
+	Path      string
+	Duplicate bool
+}
+
+func (e *jsonKeyError) Error() string {
+	if e.Duplicate {
+		return e.Path + ": key given more than once"
+	}
+	return e.Path + ": not a field (keys are case-sensitive)"
+}
+
+// checkJSONKeys returns a *jsonKeyError for the first duplicate or undeclared
+// key, else nil. Malformed JSON is left for the decoder to report, so the
+// error a caller sees for a syntax fault does not change.
+func checkJSONKeys(body []byte, t reflect.Type) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var ke *jsonKeyError
+	if err := walkJSONKeys(dec, t, ""); errors.As(err, &ke) {
+		return ke
+	}
+	return nil
+}
+
+// walkJSONKeys consumes one JSON value. t is the Go type it decodes into, or
+// nil when unknown (a type mismatch the decoder will report, or an any): then
+// only duplicates are checked beneath it.
+func walkJSONKeys(dec *json.Decoder, t reflect.Type, path string) error {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		var fields map[string]reflect.Type
+		var elem reflect.Type
+		if t != nil && t.Kind() == reflect.Struct {
+			fields = jsonFieldTypes(t)
+		} else if t != nil && t.Kind() == reflect.Map {
+			elem = t.Elem()
+		}
+		seen := map[string]bool{}
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, _ := kt.(string)
+			p := key
+			if path != "" {
+				p = path + "/" + key
+			}
+			if seen[key] {
+				return &jsonKeyError{Path: p, Duplicate: true}
+			}
+			seen[key] = true
+			next := elem
+			if fields != nil {
+				ft, declared := fields[key]
+				if !declared {
+					return &jsonKeyError{Path: p}
+				}
+				next = ft
+			}
+			if err := walkJSONKeys(dec, next, p); err != nil {
+				return err
+			}
+		}
+	case '[':
+		var elem reflect.Type
+		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+			elem = t.Elem()
+		}
+		for dec.More() {
+			if err := walkJSONKeys(dec, elem, path); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = dec.Token() // the closing delimiter
+	return err
+}
+
+// jsonFieldTypes maps a struct's exact JSON keys to their field types.
+func jsonFieldTypes(t reflect.Type) map[string]reflect.Type {
+	out := make(map[string]reflect.Type, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		out[name] = f.Type
+	}
+	return out
 }
 
 // unknownJSONField returns the field name from a DisallowUnknownFields error,

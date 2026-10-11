@@ -104,7 +104,10 @@ func TestNewServer_RefusesBadReceiptConfig(t *testing.T) {
 	badNames := receiptConfig(t)
 	badNames.ReceiptCardNames = config.ReceiptCardNamesConfig{Issuer: map[string]string{"6": strings.Repeat("א", 26)}}
 
-	for name, cfg := range map[string]config.Config{"sendReceiptDir == sendOrderDir": sameDir, "card name too wide": badNames} {
+	relative := receiptConfig(t)
+	relative.SendReceiptDir = "herp"
+
+	for name, cfg := range map[string]config.Config{"sendReceiptDir == sendOrderDir": sameDir, "card name too wide": badNames, "relative sendReceiptDir": relative} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := receiptServer(t, cfg, &slowReceiptWriter{}); err == nil {
 				t.Fatal("NewServer accepted it")
