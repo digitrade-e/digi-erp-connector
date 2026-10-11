@@ -174,6 +174,14 @@ If step 4 fails for a fresh number, n stays reserved and the **next** Write —
 whatever its key — finishes n before issuing n+1, so the importer never sees n+1
 while n is missing.
 
+The `.doc` rename (step 4) and persisting `written` (step 5) are two steps in
+**both** models: a crash between them leaves the key `reserved` with
+`KUPAIN_{n}.doc` already visible, and the next repeat or `Recover` writes it
+again (same number, same bytes) — so anything outside the connector that
+consumed and **deleted** `KUPAIN_{n}.doc` in that window (an importer, a
+scheduled task) sees it reappear and can import it twice. Check for such a
+consumer when moving off the quarantine folder (see [Open questions](#open-questions)).
+
 `Recover()` runs at daemon startup: it finishes every `reserved` receipt (files
 only — never the BAT) and moves the store past every indexed number. In model
 (b) such a receipt keeps `import: not_run`, which on its own reads like a
@@ -220,7 +228,21 @@ The Windows service reports `StopPending` with a 160 s wait hint. The installer
 runs `sc stop` and waits up to 180 s for `STOPPED` before replacing any binary,
 and aborts with a message if the service has not stopped. The uninstaller does
 the same stop-and-wait before `sc delete`; it cannot abort, so a service that
-has not stopped by then is reported and deleted anyway. The GUI's **Stop server**
+has not stopped by then is reported and deleted anyway.
+
+⚠ **Reboots do not get the 150 s.** On an OS shutdown the service is sent
+`SERVICE_CONTROL_SHUTDOWN`, and Windows caps that stop at
+`WaitToKillServiceTimeout` (`HKLM\SYSTEM\CurrentControlSet\Control`, a few
+seconds by default) whatever the wait hint says. A receipt cut off there is
+safe — its key stays `reserved` (or `import: started`) and recovery finishes it
+at the next start — but **orders still queued are lost**: they were answered
+202 and hold their order numbers, yet no IMOVEIN is written. Before a planned
+reboot (Windows Update included), stop the service first and let the stop
+finish. The connector does not register for `SERVICE_ACCEPT_PRESHUTDOWN`: that
+needs a preshutdown timeout set through `ChangeServiceConfig2` by both the GUI
+and the installer, and would still be a cap. See `docs/operations.md`.
+
+The GUI's **Stop server**
 and **Restart server** wait up to 165 s (`autostart.ServiceStopWait`) and say the
 stop may take up to ~2.5 min; a stop still pending after that is reported as
 "still stopping", and Restart then does **not** start the service (starting a
@@ -272,4 +294,7 @@ guessed:
   a warning (Q-B1).
 - **Folder.** `sendReceiptDir` should first be a quarantine folder nobody imports
   from, until a real legacy KUPAIN pair has been compared byte for byte with the
-  goldens (Q-J7).
+  goldens (Q-J7). Before pointing it at the live folder, check whether anything
+  consumes and deletes `KUPAIN_{n}.doc` there: a crash between the `.doc`
+  rename and `written` rewrites the file (see
+  [Idempotency and recovery](#idempotency-and-recovery)).

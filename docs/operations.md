@@ -102,6 +102,30 @@ What survives an upgrade:
 
 Re-running the hardening commands afterwards is harmless and worth it as a check.
 
+## Reboots
+
+A reboot does **not** give the daemon its graceful stop. On an OS shutdown
+Windows caps every service's stop at `WaitToKillServiceTimeout`
+(`HKLM\SYSTEM\CurrentControlSet\Control`, a few seconds by default), whatever
+the 160 s wait hint the service reports. Orders still queued at that moment
+were already answered 202 and hold their order numbers, but no IMOVEIN is
+written for them — **they are lost**. A receipt cut off mid-write is safe: it
+is finished by recovery at the next start, and the backend's retry gets the
+same number.
+
+So before a planned reboot — Windows Update included — stop the service and
+let the stop finish:
+
+```powershell
+Stop-Service digi-erp-connectord      # waits for the graceful stop (up to ~2.5 min)
+Restart-Computer
+```
+
+(The GUI's **Stop server** does the same.) The service does not use
+`SERVICE_ACCEPT_PRESHUTDOWN`; it would need a preshutdown timeout configured by
+both the GUI and the installer and would still be a cap, so the stop-first rule
+is the guarantee.
+
 ## Verifying
 
 ```powershell
