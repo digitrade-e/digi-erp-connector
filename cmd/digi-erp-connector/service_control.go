@@ -21,10 +21,6 @@ import (
 
 const connectordWindowsServiceName = "digi-erp-connectord"
 
-// serviceStopTimeout is how long we wait for the daemon to shut down; it drains
-// the order queue and closes the DB pool first.
-const serviceStopTimeout = 20 * time.Second
-
 // onStartServer saves the current form, then creates/updates and starts the
 // service. Saving first means the daemon reads exactly what is on screen.
 func (f *mainForm) onStartServer() {
@@ -81,40 +77,27 @@ func (f *mainForm) onStopServer() {
 		return
 	}
 	f.busy = true
-	f.setStatus("Stopping server...")
+	f.setStatus(stoppingStatus())
 	go func() {
-		err := autostart.StopWindowsService(connectordWindowsServiceName, serviceStopTimeout)
-		f.Synchronize(func() {
-			if err != nil {
-				f.finish("Failed to stop server service: " + err.Error())
-				return
-			}
-			f.finish("Server service stopped.")
-		})
+		msg := stopServiceMessage(autostart.StopWindowsService(connectordWindowsServiceName, serviceStopTimeout))
+		f.Synchronize(func() { f.finish(msg) })
 	}()
 }
 
-// onRestartServer stops then starts. A stop error is only worth reporting if the
-// start also failed: stopping an already-stopped service errors harmlessly.
+// onRestartServer stops, then starts only if the stop completed (see
+// restartService).
 func (f *mainForm) onRestartServer() {
 	if f.busy {
 		return
 	}
 	f.busy = true
-	f.setStatus("Restarting server...")
+	f.setStatus(restartingStatus())
 	go func() {
-		stopErr := autostart.StopWindowsService(connectordWindowsServiceName, serviceStopTimeout)
-		startErr := autostart.StartWindowsService(connectordWindowsServiceName)
-		f.Synchronize(func() {
-			switch {
-			case startErr != nil && stopErr != nil:
-				f.finish("Failed to restart server service: " + stopErr.Error() + "; " + startErr.Error())
-			case startErr != nil:
-				f.finish("Failed to restart server service: " + startErr.Error())
-			default:
-				f.finish("Server service restarted.")
-			}
-		})
+		msg := restartService(
+			func() error { return autostart.StopWindowsService(connectordWindowsServiceName, serviceStopTimeout) },
+			func() error { return autostart.StartWindowsService(connectordWindowsServiceName) },
+		)
+		f.Synchronize(func() { f.finish(msg) })
 	}()
 }
 

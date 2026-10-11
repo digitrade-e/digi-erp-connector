@@ -4,7 +4,6 @@ package autostart
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -115,7 +114,7 @@ func StopWindowsService(name string, timeout time.Duration) error {
 		return errors.New("service name is required")
 	}
 	if timeout <= 0 {
-		timeout = 20 * time.Second
+		timeout = ServiceStopWait
 	}
 
 	m, err := mgr.Connect()
@@ -157,7 +156,7 @@ func waitForServiceState(s *mgr.Service, want svc.State, timeout time.Duration) 
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for service state %d (current %d)", want, status.State)
+			return serviceStateTimeout(uint32(want), uint32(status.State))
 		}
 		time.Sleep(servicePollInterval)
 	}

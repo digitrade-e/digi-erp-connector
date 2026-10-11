@@ -220,7 +220,11 @@ The Windows service reports `StopPending` with a 160 s wait hint. The installer
 runs `sc stop` and waits up to 180 s for `STOPPED` before replacing any binary,
 and aborts with a message if the service has not stopped. The uninstaller does
 the same stop-and-wait before `sc delete`; it cannot abort, so a service that
-has not stopped by then is reported and deleted anyway.
+has not stopped by then is reported and deleted anyway. The GUI's **Stop server**
+and **Restart server** wait up to 165 s (`autostart.ServiceStopWait`) and say the
+stop may take up to ~2.5 min; a stop still pending after that is reported as
+"still stopping", and Restart then does **not** start the service (starting a
+`STOP_PENDING` service would leave it down once the stop completes).
 
 ## Configuration
 
