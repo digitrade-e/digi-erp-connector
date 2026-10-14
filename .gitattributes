@@ -24,3 +24,9 @@
 *.ico  binary
 *.syso binary
 *.exe  binary
+
+# Golden KUPAIN receipt fixtures (internal/erp/hasavshevet/kupain_golden*):
+# Windows-1255 bytes produced by the legacy PHP writer and compared byte for
+# byte, so git must never re-encode or re-end them.
+*.prm binary
+*.doc binary
