@@ -4,6 +4,7 @@ package hasavshevet
 // test (DIG-929 gate, round 1). Each was checked to fail under its mutant.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -105,6 +106,7 @@ func TestReceiptIndex_PlantedEntriesFailClosed(t *testing.T) {
 	}{
 		"I02 key mismatch":   {testKey(2), func(m map[string]any) { m["number"] = 1500 }},
 		"I03 number 0":       {testKey(1), func(m map[string]any) { m["number"] = 0 }},
+		"I03 number past F3": {testKey(1), func(m map[string]any) { m["number"] = maxReceiptNumber + 1 }},
 		"I04 unknown state":  {testKey(1), func(m map[string]any) { m["state"] = "done" }},
 		"I05 unknown import": {testKey(1), func(m map[string]any) { m["import"] = "maybe" }},
 		"I01 unknown field":  {testKey(1), func(m map[string]any) { m["extra"] = 1 }},
@@ -119,5 +121,38 @@ func TestReceiptIndex_PlantedEntriesFailClosed(t *testing.T) {
 				t.Fatalf("Write = %v; want ErrReceiptIndexUnreadable", err)
 			}
 		})
+	}
+}
+
+// The store never persists a next number outside 1 … 999 999 999 + 1 (the
+// last value meaning "F3 exhausted"), whoever asks: an index entry planted
+// with number 1 000 000 000 once made recovery store 1 000 000 001.
+func TestReceiptNumberStore_NeverPersistsANumberPastF3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "receiptNumber.json")
+	s := NewReceiptNumberStore(path)
+	if err := s.Seed(5); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{maxReceiptNumber + 1, maxReceiptNumber + 2, 1 << 40} {
+		if err := s.advancePast(n); err == nil {
+			t.Errorf("advancePast(%d) accepted", n)
+		}
+		if got, _ := os.ReadFile(path); !bytes.Equal(got, before) {
+			t.Fatalf("advancePast(%d) rewrote the store to %s", n, got)
+		}
+	}
+	if err := s.write(0, ""); err == nil {
+		t.Error("write(0) accepted")
+	}
+	// The last number is issuable; after it the store says exhausted.
+	if err := s.advancePast(maxReceiptNumber); err != nil {
+		t.Fatalf("advancePast(max) = %v", err)
+	}
+	if _, err := s.Peek(); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("Peek after the last number = %v; want ErrStoreUnavailable (exhausted)", err)
 	}
 }

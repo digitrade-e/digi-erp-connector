@@ -135,7 +135,13 @@ func (s *ReceiptNumberStore) read() (int64, receiptNumberFile, error) {
 	return next, f, nil
 }
 
+// write persists next. Whoever calls it, it never stores a number outside
+// 1 … maxReceiptNumber+1 — the last meaning "F3 exhausted", which read refuses
+// — so a number from a damaged index can never move the store past it.
 func (s *ReceiptNumberStore) write(next int64, seededAt string) error {
+	if next < 1 || next > maxReceiptNumber+1 {
+		return fmt.Errorf("%w: refusing to store next receipt number %d (outside 1-%d)", ErrStoreUnavailable, next, maxReceiptNumber+1)
+	}
 	num := json.RawMessage(strconv.FormatInt(next, 10))
 	b, err := json.MarshalIndent(receiptNumberFile{NextReceiptNumber: num, SeededAt: seededAt}, "", "  ")
 	if err != nil {
