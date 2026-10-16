@@ -89,20 +89,25 @@ whose `details.field` is the key (or `body` for the document as a whole):
   receipt has a scalar (a flat body never nests);
 - a value that breaks the rule below.
 
+Every string value is **edge-trimmed** before any rule below is checked: the
+whitespace around it (Unicode's, line breaks included) and the invisible marks
+`normalize1255` removes are dropped, so "required" means something is left and
+a width counts what is written.
+
 | Key | Type | Rule (else 400) | KUPAIN |
 |---|---|---|---|
 | `idempotencyKey` | string | `8-4-4-4-12` hex UUID (any case; echoed lower-case) | index key |
-| `accountKey` | string | required, ≤ 15 B, trimmed | F2 |
+| `accountKey` | string | required, ≤ 15 B | F2 |
 | `settledDate` | string | `YYYY-MM-DD`, a real day | F5 + F6 as `dd/mm/YYYY` |
 | `amountMinor` | int | 1 … 99 999 999 agorot | F12 `%d.%02d` |
 | `installments` | int | exactly 1 | F16 |
 | `cardIssuer` | string | `^\d{0,2}$` | F17, looked up first |
 | `cardBrand` | string | `^\d{0,2}$` | F17, when the issuer has no name |
 | `last4` | string | `^\d{4}$` (ASCII digits) | F28 |
-| `confirmationCode` | string | required, ≤ 9 B, trimmed | F22 and F43 |
+| `confirmationCode` | string | required, ≤ 9 B | F22 and F43 |
 | `providerUid` | string | ≤ 250 B | F23 |
 | `remarks` | string | required, ≤ 250 B | F7, as sent |
-| `agentKey` | string | ≤ 9 B, trimmed | F20 |
+| `agentKey` | string | ≤ 9 B | F20 |
 | `name` | string | required, ≤ 50 B | F24 |
 | `address` | string | ≤ 50 B | F25 |
 | `phone` | string | ≤ 50 B | F27 |
@@ -113,16 +118,25 @@ F29 (first payment) **blank**, as the legacy wrote them. F7 is whatever the
 backend built — the invoice references joined `", "`, cut by the backend at the
 last whole reference with ` +N` — the connector neither builds nor cuts it.
 
-"B" is bytes after Windows-1255 — one per Hebrew letter, so 250 Hebrew letters
-(500 bytes of UTF-8) fit F7. Before encoding, `normalize1255` applies NFC,
-removes bidi controls (LRM/RLM, the embeddings, overrides and isolates, ALM),
-the zero-width non-joiner and joiner (U+200C, U+200D), the BOM, the soft hyphen
-and the apostrophe, and writes a line break (`\r\n`, `\r`, `\n`) as `. ` and a
-tab or no-break space as a space. Other invisible characters are **refused, not
-removed** — the zero-width space (U+200B) and the Unicode line and paragraph
-separators (U+2028, U+2029) are in neither its list nor Windows-1255, so a value
-carrying one is a 400. Whitespace, line breaks and the removed marks around a
-value are trimmed first, so a trailing break is never written as `.`. Nothing is ever
+"B" is bytes after Windows-1255 and `normalize1255` — one per Hebrew letter, so
+250 Hebrew letters (500 bytes of UTF-8) fit F7, but a presentation form such as
+U+FB2A (שׁ) is two (ש + shin dot) and an inner line break is two (`. `).
+
+In order, per value:
+
+1. **Edge trim** (on the raw value): Unicode whitespace at either end — space,
+   tab, `\r`, `\n`, VT, NEL (U+0085), no-break space, U+2028/U+2029,
+   ideographic space (U+3000) … — and the marks step 2 removes, at either end.
+   A trailing break is therefore never written as `.`.
+2. **`normalize1255`**: NFC; removes bidi controls (LRM/RLM, the embeddings,
+   overrides and isolates, ALM), the zero-width non-joiner and joiner (U+200C,
+   U+200D), the BOM, the soft hyphen and the apostrophe; writes an inner line
+   break (`\r\n`, `\r`, `\n`) as `. ` and a tab or no-break space as a space.
+3. **Strict Windows-1255**: anything left that the code page lacks, or a control
+   character, is a 400. That includes, **inside** a value, VT, NEL, U+2028,
+   U+2029 and U+3000 (trimmed at the edges by step 1), and the zero-width space
+   U+200B **anywhere** — it is not whitespace, so step 1 keeps it even at an
+   edge. Nothing is ever
 truncated or transliterated: a value that does not fit or cannot be encoded
 (Arabic, Cyrillic, an emoji) is a 400 naming the key. "Required" means
 something is left after that normalisation and trimming.
@@ -323,7 +337,9 @@ resolving `..`,
 trailing separators and symlinks, case-insensitively on Windows. The daemon
 refuses to start on it and the GUI refuses to save it, as it does a
 `receiptCardNames` name that cannot be written in F17 (not Windows-1255, or wider
-than 25 bytes). Only `KUPAIN_{n}.doc` and `KUPAIN.prm` are ever written to
+than 25 bytes), or two keys of one table naming the same code (`"6"` and
+`"06"` — codes compare as numbers, so F17 would depend on which came first).
+Only `KUPAIN_{n}.doc` and `KUPAIN.prm` are ever written to
 `sendReceiptDir`; the store, index and history live in the data directory,
 because on a real install the herp folder sits under a web root. See
 [configuration.md](configuration.md#hasavshevet-receipts).

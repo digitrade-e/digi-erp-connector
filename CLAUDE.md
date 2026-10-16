@@ -91,7 +91,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/priceAndStockHandler` | POST | Hasavshevet or SAP price/stock fetch |
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
-| `/api/sendReceipt` | POST | **Synchronous** (≤120 s): one KUPAIN receipt per `idempotencyKey` → `200 {receiptNumber, written, idempotencyKey, import, warnings}`; strict decode (also refuses duplicate and wrong-case keys); 503 when `sendReceiptDir` unset or the number store unseeded. `docs/hasavshevet-send-receipt.md` |
+| `/api/sendReceipt` | POST | **Synchronous** (≤120 s): one KUPAIN receipt per `idempotencyKey` → `200 {receiptNumber, written, idempotencyKey, import, warnings}`; flat §4.6a body (16 keys, all present, none null), strict decode (also refuses duplicate and wrong-case keys); 400 only for the request's content (the backend stops on it); 503 when `sendReceiptDir` unset (`RECEIPTS_NOT_CONFIGURED`), the number store unusable (`RECEIPT_NUMBER_STORE_UNAVAILABLE`), the import lock busy (`RECEIPT_WRITER_BUSY`), the body not readable to its end (`RECEIPT_REQUEST_READ_FAILED`) or another process holding the data dir (`RECEIPT_DATA_IN_USE`). `docs/hasavshevet-send-receipt.md` |
 
 ## Saved-query model — hard constraints, NEVER bypass
 
@@ -140,9 +140,13 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 
 - The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` creates it (write-if-absent).
 - One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt. Never restore or copy `DataDir/receipts` while the service runs — stop it first (a running writer trusts its in-memory recovery state).
-- 4xx only for request faults; `CardNamesConfigError`, a stored request that no longer builds (`ErrStoredReceiptUnbuildable`) and every other connector fault are 5xx. The response never carries `ReceiptResult.Files`.
+- **One process per data directory**: the writer holds an OS lock on `DataDir/receipts/writer.lock` (`internal/platform/filelock`: flock / LockFileEx) from its first Recover/Write to `Close` (called last in `Stop`) or exit; a second process answers receipts 503 `RECEIPT_DATA_IN_USE`. The importMu is in-process only.
+- The store never persists a next number outside 1…999 999 999 + 1; history and index files are 0600 in 0700 dirs on Unix (no chmod on Windows — ACLs).
+- 4xx only for request faults — and never echo a value (a key path at most 64 bytes); a body read cut short is 503, not 400; `CardNamesConfigError`, a stored request that no longer builds (`ErrStoredReceiptUnbuildable`) and every other connector fault are 5xx. The response never carries `ReceiptResult.Files`.
 - Config guard `hasavshevet.ValidateReceiptConfig` (sendReceiptDir ≠ sendOrderDir, card names writable) is called by both `api.NewServer` and the GUI save.
-- Contract pinned by `handlers/send_receipt_test.go` against the backend's golden `testdata/receipt/wire.json` (byte copy, sha256 checked).
+- Contract pinned by `handlers/send_receipt_test.go` against `testdata/receipt/wire.json` + `wire-blanks.json`: the backend's REAL `Receipt` serialized by its HTTP client (`generate.php` beside them, run in a throwaway `backend-php` container; sha256 checked). Regenerate, never hand-edit.
+- The strict decoder's key walk descends only where the Go type nests (≤ 8 levels) and skips other values with `Decode` — walking them token by token cost O(depth²) memory.
+- Every text value is edge-trimmed on the RAW value, then `normalize1255`, then strict Windows-1255; widths are encoded bytes (U+FB2A and an inner line break are two).
 
 ## Tests
 

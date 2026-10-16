@@ -93,7 +93,8 @@ After an upgrade, `GET /api/ping` returns the installed release in `version`.
 What survives an upgrade:
 
 - **Everything in the data directory** — config, queries, secrets, logs, and the
-  receipt number store, index and history (`receipts/`, `history/receipts/`).
+  receipt number store, index, process lock and history (`receipts/`,
+  `history/receipts/`).
   The installer only writes to `C:\Program Files\…`. Back `receipts/` up with
   the rest: a lost index turns a receipt retry into a second receipt.
 - **The service definition**, including `depend=` and the recovery actions. The

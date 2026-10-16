@@ -104,14 +104,22 @@ omitted from the file when unset, and without `sendReceiptDir` the route answers
 |---|---|
 | `sendReceiptDir` | The receipt importer's folder: only `KUPAIN_{n}.doc` and `KUPAIN.prm` are written here. **Must be absolute and must not be `sendOrderDir`** (compared after resolving `..`, trailing separators and symlinks; case-insensitively on Windows) — the daemon will not start and the GUI will not save. Receipts are configured only with `erp: hasavshevet` and this set. |
 | `hasReceiptBatFile` | Model (b): this BAT runs once (via `cmd.exe /C`, from its own folder, 90 s cap) after each receipt is written. Empty is model (a): files only, imported by hand. |
-| `receiptCardNames` | `{issuer: {code: name}, brand: {code: name}}` — overrides of the receipt's card name (F17), keyed by the raw HYP code. A name that is not Windows-1255 or is wider than 25 bytes, or a blank code, stops the daemon and the GUI save. |
+| `receiptCardNames` | `{issuer: {code: name}, brand: {code: name}}` — overrides of the receipt's card name (F17), keyed by the raw HYP code. Codes compare as numbers (`"06"` is `6`). A name that is not Windows-1255 or is wider than 25 bytes, a blank code, or two keys of one table naming the same code (`"6"` and `"06"`) stops the daemon and the GUI save. |
 
 The receipt number store (`receipts/receiptNumber.json`), the idempotency index
-(`receipts/index/`) and history copies (`history/receipts/{n}/`) live in the
-**data directory**, never in `sendReceiptDir`. The store is created only by
-`cutover-seed -receipt-seed N`; until then receipts answer 503. Back up
-`receipts/` with the rest of the data directory — a lost index turns a retry into
-a second receipt.
+(`receipts/index/`), the process lock (`receipts/writer.lock`) and history copies
+(`history/receipts/{n}/`) live in the **data directory**, never in
+`sendReceiptDir`; on Linux the receipt directories are 0700 and their files
+0600. The store is created only by `cutover-seed -receipt-seed N`; until then
+receipts answer 503. Back up `receipts/` with the rest of the data directory — a
+lost index turns a retry into a second receipt.
+
+One connector process per data directory: the receipt writer holds an OS lock on
+`receipts/writer.lock` while it runs. A second process on the same directory
+serves orders and queries but answers receipts `503 RECEIPT_DATA_IN_USE`, and
+takes over once the first has stopped. The file itself is not the lock — one
+left behind by a crash locks nobody out — so never delete it to "unlock" a
+connector; stop the other process.
 
 ## `db`
 
