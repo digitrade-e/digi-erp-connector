@@ -29,8 +29,6 @@ const (
 	// A receipt that never got the lock reserved nothing; 503 tells the caller
 	// to retry with the same key.
 	receiptLockWait = 20 * time.Second
-
-	maxProviderTransactionIDBytes = 64
 )
 
 // ReceiptWriter is what the route needs from hasavshevet.ReceiptWriter. The ctx
@@ -182,103 +180,50 @@ func jsonKind(goKind string) string {
 	return goKind
 }
 
-// receiptRequestFrom checks what the strict decode cannot — required fields
-// present, currency, providerTransactionId — and maps the wire body to the
-// writer's request. Everything written into the record (widths, encoding,
-// dates, amounts, last4, the key's form) is the builder's to refuse.
+// receiptRequestFrom checks what the strict decode cannot — every key present
+// and not null — and maps the wire body to the writer's request. Everything
+// written into the record (widths, encoding, dates, amounts, codes, the key's
+// form) is the builder's to refuse.
 func receiptRequestFrom(b dto.SendReceiptRequest) (hasavshevet.ReceiptRequest, *hasavshevet.FieldError) {
-	missing := func(field string) *hasavshevet.FieldError {
-		return &hasavshevet.FieldError{Field: field, Reason: "is required"}
-	}
+	var req hasavshevet.ReceiptRequest
 	for _, f := range []struct {
-		name    string
-		present bool
+		name string
+		src  *string
+		dst  *string
 	}{
-		{"idempotencyKey", b.IdempotencyKey != nil},
-		{"account", b.Account != nil},
+		{"idempotencyKey", b.IdempotencyKey, &req.IdempotencyKey},
+		{"accountKey", b.AccountKey, &req.AccountKey},
+		{"settledDate", b.SettledDate, &req.SettledDate},
+		{"cardIssuer", b.CardIssuer, &req.CardIssuer},
+		{"cardBrand", b.CardBrand, &req.CardBrand},
+		{"last4", b.Last4, &req.Last4},
+		{"confirmationCode", b.ConfirmationCode, &req.ConfirmationCode},
+		{"providerUid", b.ProviderUID, &req.ProviderUID},
+		{"remarks", b.Remarks, &req.Remarks},
+		{"agentKey", b.AgentKey, &req.AgentKey},
+		{"name", b.Name, &req.Name},
+		{"address", b.Address, &req.Address},
+		{"phone", b.Phone, &req.Phone},
+		{"email", b.Email, &req.Email},
 	} {
-		if !f.present {
-			return hasavshevet.ReceiptRequest{}, missing(f.name)
+		if f.src == nil {
+			return hasavshevet.ReceiptRequest{}, required(f.name)
 		}
+		*f.dst = *f.src
 	}
-	for _, f := range []struct {
-		name    string
-		present bool
-	}{
-		{"account/syncKey", b.Account.SyncKey != nil},
-		{"account/name", b.Account.Name != nil},
-		{"settledAt", b.SettledAt != nil},
-		{"amountMinor", b.AmountMinor != nil},
-		{"currency", b.Currency != nil},
-		{"installments", b.Installments != nil},
-		{"last4", b.Last4 != nil},
-		{"confirmationCode", b.ConfirmationCode != nil},
-		{"providerTransactionId", b.ProviderTransactionID != nil},
-	} {
-		if !f.present {
-			return hasavshevet.ReceiptRequest{}, missing(f.name)
-		}
+	if b.AmountMinor == nil {
+		return hasavshevet.ReceiptRequest{}, required("amountMinor")
 	}
-
-	if *b.Currency != "ILS" {
-		return hasavshevet.ReceiptRequest{}, &hasavshevet.FieldError{Field: "currency", Reason: fmt.Sprintf("must be ILS, got %q", *b.Currency)}
+	if b.Installments == nil {
+		return hasavshevet.ReceiptRequest{}, required("installments")
 	}
-	ptx := strings.TrimSpace(*b.ProviderTransactionID)
-	if ptx == "" {
-		return hasavshevet.ReceiptRequest{}, missing("providerTransactionId")
-	}
-	if len(ptx) > maxProviderTransactionIDBytes {
-		return hasavshevet.ReceiptRequest{}, &hasavshevet.FieldError{Field: "providerTransactionId",
-			Reason: fmt.Sprintf("is %d bytes, at most %d", len(ptx), maxProviderTransactionIDBytes)}
-	}
-
-	if len(b.Details) == 0 {
-		return hasavshevet.ReceiptRequest{}, &hasavshevet.FieldError{Field: "details", Reason: "at least one invoice reference is required"}
-	}
-	details := make([]hasavshevet.ReceiptDetail, 0, len(b.Details))
-	for i, d := range b.Details {
-		switch {
-		case d == nil:
-			return hasavshevet.ReceiptRequest{}, &hasavshevet.FieldError{Field: "details", Reason: fmt.Sprintf("details[%d] is null", i)}
-		case d.Reference == nil:
-			return hasavshevet.ReceiptRequest{}, &hasavshevet.FieldError{Field: "details/reference", Reason: fmt.Sprintf("is required (details[%d])", i)}
-		case d.AmountMinor == nil:
-			return hasavshevet.ReceiptRequest{}, &hasavshevet.FieldError{Field: "details/amountMinor", Reason: fmt.Sprintf("is required (details[%d])", i)}
-		}
-		details = append(details, hasavshevet.ReceiptDetail{Reference: *d.Reference, AmountMinor: *d.AmountMinor})
-	}
-
-	return hasavshevet.ReceiptRequest{
-		IdempotencyKey: *b.IdempotencyKey,
-		Account: hasavshevet.ReceiptAccount{
-			SyncKey:      *b.Account.SyncKey,
-			Name:         *b.Account.Name,
-			Address:      orEmpty(b.Account.Address),
-			City:         orEmpty(b.Account.City),
-			Phone:        orEmpty(b.Account.Phone),
-			AgentSyncKey: orEmpty(b.Account.AgentSyncKey),
-		},
-		Email:                 orEmpty(b.Email),
-		SettledAt:             *b.SettledAt,
-		AmountMinor:           *b.AmountMinor,
-		Currency:              *b.Currency,
-		Installments:          *b.Installments,
-		FirstPaymentMinor:     b.FirstPaymentMinor,
-		CardBrand:             orEmpty(b.CardBrand),
-		CardIssuer:            orEmpty(b.CardIssuer),
-		Last4:                 *b.Last4,
-		ConfirmationCode:      *b.ConfirmationCode,
-		AuthorizationRef:      orEmpty(b.AuthorizationRef),
-		ProviderTransactionID: ptx,
-		Details:               details,
-		RemarkSuffix:          orEmpty(b.RemarkSuffix),
-	}, nil
+	req.AmountMinor = *b.AmountMinor
+	req.Installments = *b.Installments
+	return req, nil
 }
 
-// orEmpty is a nullable wire string: null and absent are both "".
-func orEmpty(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
+// required is the 400 for a key that is absent or null: the backend sends all
+// of them, every time, with "" for an empty value.
+func required(field string) *hasavshevet.FieldError {
+	return &hasavshevet.FieldError{Field: field, Reason: "is required (absent or null)"}
 }

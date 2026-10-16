@@ -80,34 +80,26 @@ func padded(t *testing.T, s string, width int) []byte {
 }
 
 // goldenReceipt is the Go form of the values the legacy writer was fed to
-// produce KUPAIN_redacted.doc. City is empty because the legacy writer never
-// fills F26 (see TestKUPAINRecord_CityFillsF26).
+// produce KUPAIN_redacted.doc, on the flat §4.6a wire. remarks is what the
+// legacy wrote into F7 ("{refs} | 2824019"): the backend now sends F7 whole.
 func goldenReceipt() ReceiptRequest {
 	return ReceiptRequest{
-		IdempotencyKey: "0b8f6a4e-3c1d-4e2f-9a7b-5c6d7e8f9a0b",
-		Account: ReceiptAccount{
-			SyncKey:      "100234",
-			Name:         `לקוח בדיקה בע"מ`,
-			Address:      "רחוב הדוגמה 12",
-			Phone:        "04-0000000",
-			AgentSyncKey: "17",
-		},
-		Email:                 "test@example.com",
-		SettledAt:             "2026-10-11",
-		AmountMinor:           710700,
-		Currency:              "ILS",
-		Installments:          1,
-		CardIssuer:            "2", // HYP Issuer 2 → ויזה …
-		CardBrand:             "2", // … and Brand 2 (Visa), which the legacy table has no name for; the issuer wins
-		Last4:                 "1234",
-		ConfirmationCode:      "0123456",
-		AuthorizationRef:      "26101112345678901234567",
-		ProviderTransactionID: "hyp-txn-1",
-		Details: []ReceiptDetail{
-			{Reference: "INV-1001", AmountMinor: 500000},
-			{Reference: "INV-1002", AmountMinor: 210700},
-		},
-		RemarkSuffix: "2824019",
+		IdempotencyKey:   "0b8f6a4e-3c1d-4e2f-9a7b-5c6d7e8f9a0b",
+		AccountKey:       "100234",
+		SettledDate:      "2026-10-11",
+		AmountMinor:      710700,
+		Installments:     1,
+		CardIssuer:       "2", // HYP Issuer 2 → ויזה …
+		CardBrand:        "2", // … and Brand 2 (Visa), which the legacy table has no name for; the issuer wins
+		Last4:            "1234",
+		ConfirmationCode: "0123456",
+		ProviderUID:      "26101112345678901234567",
+		Remarks:          "INV-1001, INV-1002 | 2824019",
+		AgentKey:         "17",
+		Name:             `לקוח בדיקה בע"מ`,
+		Address:          "רחוב הדוגמה 12",
+		Phone:            "04-0000000",
+		Email:            "test@example.com",
 	}
 }
 
@@ -220,20 +212,17 @@ func TestGenerateKUPAINDOC_Shape(t *testing.T) {
 // separator cannot hide behind padding.
 func fullWidthReceipt() ReceiptRequest {
 	r := goldenReceipt()
-	r.Account.SyncKey = strings.Repeat("K", 15)
-	r.Account.Name = strings.Repeat("ש", 50)
-	r.Account.Address = strings.Repeat("A", 50)
-	r.Account.City = strings.Repeat("C", 50)
-	r.Account.Phone = strings.Repeat("9", 50)
-	r.Account.AgentSyncKey = strings.Repeat("7", 9)
+	r.AccountKey = strings.Repeat("K", 15)
+	r.Name = strings.Repeat("ש", 50)
+	r.Address = strings.Repeat("A", 50)
+	r.Phone = strings.Repeat("9", 50)
+	r.AgentKey = strings.Repeat("7", 9)
 	r.Email = strings.Repeat("e", 50)
 	r.AmountMinor = 99999999
-	r.Installments = 12
 	r.CardIssuer = "5" // אלפא קארד/לאומי קארד, 20 bytes
 	r.ConfirmationCode = strings.Repeat("8", 9)
-	r.AuthorizationRef = strings.Repeat("U", 250)
-	r.Details = []ReceiptDetail{{Reference: strings.Repeat("R", 32)}}
-	r.RemarkSuffix = strings.Repeat("S", 40)
+	r.ProviderUID = strings.Repeat("U", 250)
+	r.Remarks = strings.Repeat("R", 250)
 	return r
 }
 
@@ -262,9 +251,7 @@ func TestKUPAINRecord_EveryFieldEndsWithOneSpace(t *testing.T) {
 }
 
 func TestKUPAINRecord_FieldPlacement(t *testing.T) {
-	r := goldenReceipt()
-	r.Account.City = "חיפה"
-	rec, _ := mustBuild(t, r)
+	rec, _ := mustBuild(t, goldenReceipt())
 	cases := []struct {
 		n    int
 		want string
@@ -283,7 +270,7 @@ func TestKUPAINRecord_FieldPlacement(t *testing.T) {
 		{23, "26101112345678901234567"},
 		{24, `לקוח בדיקה בע"מ`},
 		{25, "רחוב הדוגמה 12"},
-		{26, "חיפה"},
+		{26, ""},
 		{27, "04-0000000"},
 		{28, "1234"},
 		{29, ""},
@@ -297,7 +284,7 @@ func TestKUPAINRecord_FieldPlacement(t *testing.T) {
 			t.Errorf("F%d = %q, want %q", c.n, decode1255(t, got), c.want)
 		}
 	}
-	for _, n := range []int{8, 9, 10, 11, 13, 14, 15, 18, 19, 21} {
+	for _, n := range []int{8, 9, 10, 11, 13, 14, 15, 18, 19, 21, 26, 29} {
 		got := field(t, rec, n)
 		if !bytes.Equal(got, blank(len(got))) {
 			t.Errorf("F%d = %q, want blank", n, got)
@@ -305,22 +292,14 @@ func TestKUPAINRecord_FieldPlacement(t *testing.T) {
 	}
 }
 
-func TestKUPAINRecord_CityFillsF26(t *testing.T) {
-	r := goldenReceipt()
-	r.Account.City = "חיפה"
-	rec, _ := mustBuild(t, r)
-	if got := field(t, rec, 26); !bytes.Equal(got, padded(t, "חיפה", 50)) {
-		t.Fatalf("F26 = %q, want the city", decode1255(t, got))
-	}
-}
-
-func TestKUPAINRecord_RemarkWithoutSuffix(t *testing.T) {
-	r := goldenReceipt()
-	r.RemarkSuffix = ""
-	r.Details = []ReceiptDetail{{Reference: "INV-1"}}
-	rec, _ := mustBuild(t, r)
-	if got := field(t, rec, 7); !bytes.Equal(got, padded(t, "INV-1", 250)) {
-		t.Fatalf("F7 = %q, want the reference alone", got)
+// F26 (city) and F29 (first payment) are the connector's, and blank, as the
+// legacy wrote them: the wire carries neither.
+func TestKUPAINRecord_CityAndFirstPaymentAreAlwaysBlank(t *testing.T) {
+	rec, _ := mustBuild(t, fullWidthReceipt())
+	for _, n := range []int{26, 29} {
+		if got := field(t, rec, n); !bytes.Equal(got, blank(len(got))) {
+			t.Errorf("F%d = %q, want blank", n, got)
+		}
 	}
 }
 
@@ -353,77 +332,6 @@ func TestKUPAINRecord_AmountOutOfRange(t *testing.T) {
 	r.AmountMinor = 100000000
 	_, _, err := buildKUPAINRecord(r, goldenReceiptNumber, ReceiptCardNames{})
 	wantFieldError(t, err, "amountMinor")
-}
-
-func TestFirstPayment(t *testing.T) {
-	p := func(v int64) *int64 { return &v }
-	cases := []struct {
-		amount int64
-		n      int
-		given  *int64
-		want   string
-	}{
-		{1000, 1, nil, ""},              // one payment → F29 blank
-		{1000, 3, nil, "3.34"},          // 333 × 2 + 334: the remainder goes on the first
-		{100000, 3, nil, "333.34"},      // ₪1000 in three
-		{90000, 3, nil, "300.00"},       // divides evenly
-		{710700, 12, nil, "592.25"},     // 59225×11 = 651475, 710700-651475 = 59225
-		{710701, 12, nil, "592.26"},     // one agora of remainder
-		{1000, 3, p(500), "5.00"},       // caller-supplied first payment wins
-		{1000, 1, p(1000), ""},          // n=1 is blank even when supplied
-		{2, 3, nil, "0.02"},             // fewer agorot than payments: all on the first
-		{99999998, 99, nil, "10101.98"}, // 1010100×98 = 98989800, rest 1010198
-	}
-	for _, c := range cases {
-		got, err := firstPayment(c.amount, c.n, c.given)
-		if err != nil || got != c.want {
-			t.Errorf("firstPayment(%d, %d, %v) = %q, %v; want %q", c.amount, c.n, c.given, got, err, c.want)
-		}
-	}
-}
-
-func TestFirstPayment_Rejects(t *testing.T) {
-	p := func(v int64) *int64 { return &v }
-	cases := []struct {
-		name      string
-		amount    int64
-		n         int
-		given     *int64
-		wantField string
-	}{
-		{"zero installments", 1000, 0, nil, "installments"},
-		{"100 installments", 1000, 100, nil, "installments"},
-		{"first payment zero", 1000, 3, p(0), "firstPaymentMinor"},
-		{"first payment above total", 1000, 3, p(1001), "firstPaymentMinor"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			_, err := firstPayment(c.amount, c.n, c.given)
-			wantFieldError(t, err, c.wantField)
-		})
-	}
-}
-
-func TestKUPAINRecord_Installments(t *testing.T) {
-	r := goldenReceipt()
-	r.AmountMinor = 1000
-	r.Installments = 3
-	rec, _ := mustBuild(t, r)
-	if got := field(t, rec, 16); string(got) != "3 " {
-		t.Errorf("F16 = %q, want %q", got, "3 ")
-	}
-	if got := field(t, rec, 29); !bytes.Equal(got, padded(t, "3.34", 9)) {
-		t.Errorf("F29 = %q, want 3.34", got)
-	}
-	if got := field(t, rec, 12); !bytes.Equal(got, padded(t, "10.00", 9)) {
-		t.Errorf("F12 = %q, want 10.00", got)
-	}
-
-	r.Installments = 1
-	rec, _ = mustBuild(t, r)
-	if got := field(t, rec, 29); !bytes.Equal(got, blank(9)) {
-		t.Errorf("F29 with one installment = %q, want blank", got)
-	}
 }
 
 // ---------------------------------------------------------------- encoding
@@ -531,9 +439,9 @@ func TestEncode1255Strict_RejectsWhatItCannotEncode(t *testing.T) {
 
 func TestKUPAINRecord_ArabicIsAFieldError(t *testing.T) {
 	r := goldenReceipt()
-	r.Account.Name = "شركة الاختبار"
+	r.Name = "شركة الاختبار"
 	rec, _, err := buildKUPAINRecord(r, goldenReceiptNumber, ReceiptCardNames{})
-	wantFieldError(t, err, "account/name")
+	wantFieldError(t, err, "name")
 	if rec != nil {
 		t.Fatal("a record was returned alongside the error")
 	}
@@ -541,8 +449,8 @@ func TestKUPAINRecord_ArabicIsAFieldError(t *testing.T) {
 
 func TestKUPAINRecord_NormalisesBeforeWriting(t *testing.T) {
 	r := goldenReceipt()
-	r.Account.Address = "\u200Fרחוב\r\nהדוגמה 12\u202C"
-	r.Account.Name = "צ'יפס בע\"מ"
+	r.Address = "\u200Fרחוב\r\nהדוגמה 12\u202C"
+	r.Name = "צ'יפס בע\"מ"
 	rec, _ := mustBuild(t, r)
 	if got := field(t, rec, 25); !bytes.Equal(got, padded(t, "רחוב. הדוגמה 12", 50)) {
 		t.Errorf("F25 = %q", decode1255(t, got))
@@ -560,19 +468,15 @@ func TestKUPAINRecord_OneByteOverWidthNamesTheField(t *testing.T) {
 		mutate func(*ReceiptRequest, string)
 		width  int
 	}{
-		{"account/syncKey", func(r *ReceiptRequest, v string) { r.Account.SyncKey = v }, 15},
-		{"account/name", func(r *ReceiptRequest, v string) { r.Account.Name = v }, 50},
-		{"account/address", func(r *ReceiptRequest, v string) { r.Account.Address = v }, 50},
-		{"account/city", func(r *ReceiptRequest, v string) { r.Account.City = v }, 50},
-		{"account/phone", func(r *ReceiptRequest, v string) { r.Account.Phone = v }, 50},
-		{"account/agentSyncKey", func(r *ReceiptRequest, v string) { r.Account.AgentSyncKey = v }, 9},
+		{"accountKey", func(r *ReceiptRequest, v string) { r.AccountKey = v }, 15},
+		{"name", func(r *ReceiptRequest, v string) { r.Name = v }, 50},
+		{"address", func(r *ReceiptRequest, v string) { r.Address = v }, 50},
+		{"phone", func(r *ReceiptRequest, v string) { r.Phone = v }, 50},
+		{"agentKey", func(r *ReceiptRequest, v string) { r.AgentKey = v }, 9},
 		{"email", func(r *ReceiptRequest, v string) { r.Email = v }, 50},
 		{"confirmationCode", func(r *ReceiptRequest, v string) { r.ConfirmationCode = v }, 9},
-		{"authorizationRef", func(r *ReceiptRequest, v string) { r.AuthorizationRef = v }, 250},
-		{"details/reference", func(r *ReceiptRequest, v string) { r.Details[0].Reference = v }, 32},
-		{"remarkSuffix", func(r *ReceiptRequest, v string) { r.RemarkSuffix = v }, 40},
-		{"cardBrand", func(r *ReceiptRequest, v string) { r.CardBrand = v }, 32},
-		{"cardIssuer", func(r *ReceiptRequest, v string) { r.CardIssuer = v }, 32},
+		{"providerUid", func(r *ReceiptRequest, v string) { r.ProviderUID = v }, 250},
+		{"remarks", func(r *ReceiptRequest, v string) { r.Remarks = v }, 250},
 	}
 	for _, c := range cases {
 		t.Run(c.field, func(t *testing.T) {
@@ -594,38 +498,31 @@ func TestKUPAINRecord_OneByteOverWidthNamesTheField(t *testing.T) {
 	}
 }
 
-func TestKUPAINRecord_RemarkOver250NamesDetails(t *testing.T) {
-	r := goldenReceipt()
-	r.RemarkSuffix = ""
-	r.Details = nil
-	for range 25 { // 25 × 8 + 24 × 2 = 248 bytes
-		r.Details = append(r.Details, ReceiptDetail{Reference: "INV-0000"})
-	}
-	if _, _, err := buildKUPAINRecord(r, goldenReceiptNumber, ReceiptCardNames{}); err != nil {
-		t.Fatalf("248-byte remark rejected: %v", err)
-	}
-	r.RemarkSuffix = "1" // + " | 1" = 252
-	_, _, err := buildKUPAINRecord(r, goldenReceiptNumber, ReceiptCardNames{})
-	wantFieldError(t, err, "details")
-}
-
 func TestKUPAINRecord_RequiredAndShape(t *testing.T) {
 	cases := []struct {
 		field  string
 		mutate func(*ReceiptRequest)
 	}{
-		{"account/syncKey", func(r *ReceiptRequest) { r.Account.SyncKey = "" }},
-		{"account/name", func(r *ReceiptRequest) { r.Account.Name = "" }},
+		{"accountKey", func(r *ReceiptRequest) { r.AccountKey = "" }},
+		{"accountKey", func(r *ReceiptRequest) { r.AccountKey = " \u00A0" }},
+		{"name", func(r *ReceiptRequest) { r.Name = "" }},
+		{"name", func(r *ReceiptRequest) { r.Name = "\u200F" }}, // nothing left once normalised
 		{"confirmationCode", func(r *ReceiptRequest) { r.ConfirmationCode = "" }},
+		{"remarks", func(r *ReceiptRequest) { r.Remarks = "" }},
 		{"last4", func(r *ReceiptRequest) { r.Last4 = "123" }},
 		{"last4", func(r *ReceiptRequest) { r.Last4 = "12a4" }},
 		{"last4", func(r *ReceiptRequest) { r.Last4 = "١٢٣٤" }}, // Arabic-Indic digits
-		{"settledAt", func(r *ReceiptRequest) { r.SettledAt = "11/10/2026" }},
-		{"settledAt", func(r *ReceiptRequest) { r.SettledAt = "2026-02-30" }},
-		{"settledAt", func(r *ReceiptRequest) { r.SettledAt = "" }},
-		{"details", func(r *ReceiptRequest) { r.Details = nil }},
-		{"details/reference", func(r *ReceiptRequest) { r.Details[1].Reference = "" }},
+		{"settledDate", func(r *ReceiptRequest) { r.SettledDate = "11/10/2026" }},
+		{"settledDate", func(r *ReceiptRequest) { r.SettledDate = "2026-02-30" }},
+		{"settledDate", func(r *ReceiptRequest) { r.SettledDate = "2026-1-5" }},
+		{"settledDate", func(r *ReceiptRequest) { r.SettledDate = "" }},
+		{"amountMinor", func(r *ReceiptRequest) { r.AmountMinor = 0 }},
+		{"amountMinor", func(r *ReceiptRequest) { r.AmountMinor = 100000000 }},
 		{"installments", func(r *ReceiptRequest) { r.Installments = 0 }},
+		{"cardIssuer", func(r *ReceiptRequest) { r.CardIssuer = "123" }},
+		{"cardIssuer", func(r *ReceiptRequest) { r.CardIssuer = " 1" }},
+		{"cardIssuer", func(r *ReceiptRequest) { r.CardIssuer = "٢" }},
+		{"cardBrand", func(r *ReceiptRequest) { r.CardBrand = "x" }},
 	}
 	for _, c := range cases {
 		t.Run(c.field, func(t *testing.T) {
@@ -663,7 +560,10 @@ func TestCardName_EveryLegacyCode(t *testing.T) {
 		{"5", "4", "אלפא קארד/לאומי קארד", "cardIssuer"},
 		// an issuer the table does not know falls through to the brand
 		{"9", "3", "דיינרס", "cardBrand"},
-		{" 1 ", "", "ישראכרט", "cardIssuer"}, // codes are trimmed
+		// codes compare as numbers, as the legacy PHP == did ("01" == "1")
+		{"01", "", "ישראכרט", "cardIssuer"},
+		{"", "04", "אמריקן אקספרס", "cardBrand"},
+		{"00", "03", "דיינרס", "cardBrand"},
 	}
 	for _, c := range cases {
 		got, from, warn := cardName(c.issuer, c.brand, ReceiptCardNames{})
@@ -701,6 +601,15 @@ func TestCardName_Overrides(t *testing.T) {
 	}
 	if got, _, _ := cardName("1", "", names); got != "ישראכרט" {
 		t.Errorf("built-in lost when another code is overridden: %q", got)
+	}
+	if got, _, _ := cardName("02", "", names); got != "ויזה כאל" {
+		t.Errorf("issuer override for \"02\" = %q; codes compare as numbers", got)
+	}
+	if got, _, _ := cardName("", "01", ReceiptCardNames{Brand: map[string]string{"01": "מאסטרקארד"}}); got != "מאסטרקארד" {
+		t.Errorf("override keyed \"01\" for brand \"01\" = %q", got)
+	}
+	if got, _, _ := cardName("", "1", ReceiptCardNames{Brand: map[string]string{"01": "מאסטרקארד"}}); got != "מאסטרקארד" {
+		t.Errorf("override keyed \"01\" for brand \"1\" = %q", got)
 	}
 }
 
@@ -796,8 +705,8 @@ func TestKUPAINRecord_BadCardNameOverrideIsNotAFieldError(t *testing.T) {
 
 func TestKUPAINRecord_IdentifiersAreTrimmed(t *testing.T) {
 	r := goldenReceipt()
-	r.Account.SyncKey = "  " + strings.Repeat("K", 15) + " \t"
-	r.Account.AgentSyncKey = "\u00A017 "
+	r.AccountKey = "  " + strings.Repeat("K", 15) + " \t"
+	r.AgentKey = "\u00A017 "
 	r.ConfirmationCode = " 012345678 "
 	rec, _ := mustBuild(t, r) // 15 and 9 bytes once trimmed: not over width
 	cases := []struct {

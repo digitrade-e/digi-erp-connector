@@ -143,10 +143,9 @@ func (b *blockingReceiptWriter) Write(_ context.Context, req hasavshevet.Receipt
 	return &hasavshevet.ReceiptResult{ReceiptNumber: 1000, IdempotencyKey: req.IdempotencyKey, Written: true, Import: hasavshevet.ImportOK}, nil
 }
 
-const inFlightReceipt = `{"idempotencyKey":"3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17",
-"account":{"syncKey":"40217","name":"Levi"},"settledAt":"2026-10-08","amountMinor":694700,"currency":"ILS",
-"installments":1,"last4":"4580","confirmationCode":"0123456","providerTransactionId":"81122394",
-"details":[{"reference":"26004295","amountMinor":694700}]}`
+const inFlightReceipt = `{"idempotencyKey":"3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17","accountKey":"40217","settledDate":"2026-10-08",
+"amountMinor":694700,"installments":1,"cardIssuer":"2","cardBrand":"2","last4":"4580","confirmationCode":"0123456",
+"providerUid":"","remarks":"26004295","agentKey":"","name":"Levi","address":"","phone":"","email":""}`
 
 // A receipt being written when the service is stopped finishes, and its
 // caller gets the number: Stop waits for it before anything else.
@@ -207,11 +206,10 @@ func receiptCfg(t *testing.T) (config.Config, string, string) {
 func plantReserved(t *testing.T, dataDir, key string, n int64) {
 	t.Helper()
 	req := hasavshevet.ReceiptRequest{
-		IdempotencyKey: key,
-		Account:        hasavshevet.ReceiptAccount{SyncKey: "40217", Name: "Levi"},
-		SettledAt:      "2026-10-08", AmountMinor: 694700, Currency: "ILS", Installments: 1,
-		CardIssuer: "2", Last4: "4580", ConfirmationCode: "0123456", ProviderTransactionID: "81122394",
-		Details: []hasavshevet.ReceiptDetail{{Reference: "26004295", AmountMinor: 694700}},
+		IdempotencyKey: key, AccountKey: "40217", Name: "Levi",
+		SettledDate: "2026-10-08", AmountMinor: 694700, Installments: 1,
+		CardIssuer: "2", Last4: "4580", ConfirmationCode: "0123456", ProviderUID: "81122394",
+		Remarks: "26004295",
 	}
 	b, err := json.Marshal(map[string]any{
 		"key": key, "number": n, "state": "reserved", "request": req, "files": nil,

@@ -18,38 +18,71 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 )
 
-// wire.json is the backend's golden sendReceipt payload (backend
-// api/tests/Fixtures/receipt/wire.json, DIG-928), copied byte for byte. If the
-// backend changes it, re-copy it and update the hash — the two sides must
-// decode the same bytes.
+// wire.json and wire-blanks.json are the backend's REAL serializer output:
+// DIG-928's Model/Outbound/Receipt, jsonSerialize()d and encoded by Symfony
+// HttpClient exactly as the outbound path sends it (testdata/receipt/generate.php,
+// run in a throwaway backend-php container). They are the contract: the
+// connector must take these bytes as they are. If the backend's Receipt
+// changes, regenerate them and update the hashes — never hand-edit them.
 const (
-	wireFixture       = "testdata/receipt/wire.json"
-	wireFixtureSHA256 = "5afaee0926093c31cf3da5f738fd11cff77a0e7422399e9bdbcdaec76f76b665"
-	wireKey           = "3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17"
+	wireFixture             = "testdata/receipt/wire.json"
+	wireFixtureSHA256       = "9fe5d4d43c17d6f52f59b84c993b3e3ccfe9fe7683b05c9ff06ab3bc53c6e510"
+	wireKey                 = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	wireBlanksFixture       = "testdata/receipt/wire-blanks.json"
+	wireBlanksFixtureSHA256 = "fc62a904b67cba00862081c018db91bf867983e8ef78ad10c375dbb76cc069bc"
 )
+
+// receiptWireKeys is every key Receipt::jsonSerialize() emits, in its order,
+// with the JSON type it emits it as.
+var receiptWireKeys = []struct {
+	key  string
+	kind string // "string" or "int"
+}{
+	{"idempotencyKey", "string"},
+	{"accountKey", "string"},
+	{"settledDate", "string"},
+	{"amountMinor", "int"},
+	{"installments", "int"},
+	{"cardIssuer", "string"},
+	{"cardBrand", "string"},
+	{"last4", "string"},
+	{"confirmationCode", "string"},
+	{"providerUid", "string"},
+	{"remarks", "string"},
+	{"agentKey", "string"},
+	{"name", "string"},
+	{"address", "string"},
+	{"phone", "string"},
+	{"email", "string"},
+}
 
 // wireGolden is the fixture as read at package init, for table cases that
 // edit its text; wireBytes re-reads and re-checks it.
 var wireGolden, _ = os.ReadFile(wireFixture)
 
-func wireBytes(t *testing.T) []byte {
+func fixtureBytes(t *testing.T, path, sha string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(wireFixture)
+	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", wireFixture, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	sum := sha256.Sum256(b)
-	if got := hex.EncodeToString(sum[:]); got != wireFixtureSHA256 {
-		t.Fatalf("%s sha256 = %s; want %s — it is no longer the backend's golden payload", wireFixture, got, wireFixtureSHA256)
+	if got := hex.EncodeToString(sum[:]); got != sha {
+		t.Fatalf("%s sha256 = %s; want %s — it is no longer the backend's serializer output", path, got, sha)
 	}
 	return b
 }
 
+func wireBytes(t *testing.T) []byte { return fixtureBytes(t, wireFixture, wireFixtureSHA256) }
+
 // wireMap is the golden payload as a map, for cases that change one field.
+// Numbers stay json.Number so a re-encoded map keeps 693200 an integer.
 func wireMap(t *testing.T) map[string]any {
 	t.Helper()
+	d := json.NewDecoder(bytes.NewReader(wireBytes(t)))
+	d.UseNumber()
 	var m map[string]any
-	if err := json.Unmarshal(wireBytes(t), &m); err != nil {
+	if err := d.Decode(&m); err != nil {
 		t.Fatal(err)
 	}
 	return m
@@ -131,8 +164,8 @@ func decodeError(t *testing.T, rec *httptest.ResponseRecorder) errorBody {
 	return e
 }
 
-// The contract test: the backend's golden bytes decode, write a receipt, and
-// are answered with exactly the §2 response.
+// The contract test: the backend's own bytes decode, write a receipt, and are
+// answered with exactly the §4.6a response.
 func TestSendReceipt_GoldenWirePayloadWritesAndAnswers200(t *testing.T) {
 	in := newReceiptInstall(t, 1000)
 	h := NewSendReceiptHandler(in.writer, true, &noopLogger{})
@@ -183,44 +216,102 @@ func TestSendReceipt_GoldenWirePayloadWritesAndAnswers200(t *testing.T) {
 	}
 }
 
-func keysOf[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// Everything the backend may leave blank ("" — it never sends null), blank:
+// still a receipt, with F17 left blank and said so.
+func TestSendReceipt_BlankOptionalFieldsAreAReceipt(t *testing.T) {
+	in := newReceiptInstall(t, 7)
+	rec := postReceipt(t, NewSendReceiptHandler(in.writer, true, &noopLogger{}),
+		fixtureBytes(t, wireBlanksFixture, wireBlanksFixtureSHA256))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	return out
+	var body struct {
+		ReceiptNumber string   `json:"receiptNumber"`
+		Warnings      []string `json:"warnings"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.ReceiptNumber != "7" || len(body.Warnings) != 1 || !strings.Contains(body.Warnings[0], "F17") {
+		t.Errorf("body = %s; want receipt 7 with one F17 warning", rec.Body.String())
+	}
+}
+
+// The decoder takes EXACTLY the keys Receipt::jsonSerialize() emits — every
+// one, as the type it emits it as.
+func TestSendReceipt_DecoderMatchesTheBackendKeySet(t *testing.T) {
+	m := wireMap(t)
+	if len(m) != len(receiptWireKeys) {
+		t.Fatalf("fixture has %d keys; the contract table has %d", len(m), len(receiptWireKeys))
+	}
+	for _, k := range receiptWireKeys {
+		v, ok := m[k.key]
+		if !ok {
+			t.Fatalf("fixture lacks %q", k.key)
+		}
+		switch k.kind {
+		case "int":
+			if _, isNum := v.(json.Number); !isNum {
+				t.Errorf("fixture %s = %#v; the backend sends an int", k.key, v)
+			}
+		case "string":
+			if _, isStr := v.(string); !isStr {
+				t.Errorf("fixture %s = %#v; the backend sends a string", k.key, v)
+			}
+		}
+	}
+
+	for _, k := range receiptWireKeys {
+		k := k
+		wrong := any(json.Number("1"))
+		if k.kind == "int" {
+			wrong = "1"
+		}
+		for _, tc := range []struct {
+			name   string
+			mutate func(map[string]any)
+		}{
+			{"missing", func(m map[string]any) { delete(m, k.key) }},
+			{"null", func(m map[string]any) { m[k.key] = nil }},
+			{"wrong JSON type", func(m map[string]any) { m[k.key] = wrong }},
+		} {
+			t.Run(k.key+"/"+tc.name, func(t *testing.T) {
+				in := newReceiptInstall(t, 1000)
+				m := wireMap(t)
+				tc.mutate(m)
+				expect400(t, in, mustJSON(t, m), k.key)
+			})
+		}
+	}
+}
+
+func expect400(t *testing.T, in *receiptInstall, body []byte, field string) {
+	t.Helper()
+	rec := postReceipt(t, NewSendReceiptHandler(in.writer, true, &noopLogger{}), body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	e := decodeError(t, rec)
+	if e.Code != "VALIDATION_ERROR" {
+		t.Errorf("code = %q; want VALIDATION_ERROR", e.Code)
+	}
+	if got, _ := e.Details["field"].(string); got != field {
+		t.Errorf("details.field = %q; want %q (error %q)", got, field, e.Error)
+	}
+	if n := in.nextNumber(t); n != "1000" {
+		t.Errorf("a refused request moved the store to %s", n)
+	}
+	if docs, _ := filepath.Glob(filepath.Join(in.sendDir, "KUPAIN_*")); len(docs) != 0 {
+		t.Errorf("a refused request wrote %v", docs)
+	}
 }
 
 // Request faults are 400 VALIDATION_ERROR naming the field, and burn no number.
+// The backend stops a receipt on a 400 and retries anything else, so a 400
+// must mean "this content can never be written".
 func TestSendReceipt_RequestFaultsAre400NamingTheField(t *testing.T) {
-	set := func(path string, v any) func(map[string]any) {
-		return func(m map[string]any) {
-			parts := strings.Split(path, "/")
-			cur := m
-			for _, p := range parts[:len(parts)-1] {
-				if p == "details" {
-					cur = m["details"].([]any)[0].(map[string]any)
-					continue
-				}
-				cur = cur[p].(map[string]any)
-			}
-			cur[parts[len(parts)-1]] = v
-		}
+	set := func(key string, v any) func(map[string]any) {
+		return func(m map[string]any) { m[key] = v }
 	}
-	del := func(path string) func(map[string]any) {
-		return func(m map[string]any) {
-			parts := strings.Split(path, "/")
-			cur := m
-			for _, p := range parts[:len(parts)-1] {
-				if p == "details" {
-					cur = m["details"].([]any)[0].(map[string]any)
-					continue
-				}
-				cur = cur[p].(map[string]any)
-			}
-			delete(cur, parts[len(parts)-1])
-		}
-	}
+	golden := string(wireGolden)
 
 	for _, tc := range []struct {
 		name   string
@@ -228,110 +319,70 @@ func TestSendReceipt_RequestFaultsAre400NamingTheField(t *testing.T) {
 		raw    string // used instead of the mutated golden when set
 		field  string
 	}{
-		{"unknown top-level field", set("surprise", 1), "", "surprise"},
-		{"unknown account field", set("account/surprise", 1), "", "account/surprise"},
-		{"unknown detail field", set("details/surprise", 1), "", "details/surprise"},
-		// encoding/json would match these case-insensitively and fill the field.
-		{"key in another case", nil, strings.Replace(string(wireGolden), `"amountMinor": 694700`, `"AmountMinor": 694700`, 1), "AmountMinor"},
-		{"nested key in another case", nil, strings.Replace(string(wireGolden), `"syncKey"`, `"SYNCKEY"`, 1), "account/SYNCKEY"},
+		{"unknown field", set("surprise", json.Number("1")), "", "surprise"},
+		// The 10-11 nested wire is gone; its keys are unknown now.
+		{"old nested account", set("account", map[string]any{"syncKey": "1"}), "", "account"},
+		{"old currency", set("currency", "ILS"), "", "currency"},
+		{"old details", set("details", []any{}), "", "details"},
+		{"old firstPaymentMinor", set("firstPaymentMinor", nil), "", "firstPaymentMinor"},
+		// encoding/json would match this case-insensitively and fill the field.
+		{"key in another case", nil, strings.Replace(golden, `"amountMinor":693200`, `"AmountMinor":693200`, 1), "AmountMinor"},
+		{"key in another case, string", nil, strings.Replace(golden, `"last4"`, `"LAST4"`, 1), "LAST4"},
 		// encoding/json would keep the last of two keys.
-		{"duplicate top-level key", nil, strings.Replace(string(wireGolden), `"currency": "ILS",`, `"currency": "ILS", "currency": "USD",`, 1), "currency"},
-		{"duplicate nested key", nil, strings.Replace(string(wireGolden), `"city": "חיפה",`, `"city": "חיפה", "city": "תל אביב",`, 1), "account/city"},
-		{"duplicate key in a detail", nil, strings.Replace(string(wireGolden), `"reference": "19057",`, `"reference": "19057", "reference": "X",`, 1), "details/reference"},
-		{"body over 1 MiB", nil, `{"remarkSuffix":"` + strings.Repeat("a", 1<<20) + `"}`, "body"},
-		{"missing idempotencyKey", del("idempotencyKey"), "", "idempotencyKey"},
-		{"missing account", del("account"), "", "account"},
-		{"missing account/syncKey", del("account/syncKey"), "", "account/syncKey"},
-		{"missing account/name", del("account/name"), "", "account/name"},
-		{"null account/name", set("account/name", nil), "", "account/name"},
-		{"missing settledAt", del("settledAt"), "", "settledAt"},
-		{"missing amountMinor", del("amountMinor"), "", "amountMinor"},
-		{"missing currency", del("currency"), "", "currency"},
-		{"missing installments", del("installments"), "", "installments"},
-		{"missing last4", del("last4"), "", "last4"},
-		{"missing confirmationCode", del("confirmationCode"), "", "confirmationCode"},
-		{"missing providerTransactionId", del("providerTransactionId"), "", "providerTransactionId"},
-		{"blank providerTransactionId", set("providerTransactionId", "  "), "", "providerTransactionId"},
-		{"providerTransactionId over 64 bytes", set("providerTransactionId", strings.Repeat("9", 65)), "", "providerTransactionId"},
-		{"missing details", del("details"), "", "details"},
-		{"empty details", set("details", []any{}), "", "details"},
-		{"missing details/reference", del("details/reference"), "", "details/reference"},
-		{"missing details/amountMinor", del("details/amountMinor"), "", "details/amountMinor"},
-		{"amountMinor as a string", set("amountMinor", "694700"), "", "amountMinor"},
-		{"amountMinor fractional", set("amountMinor", 6947.5), "", "amountMinor"},
-		{"account/syncKey as a number", set("account/syncKey", 40217), "", "account/syncKey"},
-		{"details/amountMinor as a string", set("details/amountMinor", "x"), "", "details/amountMinor"},
-		{"account as a string", set("account", "x"), "", "account"},
-		{"currency USD", set("currency", "USD"), "", "currency"},
-		{"currency lower-case", set("currency", "ils"), "", "currency"},
+		{"duplicate key", nil, strings.Replace(golden, `"amountMinor":693200,`, `"amountMinor":693200,"amountMinor":1,`, 1), "amountMinor"},
+		{"duplicate string key", nil, strings.Replace(golden, `"cardBrand":"2",`, `"cardBrand":"2","cardBrand":"4",`, 1), "cardBrand"},
+		{"body over 1 MiB", nil, `{"remarks":"` + strings.Repeat("a", 1<<20) + `"}`, "body"},
+		{"malformed JSON", nil, `{"idempotencyKey":`, "body"},
+		{"trailing data", nil, golden + ` {}`, "body"},
+		{"not an object", nil, `[]`, "body"},
+
+		{"amountMinor as a string", set("amountMinor", "693200"), "", "amountMinor"},
+		{"amountMinor fractional", set("amountMinor", json.Number("6932.5")), "", "amountMinor"},
+		{"amountMinor with a zero fraction", set("amountMinor", json.Number("693200.0")), "", "amountMinor"},
+		{"amountMinor zero", set("amountMinor", json.Number("0")), "", "amountMinor"},
+		{"amountMinor negative", set("amountMinor", json.Number("-1")), "", "amountMinor"},
+		{"amountMinor over 99 999 999", set("amountMinor", json.Number("100000000")), "", "amountMinor"},
+		{"installments 0", set("installments", json.Number("0")), "", "installments"},
+		{"installments 3", set("installments", json.Number("3")), "", "installments"},
+		{"last4 as a number", set("last4", json.Number("4242")), "", "last4"},
 		{"last4 not digits", set("last4", "12a4"), "", "last4"},
-		{"last4 too short", set("last4", "123"), "", "last4"},
+		{"last4 too short", set("last4", "424"), "", "last4"},
+		{"last4 Arabic-Indic digits", set("last4", "١٢٣٤"), "", "last4"},
+		{"cardIssuer 3 digits", set("cardIssuer", "123"), "", "cardIssuer"},
+		{"cardIssuer not digits", set("cardIssuer", "V"), "", "cardIssuer"},
+		{"cardBrand not digits", set("cardBrand", "x"), "", "cardBrand"},
+		{"cardBrand padded", set("cardBrand", " 2"), "", "cardBrand"},
 		{"idempotencyKey not a UUID", set("idempotencyKey", "not-a-uuid"), "", "idempotencyKey"},
 		{"idempotencyKey a path", set("idempotencyKey", "../../../../etc/passwd"), "", "idempotencyKey"},
-		{"settledAt not a date", set("settledAt", "08/10/2026"), "", "settledAt"},
-		{"amountMinor zero", set("amountMinor", 0), "", "amountMinor"},
-		{"installments 100", set("installments", 100), "", "installments"},
-		{"account/name too wide", set("account/name", strings.Repeat("א", 51)), "", "account/name"},
-		{"malformed JSON", nil, `{"idempotencyKey":`, "body"},
-		{"trailing data", nil, `{} {}`, "body"},
-		{"not an object", nil, `[]`, "body"},
+		{"settledDate d/m/Y", set("settledDate", "14/10/2026"), "", "settledDate"},
+		{"settledDate not a day", set("settledDate", "2026-02-30"), "", "settledDate"},
+		{"settledDate with a time", set("settledDate", "2026-10-14T00:00:00"), "", "settledDate"},
+		{"accountKey blank", set("accountKey", "  "), "", "accountKey"},
+		{"accountKey 16 bytes", set("accountKey", strings.Repeat("9", 16)), "", "accountKey"},
+		{"name blank", set("name", ""), "", "name"},
+		{"name 51 Hebrew letters", set("name", strings.Repeat("א", 51)), "", "name"},
+		{"name in Arabic", set("name", "شركة"), "", "name"},
+		{"name with an emoji", set("name", "בל\"פ 🙂"), "", "name"},
+		{"confirmationCode blank", set("confirmationCode", ""), "", "confirmationCode"},
+		{"confirmationCode 10 bytes", set("confirmationCode", "0123456789"), "", "confirmationCode"},
+		{"providerUid 251 bytes", set("providerUid", strings.Repeat("U", 251)), "", "providerUid"},
+		{"remarks blank", set("remarks", " "), "", "remarks"},
+		{"remarks 251 bytes", set("remarks", strings.Repeat("ר", 251)), "", "remarks"},
+		{"agentKey 10 bytes", set("agentKey", strings.Repeat("7", 10)), "", "agentKey"},
+		{"address 51 bytes", set("address", strings.Repeat("a", 51)), "", "address"},
+		{"phone 51 bytes", set("phone", strings.Repeat("0", 51)), "", "phone"},
+		{"email 51 bytes", set("email", strings.Repeat("e", 51)), "", "email"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := newReceiptInstall(t, 1000)
-			h := NewSendReceiptHandler(in.writer, true, &noopLogger{})
 			body := []byte(tc.raw)
 			if tc.raw == "" {
 				m := wireMap(t)
 				tc.mutate(m)
 				body = mustJSON(t, m)
 			}
-
-			rec := postReceipt(t, h, body)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d; want 400 (body %s)", rec.Code, rec.Body.String())
-			}
-			e := decodeError(t, rec)
-			if e.Code != "VALIDATION_ERROR" {
-				t.Errorf("code = %q; want VALIDATION_ERROR", e.Code)
-			}
-			if got, _ := e.Details["field"].(string); got != tc.field {
-				t.Errorf("details.field = %q; want %q (error %q)", got, tc.field, e.Error)
-			}
-			if n := in.nextNumber(t); n != "1000" {
-				t.Errorf("a refused request moved the store to %s", n)
-			}
-			if docs, _ := filepath.Glob(filepath.Join(in.sendDir, "KUPAIN_*")); len(docs) != 0 {
-				t.Errorf("a refused request wrote %v", docs)
-			}
+			expect400(t, in, body, tc.field)
 		})
-	}
-}
-
-// Nullable fields accept null and absence alike.
-func TestSendReceipt_NullableFieldsMayBeNullOrAbsent(t *testing.T) {
-	for _, field := range []string{"email", "firstPaymentMinor", "cardBrand", "cardIssuer", "authorizationRef", "remarkSuffix"} {
-		for _, absent := range []bool{false, true} {
-			in := newReceiptInstall(t, 1)
-			m := wireMap(t)
-			if absent {
-				delete(m, field)
-			} else {
-				m[field] = nil
-			}
-			rec := postReceipt(t, NewSendReceiptHandler(in.writer, true, &noopLogger{}), mustJSON(t, m))
-			if rec.Code != http.StatusOK {
-				t.Errorf("%s absent=%v: status = %d (%s); want 200", field, absent, rec.Code, rec.Body.String())
-			}
-		}
-	}
-	in := newReceiptInstall(t, 1)
-	m := wireMap(t)
-	acc := m["account"].(map[string]any)
-	for _, f := range []string{"address", "city", "phone", "agentSyncKey"} {
-		acc[f] = nil
-	}
-	if rec := postReceipt(t, NewSendReceiptHandler(in.writer, true, &noopLogger{}), mustJSON(t, m)); rec.Code != http.StatusOK {
-		t.Errorf("null account extras: status = %d (%s); want 200", rec.Code, rec.Body.String())
 	}
 }
 
@@ -446,20 +497,26 @@ func TestSendReceipt_MapsTheWireToTheWriter(t *testing.T) {
 	if rec := postReceipt(t, NewSendReceiptHandler(f, true, &noopLogger{}), wireBytes(t)); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
 	}
-	got := f.gotReq
-	if got.IdempotencyKey != wireKey || got.Account.SyncKey != "40217" || got.Account.Name != `בנייני לוי בע"מ` ||
-		got.Account.Address != "הרצל 1" || got.Account.City != "חיפה" || got.Account.Phone != "04-8123456" ||
-		got.Account.AgentSyncKey != "7" || got.Email != "dana@levi-building.example" || got.SettledAt != "2026-10-08" ||
-		got.AmountMinor != 694700 || got.Currency != "ILS" || got.Installments != 1 || got.FirstPaymentMinor != nil ||
-		got.CardBrand != "2" || got.CardIssuer != "2" || got.Last4 != "4580" || got.ConfirmationCode != "0123456" ||
-		got.AuthorizationRef != "26100809142708822928912" || got.ProviderTransactionID != "81122394" ||
-		got.RemarkSuffix != "2824019" {
-		t.Errorf("writer got %+v", got)
+	want := hasavshevet.ReceiptRequest{
+		IdempotencyKey:   wireKey,
+		AccountKey:       "30021",
+		SettledDate:      "2026-10-14",
+		AmountMinor:      693200,
+		Installments:     1,
+		CardIssuer:       "2",
+		CardBrand:        "2",
+		Last4:            "4242",
+		ConfirmationCode: "0505293",
+		ProviderUID:      "25101412345678901234567",
+		Remarks:          "26004295, 19057",
+		AgentKey:         "7",
+		Name:             `בל"פ`,
+		Address:          "הרצל 1",
+		Phone:            "03-5555555",
+		Email:            "pay@example.test",
 	}
-	if len(got.Details) != 3 || got.Details[0] != (hasavshevet.ReceiptDetail{Reference: "26004295", AmountMinor: 710700}) ||
-		got.Details[1] != (hasavshevet.ReceiptDetail{Reference: "19057", AmountMinor: -17500}) ||
-		got.Details[2] != (hasavshevet.ReceiptDetail{Reference: "OI-77", AmountMinor: 1500}) {
-		t.Errorf("details = %+v", got.Details)
+	if f.gotReq != want {
+		t.Errorf("writer got  %+v\nwant        %+v", f.gotReq, want)
 	}
 }
 
@@ -468,10 +525,10 @@ func TestSendReceipt_MapsTheWireToTheWriter(t *testing.T) {
 func TestSendReceipt_UnbuildableStoredReceiptIs500(t *testing.T) {
 	in := newReceiptInstall(t, 1000)
 	stored := `{"key":"00000000-0000-4000-8000-000000000001","number":1000,"state":"reserved",` +
-		`"request":{"idempotencyKey":"00000000-0000-4000-8000-000000000001","account":{"syncKey":"1","name":"n","address":"","city":"","phone":"","agentSyncKey":""},` +
-		`"email":"","settledAt":"2026-10-08","amountMinor":100,"currency":"ILS","installments":1,"firstPaymentMinor":null,` +
-		`"cardBrand":"","cardIssuer":"","last4":"12a4","confirmationCode":"1","authorizationRef":"","providerTransactionId":"1",` +
-		`"details":[{"reference":"r","amountMinor":100}],"remarkSuffix":""},"files":null,"import":"not_run","reservedAt":"2026-10-11T00:00:00Z"}`
+		`"request":{"idempotencyKey":"00000000-0000-4000-8000-000000000001","accountKey":"1","settledDate":"2026-10-08",` +
+		`"amountMinor":100,"installments":1,"cardIssuer":"","cardBrand":"","last4":"12a4","confirmationCode":"1",` +
+		`"providerUid":"","remarks":"r","agentKey":"","name":"n","address":"","phone":"","email":""},` +
+		`"files":null,"import":"not_run","reservedAt":"2026-10-11T00:00:00Z"}`
 	idx := filepath.Join(in.dataDir, "receipts", "index", "00000000-0000-4000-8000-000000000001.json")
 	if err := os.MkdirAll(filepath.Dir(idx), 0o755); err != nil {
 		t.Fatal(err)
@@ -492,4 +549,12 @@ func TestSendReceipt_UnbuildableStoredReceiptIs500(t *testing.T) {
 	if e := decodeError(t, rec); e.Code != "RECEIPT_STORED_REQUEST_INVALID" {
 		t.Errorf("code = %q; want RECEIPT_STORED_REQUEST_INVALID", e.Code)
 	}
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

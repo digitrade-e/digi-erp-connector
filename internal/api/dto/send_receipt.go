@@ -1,46 +1,30 @@
 package dto
 
-// SendReceiptRequest is the JSON body of POST /api/sendReceipt — plan 005 §2,
-// the one field table the backend's projector, erp-manager's mapping and this
-// decoder share. It is decoded strictly: an unknown field, a wrong type or
-// trailing data is a 400.
+// SendReceiptRequest is the JSON body of POST /api/sendReceipt — plan 056
+// §4.6a, flat: exactly the keys the backend's Receipt::jsonSerialize() emits,
+// as the types it emits them as. It is decoded strictly: an unknown key, a
+// duplicate or wrong-case key, a wrong type or trailing data is a 400.
 //
-// Every field is a pointer so a missing required field can be told apart from
-// a zero or an empty string. For the nullable ones (marked "null ok") JSON
-// null and absence both mean "none".
+// Every field is a pointer so a missing key can be told apart from a zero or
+// an empty string. The backend always sends all sixteen and never sends null,
+// so a missing key or a null is a 400 too; an optional value comes as "".
 type SendReceiptRequest struct {
-	IdempotencyKey        *string              `json:"idempotencyKey"` // canonical UUID
-	Account               *SendReceiptAccount  `json:"account"`
-	Email                 *string              `json:"email"`     // null ok
-	SettledAt             *string              `json:"settledAt"` // YYYY-MM-DD, Asia/Jerusalem day
-	AmountMinor           *int64               `json:"amountMinor"`
-	Currency              *string              `json:"currency"` // must be ILS
-	Installments          *int                 `json:"installments"`
-	FirstPaymentMinor     *int64               `json:"firstPaymentMinor"` // null ok
-	CardBrand             *string              `json:"cardBrand"`         // null ok; raw HYP Brand
-	CardIssuer            *string              `json:"cardIssuer"`        // null ok; raw HYP Issuer
-	Last4                 *string              `json:"last4"`
-	ConfirmationCode      *string              `json:"confirmationCode"` // HYP ACode
-	AuthorizationRef      *string              `json:"authorizationRef"` // null ok; HYP UID
-	ProviderTransactionID *string              `json:"providerTransactionId"`
-	Details               []*SendReceiptDetail `json:"details"`
-	RemarkSuffix          *string              `json:"remarkSuffix"` // null ok
-}
-
-// SendReceiptAccount is the customer block, frozen in the order snapshot.
-type SendReceiptAccount struct {
-	SyncKey      *string `json:"syncKey"`
-	Name         *string `json:"name"`
-	Address      *string `json:"address"`      // null ok
-	City         *string `json:"city"`         // null ok
-	Phone        *string `json:"phone"`        // null ok
-	AgentSyncKey *string `json:"agentSyncKey"` // null ok
-}
-
-// SendReceiptDetail is one invoice the receipt pays.
-type SendReceiptDetail struct {
-	Reference   *string `json:"reference"`
-	AmountMinor *int64  `json:"amountMinor"` // signed: a credit is negative
+	IdempotencyKey   *string `json:"idempotencyKey"` // the payment's uuid
+	AccountKey       *string `json:"accountKey"`
+	SettledDate      *string `json:"settledDate"` // YYYY-MM-DD, Asia/Jerusalem day
+	AmountMinor      *int64  `json:"amountMinor"`
+	Installments     *int    `json:"installments"`
+	CardIssuer       *string `json:"cardIssuer"` // raw HYP Issuer, "" when none
+	CardBrand        *string `json:"cardBrand"`  // raw HYP Brand, "" when none
+	Last4            *string `json:"last4"`
+	ConfirmationCode *string `json:"confirmationCode"` // HYP ACode
+	ProviderUID      *string `json:"providerUid"`      // HYP UID
+	Remarks          *string `json:"remarks"`          // the invoices paid
+	AgentKey         *string `json:"agentKey"`
+	Name             *string `json:"name"`
+	Address          *string `json:"address"`
+	Phone            *string `json:"phone"`
+	Email            *string `json:"email"`
 }
 
 // SendReceiptResponse is the 200 body. Exactly these five keys — the backend

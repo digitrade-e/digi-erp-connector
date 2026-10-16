@@ -312,10 +312,11 @@ func TestReceiptWriter_InvalidInputBurnsNoNumber(t *testing.T) {
 		field string // FieldError field; "" = CardNamesConfigError
 	}{
 		{name: "bad last4", edit: func(r *ReceiptRequest) { r.Last4 = "12a4" }, field: "last4"},
-		{name: "missing account name", edit: func(r *ReceiptRequest) { r.Account.Name = "" }, field: "account/name"},
-		{name: "arabic", edit: func(r *ReceiptRequest) { r.Account.City = "حيفا" }, field: "account/city"},
+		{name: "missing name", edit: func(r *ReceiptRequest) { r.Name = "" }, field: "name"},
+		{name: "arabic", edit: func(r *ReceiptRequest) { r.Address = "حيفا" }, field: "address"},
 		{name: "amount too large", edit: func(r *ReceiptRequest) { r.AmountMinor = 100000000 }, field: "amountMinor"},
-		{name: "no details", edit: func(r *ReceiptRequest) { r.Details = nil }, field: "details"},
+		{name: "no remarks", edit: func(r *ReceiptRequest) { r.Remarks = "" }, field: "remarks"},
+		{name: "three installments", edit: func(r *ReceiptRequest) { r.Installments = 3 }, field: "installments"},
 		{name: "key not a uuid", edit: func(r *ReceiptRequest) { r.IdempotencyKey = "not-a-uuid" }, field: "idempotencyKey"},
 		{name: "key traversal", edit: func(r *ReceiptRequest) { r.IdempotencyKey = "../../../../etc/passwd" }, field: "idempotencyKey"},
 		{name: "key missing", edit: func(r *ReceiptRequest) { r.IdempotencyKey = "" }, field: "idempotencyKey"},

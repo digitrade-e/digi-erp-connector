@@ -26,12 +26,15 @@ import (
 //     position after the last separator, which is what the legacy wrote;
 //   - LF line endings everywhere, Windows-1255.
 //
-// What is NOT legacy, by decision (plan 005 §2/§3 C1): values that do not fit
-// or cannot be encoded are refused (the legacy truncated and transliterated),
-// F3 is the connector's receipt number (the legacy used its own row id), F26
-// carries the city (the legacy always left it blank), and an unknown card code
-// leaves F17 blank with a warning (the legacy wrote "JCB"; see the card-name
-// table below for why that fallback is rejected).
+// What is NOT legacy, by decision (plan 056 §4.6a / §5.5.3 C1): values that do
+// not fit or cannot be encoded are refused (the legacy truncated and
+// transliterated), F3 is the connector's receipt number (the legacy used its
+// own row id), and an unknown card code leaves F17 blank with a warning (the
+// legacy wrote "JCB"; see the card-name table below for why that fallback is
+// rejected). F7 is the backend's remarks as sent — the backend builds the
+// invoice list and its cut, the connector only writes it. F4 "33", F26 (city,
+// blank) and F29 (first payment, blank) are the connector's, as the legacy
+// wrote them.
 
 // FieldError names the wire field whose value cannot be written. The route
 // answers it as 400 VALIDATION_ERROR with details.field = Field.
@@ -42,47 +45,29 @@ type FieldError struct {
 
 func (e *FieldError) Error() string { return e.Field + ": " + e.Reason }
 
-// ReceiptRequest is the sendReceipt wire body (plan 005 §2), decoded as-is.
-// Amounts are integer agorot. Nullable wire strings are plain strings: a JSON
-// null decodes to "", and every such field treats "" as absent. Only
-// FirstPaymentMinor is a pointer, because 0 is invalid and null is not.
+// ReceiptRequest is the sendReceipt wire body (plan 056 §4.6a): flat, exactly
+// the keys the backend's Receipt::jsonSerialize() emits. Amounts are integer
+// agorot. The JSON tags are the wire keys, and the same shape is stored in the
+// idempotency index so a reserved receipt can be finished later.
 //
-// IdempotencyKey, Currency, ProviderTransactionID and Details[].AmountMinor are
-// not written to the record; they are validated and used by the route and the
-// idempotency index, not here.
+// IdempotencyKey is not written to the record; the writer and the index use it.
 type ReceiptRequest struct {
-	IdempotencyKey        string          `json:"idempotencyKey"`
-	Account               ReceiptAccount  `json:"account"`
-	Email                 string          `json:"email"`
-	SettledAt             string          `json:"settledAt"` // YYYY-MM-DD, Asia/Jerusalem day
-	AmountMinor           int64           `json:"amountMinor"`
-	Currency              string          `json:"currency"`
-	Installments          int             `json:"installments"`
-	FirstPaymentMinor     *int64          `json:"firstPaymentMinor"`
-	CardBrand             string          `json:"cardBrand"`  // raw HYP Brand code
-	CardIssuer            string          `json:"cardIssuer"` // raw HYP Issuer code
-	Last4                 string          `json:"last4"`
-	ConfirmationCode      string          `json:"confirmationCode"` // HYP ACode
-	AuthorizationRef      string          `json:"authorizationRef"` // HYP UID
-	ProviderTransactionID string          `json:"providerTransactionId"`
-	Details               []ReceiptDetail `json:"details"`
-	RemarkSuffix          string          `json:"remarkSuffix"`
-}
-
-// ReceiptAccount is the customer block of a ReceiptRequest.
-type ReceiptAccount struct {
-	SyncKey      string `json:"syncKey"`
-	Name         string `json:"name"`
-	Address      string `json:"address"`
-	City         string `json:"city"`
-	Phone        string `json:"phone"`
-	AgentSyncKey string `json:"agentSyncKey"`
-}
-
-// ReceiptDetail is one invoice the receipt pays.
-type ReceiptDetail struct {
-	Reference   string `json:"reference"`
-	AmountMinor int64  `json:"amountMinor"` // signed; audit only
+	IdempotencyKey   string `json:"idempotencyKey"`
+	AccountKey       string `json:"accountKey"`  // F2
+	SettledDate      string `json:"settledDate"` // F5, F6: YYYY-MM-DD, the Asia/Jerusalem day
+	AmountMinor      int64  `json:"amountMinor"` // F12
+	Installments     int    `json:"installments"`
+	CardIssuer       string `json:"cardIssuer"`       // F17, first: raw HYP Issuer, ^\d{0,2}$
+	CardBrand        string `json:"cardBrand"`        // F17, else: raw HYP Brand, ^\d{0,2}$
+	Last4            string `json:"last4"`            // F28
+	ConfirmationCode string `json:"confirmationCode"` // F22 and F43: HYP ACode
+	ProviderUID      string `json:"providerUid"`      // F23: HYP UID
+	Remarks          string `json:"remarks"`          // F7: the invoices paid, built by the backend
+	AgentKey         string `json:"agentKey"`         // F20
+	Name             string `json:"name"`             // F24
+	Address          string `json:"address"`          // F25
+	Phone            string `json:"phone"`            // F27
+	Email            string `json:"email"`            // F42
 }
 
 // kupainField is one line of KUPAIN.prm. Width 0 means declared but absent.
@@ -142,9 +127,6 @@ const (
 	kupainReceiptType  = "33" // F4, as the legacy wrote for card receipts
 	maxAmountMinor     = 99999999
 	maxReceiptNumber   = 999999999 // F3 is 9 digits
-	maxReferenceBytes  = 32
-	maxSuffixBytes     = 40
-	maxCardCodeBytes   = 32
 )
 
 func kupainWidth(num int) int {
@@ -195,7 +177,7 @@ func generateKUPAINDOC(req ReceiptRequest, receiptNumber int64, cardNames Receip
 
 // buildKUPAINRecord builds the 1259-byte record for one receipt. It never
 // truncates and never substitutes: any value that does not fit its field or
-// cannot be written in Windows-1255 is a *FieldError naming the wire field.
+// cannot be written in Windows-1255 is a *FieldError naming the wire key.
 // An unusable card-name override is a *CardNamesConfigError instead.
 //
 // The second result is the receipt's warnings — things written blank that a
@@ -227,10 +209,10 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	}
 
 	// F2 customer key
-	if err := required("account/syncKey", req.Account.SyncKey); err != nil {
+	if err := required("accountKey", req.AccountKey); err != nil {
 		return nil, nil, err
 	}
-	if err := putTrimmed(2, "account/syncKey", req.Account.SyncKey); err != nil {
+	if err := putTrimmed(2, "accountKey", req.AccountKey); err != nil {
 		return nil, nil, err
 	}
 
@@ -246,23 +228,25 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	}
 
 	// F5 receipt date, F6 value date: the settlement day, dd/mm/YYYY
-	day, err := time.Parse("2006-01-02", req.SettledAt)
+	day, err := time.Parse("2006-01-02", req.SettledDate)
 	if err != nil {
-		return nil, nil, &FieldError{Field: "settledAt", Reason: fmt.Sprintf("must be a YYYY-MM-DD date, got %q", req.SettledAt)}
+		return nil, nil, &FieldError{Field: "settledDate", Reason: fmt.Sprintf("must be a YYYY-MM-DD date, got %q", req.SettledDate)}
 	}
-	if err := put(5, "settledAt", day.Format("02/01/2006")); err != nil {
+	if err := put(5, "settledDate", day.Format("02/01/2006")); err != nil {
 		return nil, nil, err
 	}
 	vals[6] = vals[5]
 
-	// F7 details: invoice references joined ", ", then " | {remarkSuffix}"
-	remark, err := kupainRemark(req.Details, req.RemarkSuffix)
-	if err != nil {
+	// F7 details: the invoices paid, as the backend built them
+	if err := required("remarks", req.Remarks); err != nil {
 		return nil, nil, err
 	}
-	vals[7] = remark
+	if err := put(7, "remarks", req.Remarks); err != nil {
+		return nil, nil, err
+	}
 
-	// F12 amount, F16 installments, F29 first payment
+	// F12 amount, F16 installments. F29 (first payment) stays blank: one
+	// installment only, so there is nothing to split.
 	amount, err := formatAmount(req.AmountMinor)
 	if err != nil {
 		return nil, nil, err
@@ -270,23 +254,19 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if err := put(12, "amountMinor", amount); err != nil {
 		return nil, nil, err
 	}
-	first, err := firstPayment(req.AmountMinor, req.Installments, req.FirstPaymentMinor)
-	if err != nil {
-		return nil, nil, err
+	if req.Installments != 1 {
+		return nil, nil, &FieldError{Field: "installments", Reason: fmt.Sprintf("must be 1, got %d", req.Installments)}
 	}
-	if err := put(16, "installments", strconv.Itoa(req.Installments)); err != nil {
-		return nil, nil, err
-	}
-	if err := put(29, "firstPaymentMinor", first); err != nil {
+	if err := put(16, "installments", "1"); err != nil {
 		return nil, nil, err
 	}
 
 	// F17 card name, from the issuer or else the brand
-	if _, err := encodeField("cardIssuer", req.CardIssuer, maxCardCodeBytes); err != nil {
-		return nil, nil, err
+	if !isCardCode(req.CardIssuer) {
+		return nil, nil, &FieldError{Field: "cardIssuer", Reason: fmt.Sprintf("must be 0-2 digits, got %q", req.CardIssuer)}
 	}
-	if _, err := encodeField("cardBrand", req.CardBrand, maxCardCodeBytes); err != nil {
-		return nil, nil, err
+	if !isCardCode(req.CardBrand) {
+		return nil, nil, &FieldError{Field: "cardBrand", Reason: fmt.Sprintf("must be 0-2 digits, got %q", req.CardBrand)}
 	}
 	name, from, warning := cardName(req.CardIssuer, req.CardBrand, cardNames)
 	if warning != "" {
@@ -304,8 +284,8 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 		return nil, nil, &CardNamesConfigError{Table: from, Name: name, Reason: reason}
 	}
 
-	// F20 agent, F22 confirmation code, F23 authorization ref
-	if err := putTrimmed(20, "account/agentSyncKey", req.Account.AgentSyncKey); err != nil {
+	// F20 agent, F22 confirmation code, F23 provider UID
+	if err := putTrimmed(20, "agentKey", req.AgentKey); err != nil {
 		return nil, nil, err
 	}
 	if err := required("confirmationCode", req.ConfirmationCode); err != nil {
@@ -314,22 +294,21 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if err := putTrimmed(22, "confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
-	if err := put(23, "authorizationRef", req.AuthorizationRef); err != nil {
+	if err := put(23, "providerUid", req.ProviderUID); err != nil {
 		return nil, nil, err
 	}
 
-	// F24-F27 account
-	if err := required("account/name", req.Account.Name); err != nil {
+	// F24, F25, F27 account; F26 (city) stays blank
+	if err := required("name", req.Name); err != nil {
 		return nil, nil, err
 	}
 	for _, f := range []struct {
 		num         int
 		wire, value string
 	}{
-		{24, "account/name", req.Account.Name},
-		{25, "account/address", req.Account.Address},
-		{26, "account/city", req.Account.City},
-		{27, "account/phone", req.Account.Phone},
+		{24, "name", req.Name},
+		{25, "address", req.Address},
+		{27, "phone", req.Phone},
 	} {
 		if err := put(f.num, f.wire, f.value); err != nil {
 			return nil, nil, err
@@ -357,7 +336,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 		if f.width == 0 {
 			continue
 		}
-		v := vals[f.num] // unset fields (8-11, 13-15, 18, 19, 21) are blank
+		v := vals[f.num] // unset fields (8-11, 13-15, 18, 19, 21, 26, 29) are blank
 		rec = append(rec, v...)
 		rec = append(rec, bytes.Repeat([]byte{' '}, f.width-len(v)+1)...)
 	}
@@ -365,43 +344,6 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 		panic(fmt.Sprintf("kupain: record is %d bytes, want %d", len(rec), kupainRecordLength)) // table bug; covered by tests
 	}
 	return rec, warnings, nil
-}
-
-// kupainRemark builds F7: references joined ", ", then " | suffix" when a
-// suffix is given (the legacy wrote "{order} | 2824019").
-func kupainRemark(details []ReceiptDetail, suffix string) ([]byte, error) {
-	if len(details) == 0 {
-		return nil, &FieldError{Field: "details", Reason: "at least one invoice reference is required"}
-	}
-	var remark []byte
-	for i, d := range details {
-		if strings.TrimSpace(normalize1255(d.Reference)) == "" {
-			return nil, &FieldError{Field: "details/reference", Reason: fmt.Sprintf("is required (details[%d])", i)}
-		}
-		ref, err := encodeField("details/reference", d.Reference, maxReferenceBytes)
-		if err != nil {
-			return nil, err
-		}
-		if i > 0 {
-			remark = append(remark, ", "...)
-		}
-		remark = append(remark, ref...)
-	}
-	if suffix != "" {
-		s, err := encodeField("remarkSuffix", suffix, maxSuffixBytes)
-		if err != nil {
-			return nil, err
-		}
-		remark = append(remark, " | "...)
-		remark = append(remark, s...)
-	}
-	if width := kupainWidth(7); len(remark) > width {
-		return nil, &FieldError{
-			Field:  "details",
-			Reason: fmt.Sprintf("the joined references and remarkSuffix are %d bytes, at most %d fit in field 7", len(remark), width),
-		}
-	}
-	return remark, nil
 }
 
 // formatAmount renders agorot as shekels with two decimals: 710700 → "7107.00",
@@ -413,25 +355,18 @@ func formatAmount(minor int64) (string, error) {
 	return fmt.Sprintf("%d.%02d", minor/100, minor%100), nil
 }
 
-// firstPayment renders F29. With one installment it is blank. Otherwise it is
-// the caller's firstPaymentMinor when given, else the remainder rule: every
-// payment is amount/n rounded down and the first one carries what is left
-// (1000 in 3 → 334, 333, 333).
-func firstPayment(amountMinor int64, installments int, given *int64) (string, error) {
-	if installments < 1 || installments > 99 {
-		return "", &FieldError{Field: "installments", Reason: fmt.Sprintf("must be 1-99, got %d", installments)}
+// isCardCode is the wire's ^\d{0,2}$ for cardIssuer and cardBrand: ASCII
+// digits only, no spaces.
+func isCardCode(s string) bool {
+	if len(s) > 2 {
+		return false
 	}
-	if given != nil && (*given < 1 || *given > amountMinor) {
-		return "", &FieldError{Field: "firstPaymentMinor", Reason: fmt.Sprintf("must be 1-%d (the amount), got %d", amountMinor, *given)}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
 	}
-	if installments == 1 {
-		return "", nil
-	}
-	first := amountMinor - (amountMinor/int64(installments))*int64(installments-1)
-	if given != nil {
-		first = *given
-	}
-	return formatAmount(first)
+	return true
 }
 
 func isFourASCIIDigits(s string) bool {
@@ -513,14 +448,30 @@ var (
 	}
 )
 
+// lookupCardName finds a code's name, the override first. Codes compare as
+// numbers, as the legacy's PHP == did for these numeric strings: "02" is 2,
+// whether it is the request's code or an override's key.
 func lookupCardName(code string, override, builtin map[string]string) string {
+	code = canonicalCardCode(code)
 	if code == "" {
 		return ""
 	}
-	if v, ok := override[code]; ok && v != "" {
-		return v
+	for k, v := range override {
+		if v != "" && canonicalCardCode(k) == code {
+			return v
+		}
 	}
 	return builtin[code]
+}
+
+// canonicalCardCode is a card code without surrounding space or leading
+// zeros ("02" → "2", "00" → "0"); text that is not a number stays as it is.
+func canonicalCardCode(code string) string {
+	code = strings.TrimSpace(code)
+	if n, err := strconv.Atoi(code); err == nil && n >= 0 {
+		return strconv.Itoa(n)
+	}
+	return code
 }
 
 // cardName returns the F17 card name for an issuer/brand pair — issuer first,

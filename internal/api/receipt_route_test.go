@@ -56,12 +56,9 @@ func receiptConfig(t *testing.T) config.Config {
 	return cfg
 }
 
-const validReceiptBody = `{"idempotencyKey":"3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17",
-"account":{"syncKey":"40217","name":"Levi","address":null,"city":null,"phone":null,"agentSyncKey":null},
-"email":null,"settledAt":"2026-10-08","amountMinor":694700,"currency":"ILS","installments":1,
-"firstPaymentMinor":null,"cardBrand":"2","cardIssuer":"2","last4":"4580","confirmationCode":"0123456",
-"authorizationRef":null,"providerTransactionId":"81122394","details":[{"reference":"26004295","amountMinor":694700}],
-"remarkSuffix":null}`
+const validReceiptBody = `{"idempotencyKey":"3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17","accountKey":"40217","settledDate":"2026-10-08",
+"amountMinor":694700,"installments":1,"cardIssuer":"2","cardBrand":"2","last4":"4580","confirmationCode":"0123456",
+"providerUid":"","remarks":"26004295","agentKey":"","name":"Levi","address":"","phone":"","email":""}`
 
 // Without the receipt keys the route exists, needs a credential like every
 // other, and answers 503 — the v1.0.17 surface plus this route.
