@@ -402,17 +402,29 @@ func (e *CardNamesConfigError) Error() string {
 }
 
 // ValidateReceiptCardNames checks a configured override table: every code is
-// non-blank, and every name can be written in Windows-1255 within F17's width.
+// non-blank, no two keys of one table name the same code (codes compare as
+// numbers, so "6" and "06" are one — two names for it would make F17 depend on
+// map order), and every name can be written in Windows-1255 within F17's width.
 func ValidateReceiptCardNames(names ReceiptCardNames) error {
 	width := kupainWidth(17)
 	for _, table := range []struct {
 		label string
 		m     map[string]string
 	}{{"issuer", names.Issuer}, {"brand", names.Brand}} {
+		seen := make(map[string]string, len(table.m))
 		for code, name := range table.m {
 			if strings.TrimSpace(code) == "" {
 				return fmt.Errorf("receipt card names: blank %s code", table.label)
 			}
+			canon := canonicalCardCode(code)
+			if other, dup := seen[canon]; dup {
+				a, b := other, code
+				if b < a {
+					a, b = b, a // the same message whatever the map order
+				}
+				return fmt.Errorf("receipt card names: %s keys %q and %q are the same code (%s); keep one", table.label, a, b, canon)
+			}
+			seen[canon] = code
 			if name == "" {
 				continue
 			}

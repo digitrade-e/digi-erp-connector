@@ -726,3 +726,28 @@ func TestKUPAINRecord_IdentifiersAreTrimmed(t *testing.T) {
 		}
 	}
 }
+
+// Two keys for one code ("6" and "06") would make F17 depend on map order —
+// a different card name from run to run. The table is refused instead.
+func TestValidateReceiptCardNames_RefusesTwoKeysForOneCode(t *testing.T) {
+	for _, names := range []ReceiptCardNames{
+		{Issuer: map[string]string{"6": "מקס", "06": "לאומי קארד"}},
+		{Brand: map[string]string{"1": "מאסטרקארד", " 01 ": "מאסטרקארד"}},
+		{Issuer: map[string]string{"6": "", "006": "מקס"}},
+	} {
+		err := ValidateReceiptCardNames(names)
+		if err == nil {
+			t.Errorf("%v accepted; want two keys for one code refused", names)
+			continue
+		}
+		if !strings.Contains(err.Error(), "same code") {
+			t.Errorf("error %q does not say the keys name the same code", err)
+		}
+	}
+	// One code in each table is not a clash: issuer 6 and brand 6 are different cards.
+	if err := ValidateReceiptCardNames(ReceiptCardNames{
+		Issuer: map[string]string{"6": "מקס"}, Brand: map[string]string{"06": "דיינרס"},
+	}); err != nil {
+		t.Errorf("issuer and brand sharing a code refused: %v", err)
+	}
+}
