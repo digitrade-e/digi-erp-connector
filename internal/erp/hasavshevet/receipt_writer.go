@@ -254,7 +254,14 @@ func (w *ReceiptWriter) lockDataLocked() error {
 // take over. The writer can be used again: its next Write recovers (and locks)
 // first. The OS releases the lock anyway when the process exits.
 func (w *ReceiptWriter) Close() error {
-	if err := lockImport(context.Background()); err != nil {
+	return w.CloseContext(context.Background())
+}
+
+// CloseContext is Close that stops waiting for the import lock when ctx ends —
+// a hung order import holds it — returning ctx's error and leaving the data
+// lock to be released at process exit.
+func (w *ReceiptWriter) CloseContext(ctx context.Context) error {
+	if err := lockImport(ctx); err != nil {
 		return err
 	}
 	defer unlockImport()

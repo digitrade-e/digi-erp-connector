@@ -284,3 +284,52 @@ func TestBuildReceiptWriter_NotConfiguredAndInvalid(t *testing.T) {
 		t.Error("a relative sendReceiptDir was accepted")
 	}
 }
+
+// Stop releases the receipt data-directory lock, so the next connector to
+// start (an upgrade, a restart) takes it at once rather than at process exit.
+func TestStop_ReleasesTheReceiptDataLock(t *testing.T) {
+	cfg, _, dataDir := receiptCfg(t)
+	if err := hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(dataDir)).Seed(1000); err != nil {
+		t.Fatal(err)
+	}
+	w, err := buildReceiptWriter(cfg, dataDir, &quietLogger{})
+	if err != nil || w == nil {
+		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
+	}
+	app := &serverApp{logSvc: &quietLogger{}, receiptWriter: w}
+	app.Stop(context.Background())
+
+	next, err := hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfigFrom(cfg, dataDir), &quietLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Recover(); err != nil {
+		t.Fatalf("after Stop the data directory is still held: %v", err)
+	}
+	_ = next.Close()
+}
+
+// …and never hangs on it: an order import holding the import lock past the
+// stop budget leaves the lock to the OS at exit.
+func TestStop_DoesNotHangOnAHeldImportLock(t *testing.T) {
+	cfg, _, dataDir := receiptCfg(t)
+	w, err := buildReceiptWriter(cfg, dataDir, &quietLogger{})
+	if err != nil || w == nil {
+		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
+	}
+	release, err := hasavshevet.HoldImports(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	app := &serverApp{logSvc: &quietLogger{}, receiptWriter: w}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	stopped := make(chan struct{})
+	go func() { app.Stop(ctx); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop hung on the held import lock")
+	}
+}

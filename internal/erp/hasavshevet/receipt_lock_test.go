@@ -92,3 +92,62 @@ func TestReceiptWriter_AnotherProcessHoldingTheDataDirRefusesReceipts(t *testing
 		t.Fatalf("receipt = %d; want 1000", res.ReceiptNumber)
 	}
 }
+
+// Close hands the data directory over, and a closed writer is still usable:
+// its next Write recovers — and locks — again, as its doc promises.
+func TestReceiptWriter_CloseHandsOverAndTheClosedOneRelocks(t *testing.T) {
+	h := newReceiptHarness(t, 1000)
+	a := h.writer()
+	mustWrite(t, a, receiptFor(testKey(1)))
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := NewReceiptWriter(h.cfg, noopLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Recover(); err != nil {
+		t.Fatalf("after Close a second writer could not take over: %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if res := mustWrite(t, a, receiptFor(testKey(2))); res.ReceiptNumber != 1001 {
+		t.Fatalf("the closed writer's next receipt = %d; want 1001", res.ReceiptNumber)
+	}
+	c, err := NewReceiptWriter(h.cfg, noopLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Recover(); !errors.Is(err, ErrReceiptDataInUse) {
+		t.Fatalf("the closed writer did not lock again on its Write: third Recover = %v", err)
+	}
+	_ = a.Close()
+}
+
+// Closing waits for the import lock, but never past its context: a hung
+// order import must not hang the service's stop.
+func TestReceiptWriter_CloseContextGivesUpOnAHeldImportLock(t *testing.T) {
+	h := newReceiptHarness(t, 1000)
+	w := h.writer()
+	release, err := HoldImports(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = w.CloseContext(ctx)
+	release()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext = %v; want the context's deadline", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("CloseContext took %v", d)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

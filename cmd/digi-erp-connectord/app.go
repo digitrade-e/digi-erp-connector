@@ -40,6 +40,9 @@ type serverApp struct {
 	dbPassStr   string
 	orderQueue  *hasavshevet.OrderQueue
 	queueCancel context.CancelFunc
+	// receiptWriter is nil when receipts are not configured. Stop closes it,
+	// releasing the receipt data-directory lock for the next process.
+	receiptWriter *hasavshevet.ReceiptWriter
 }
 
 func (a *serverApp) Start() error {
@@ -155,6 +158,7 @@ func (a *serverApp) Start() error {
 		a.Stop(context.Background())
 		return err
 	}
+	a.receiptWriter = receiptWriter
 
 	queryStorePath := filepath.Join(paths.DataDir(), "queries.json")
 	queryStore, err := queries.NewStore(queryStorePath)
@@ -212,7 +216,11 @@ func (a *serverApp) Start() error {
 //     receipt being written, an order being accepted;
 //  2. the order queue is closed and the worker finishes every order already
 //     queued (each was answered 202), for up to orderDrainTimeout;
-//  3. only then is the worker's context cancelled.
+//  3. only then is the worker's context cancelled;
+//  4. the receipt writer is closed, releasing the receipt data-directory lock
+//     for the next connector process — waiting for the import lock no longer
+//     than ctx allows (a hung order import holds it; the OS then releases the
+//     data lock at exit).
 //
 // It used to cancel the queue first, which dropped every queued order.
 // ctx bounds the whole stop (autostart.StopTimeout from the service).
@@ -235,6 +243,11 @@ func (a *serverApp) Stop(ctx context.Context) {
 	}
 	if a.queueCancel != nil {
 		a.queueCancel()
+	}
+	if a.receiptWriter != nil {
+		if err := a.receiptWriter.CloseContext(ctx); err != nil && a.logSvc != nil {
+			a.logSvc.Error("the receipt data lock was not released before the stop budget ran out; the OS releases it at exit", err)
+		}
 	}
 	if a.dbConn != nil {
 		_ = a.dbConn.Close()
