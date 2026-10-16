@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
@@ -160,7 +161,31 @@ func writeReceiptError(w http.ResponseWriter, log logger.LoggerService, key stri
 
 // describeReceiptDecodeError names the field a decode error is about ("body"
 // when it is about the document as a whole).
+//
+// The field is the caller's own key and is echoed in the 400, so it is capped
+// at maxEchoedFieldBytes: an unbounded key would make an unbounded error body.
 func describeReceiptDecodeError(err error) (field, msg string) {
+	field, msg = describeDecodeError(err)
+	return capEchoedField(field), msg
+}
+
+// maxEchoedFieldBytes caps a key echoed in a 400 (message and details.field).
+const maxEchoedFieldBytes = 64
+
+// capEchoedField keeps at most maxEchoedFieldBytes of s, cut on a rune
+// boundary, and marks a cut with "…".
+func capEchoedField(s string) string {
+	if len(s) <= maxEchoedFieldBytes {
+		return s
+	}
+	cut := maxEchoedFieldBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+func describeDecodeError(err error) (field, msg string) {
 	var ke *jsonKeyError
 	if errors.As(err, &ke) {
 		if ke.Duplicate {

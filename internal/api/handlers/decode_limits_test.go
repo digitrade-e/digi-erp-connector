@@ -175,3 +175,41 @@ func TestSendReceipt_400MessagesNeverEchoTheValue(t *testing.T) {
 		})
 	}
 }
+
+// An unknown or duplicate key is named in the 400, but never more than 64
+// bytes of it, cut on a rune boundary and marked "…": a 1 MiB key name once
+// made a 2 MiB error body (message + details.field).
+func TestSendReceipt_AnEchoedKeyIsCappedAt64Bytes(t *testing.T) {
+	huge := strings.Repeat("k", (1<<20)-64)
+	hebrew := strings.Repeat("ש", 40) // 80 bytes of UTF-8
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"1 MiB unknown key", `{"` + huge + `":1}`, strings.Repeat("k", 64) + "…"},
+		{"duplicate long key", `{"` + strings.Repeat("d", 100) + `":1,"` + strings.Repeat("d", 100) + `":2}`, strings.Repeat("d", 64) + "…"},
+		{"Hebrew key cut between letters", `{"` + hebrew + `":1}`, strings.Repeat("ש", 32) + "…"},
+		{"byte 64 inside a letter", `{"a` + hebrew + `":1}`, "a" + strings.Repeat("ש", 31) + "…"},
+		{"short key kept whole", `{"surprise":1}`, "surprise"},
+		{"exactly 64 bytes kept whole", `{"` + strings.Repeat("x", 64) + `":1}`, strings.Repeat("x", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newReceiptInstall(t, 1000)
+			rec := postReceipt(t, NewSendReceiptHandler(in.writer, true, &noopLogger{}), []byte(tc.body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d; want 400", rec.Code)
+			}
+			if rec.Body.Len() > 1024 {
+				t.Errorf("the 400 body is %d bytes", rec.Body.Len())
+			}
+			e := decodeError(t, rec)
+			if got, _ := e.Details["field"].(string); got != tc.want {
+				t.Errorf("details.field = %q; want %q", got, tc.want)
+			}
+			if !strings.HasPrefix(e.Error, tc.want) {
+				t.Errorf("message %q does not start with the capped key", e.Error)
+			}
+		})
+	}
+}
