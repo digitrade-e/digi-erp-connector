@@ -74,8 +74,11 @@ See `saved-queries.md` for the full model.
 
 `POST /api/sendReceipt` → `200 {"receiptNumber":"1000","written":true,"idempotencyKey":"<uuid>","import":"not_run|started|ok|failed","warnings":[]}`.
 Synchronous (up to 120 s), one KUPAIN receipt per `idempotencyKey`; a repeat of
-the key answers the same receipt. The body is decoded strictly — an unknown field,
-a wrong type, a duplicate key or a key in the wrong case is a 400. Errors: `VALIDATION_ERROR` (400, `details.field`),
+the key answers the same receipt. The body is flat — exactly the sixteen keys of
+the backend's `Receipt` (plan 056 §4.6a), all present, none `null` — and decoded
+strictly: a missing or `null` key, an unknown field, a wrong type, a duplicate key
+or a key in the wrong case is a 400. Only a 400 is final for the backend; it
+retries anything else with the same key. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
 `RECEIPT_WRITER_BUSY` (503), `RECEIPT_CONFIG_INVALID` /
 `RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
@@ -120,7 +123,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `FILE_PATH_ERROR` | 500 | Unexpected failure resolving the path. |
 | `FOLDER_CONFIG_INVALID` | 500 | `imageFolders` could not be canonicalised at startup — fix the config. |
 | `FOLDER_LIST_FAILED` | 500 | A configured folder could not be listed (removed? permissions?). |
-| `VALIDATION_ERROR` | 400 | Order or receipt request failed validation. For receipts `details.field` names the field (`account/name`, `details/reference`, `body` for the document as a whole). |
+| `VALIDATION_ERROR` | 400 | Order or receipt request failed validation. For receipts `details.field` names the key (`name`, `remarks`, `body` for the document as a whole) — see [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md#request-fields). |
 | `QUEUE_FULL` | 503 | More than 64 orders queued. |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |

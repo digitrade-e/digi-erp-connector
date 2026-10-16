@@ -1,11 +1,13 @@
 # Hasavshevet Send-Receipt Flow
 
 `POST /api/sendReceipt` writes one Hashavshevet **KUPAIN** receipt ("קבלה") per
-card payment and answers with its number. It is the connector half of plan 005
+card payment and answers with its number. It is the connector half of plan 056
 (DIG-922): the backend captures a card payment for open invoices, builds the
-receipt from its frozen snapshot (DIG-928) and sends it here through erp-manager;
-this connector writes `KUPAIN_{n}.doc` + `KUPAIN.prm` into the folder
-Hashavshevet's receipt importer reads (DIG-929).
+receipt from its frozen snapshot (DIG-928, `Model/Outbound/Receipt`) and sends
+it here through its outbound pipeline — the body is exactly
+`Receipt::jsonSerialize()`, no erp-manager mapping line touches it; this
+connector writes `KUPAIN_{n}.doc` + `KUPAIN.prm` into the folder Hashavshevet's
+receipt importer reads (DIG-929).
 
 **Dormant by default.** Without `sendReceiptDir` the route answers
 `503 RECEIPTS_NOT_CONFIGURED` and touches no disk, and the binary behaves like
@@ -46,8 +48,14 @@ Content-Type: application/json
 
 Rules the backend relies on:
 
+- **Only a 400 is final.** The backend stops a receipt on a 400 (its content
+  can never be written) and retries everything else — 503, 500, a timeout, a
+  dropped answer — with the same `idempotencyKey`. So a 400 is answered only
+  for the request's own content, and a retry of a key always gets the first
+  number and never writes a second file.
 - `written` is `true` on every 200. Treat only `written === true` with a
-  `/^\d{1,9}$/` `receiptNumber` as written.
+  `/^[1-9]\d{0,8}$/` `receiptNumber` as written (the backend accepts it as a
+  JSON string, which is what it gets, or an integer).
 - `import` is one of `not_run | started | ok | failed` — see
   [Receipt states](#receipt-states). It never changes whether the receipt is
   written.
@@ -60,38 +68,65 @@ Rules the backend relies on:
 
 ## Request fields
 
-The body is decoded **strictly**: an unknown field, a wrong type, trailing
-data, a key given twice, or a key that matches a field only in another case
-(`AmountMinor`) is `400` naming the field by its path (`account/city`).
-`encoding/json` alone would accept the last two silently. Nullable fields accept `null` or absence. The
-authoritative table is plan 005 §2; KUPAIN positions are in
-`internal/erp/hasavshevet/kupain.go`.
+Plan 056 §4.6a, flat: **exactly** the sixteen keys the backend's
+`Receipt::jsonSerialize()` emits, as the types it emits them as. The backend
+always sends all sixteen and never `null`; an empty value is `""`.
 
-| Field | Type | Rule (else 400) | KUPAIN |
+The body is decoded **strictly**. Each of these is a `400 VALIDATION_ERROR`
+whose `details.field` is the key (or `body` for the document as a whole):
+
+- a key absent, or `null`;
+- a wrong JSON type — `amountMinor` / `installments` as a string or with a
+  fraction (`693200.0` too), any other key as a number;
+- an unknown key (the 10-11 nested wire's `account`, `details`, `currency`,
+  `firstPaymentMinor`, `providerTransactionId`, `remarkSuffix` … included);
+- a key given twice, or one that matches only in another case (`AmountMinor`)
+  — `encoding/json` alone would accept those two silently;
+- trailing data, more than 1 MiB, or not a single JSON object;
+- a value that breaks the rule below.
+
+| Key | Type | Rule (else 400) | KUPAIN |
 |---|---|---|---|
-| `idempotencyKey` | string | required, `8-4-4-4-12` hex UUID | index key |
-| `account.syncKey` | string | required, ≤ 15 B, trimmed | F2 |
-| `account.name` | string | required, ≤ 50 B | F24 |
-| `account.address` / `city` / `phone` | string, null ok | ≤ 50 B | F25 / F26 / F27 |
-| `account.agentSyncKey` | string, null ok | ≤ 9 B, trimmed | F20 |
-| `email` | string, null ok | ≤ 50 B | F42 |
-| `settledAt` | string | `YYYY-MM-DD` | F5 + F6 as `dd/mm/YYYY` |
+| `idempotencyKey` | string | `8-4-4-4-12` hex UUID (any case; echoed lower-case) | index key |
+| `accountKey` | string | required, ≤ 15 B, trimmed | F2 |
+| `settledDate` | string | `YYYY-MM-DD`, a real day | F5 + F6 as `dd/mm/YYYY` |
 | `amountMinor` | int | 1 … 99 999 999 agorot | F12 `%d.%02d` |
-| `currency` | string | exactly `ILS` | — |
-| `installments` | int | 1 … 99 | F16 |
-| `firstPaymentMinor` | int, null ok | 1 … amount | F29 (blank for 1 installment, else the remainder rule) |
-| `cardIssuer` / `cardBrand` | string, null ok | ≤ 32 B | F17 card name: issuer first, then brand |
-| `last4` | string | `^\d{4}$` | F28 |
+| `installments` | int | exactly 1 | F16 |
+| `cardIssuer` | string | `^\d{0,2}$` | F17, looked up first |
+| `cardBrand` | string | `^\d{0,2}$` | F17, when the issuer has no name |
+| `last4` | string | `^\d{4}$` (ASCII digits) | F28 |
 | `confirmationCode` | string | required, ≤ 9 B, trimmed | F22 and F43 |
-| `authorizationRef` | string, null ok | ≤ 250 B | F23 |
-| `providerTransactionId` | string | required, ≤ 64 B | index only |
-| `details[]` | array | at least one | — |
-| `details[].reference` | string | required, ≤ 32 B | F7, joined `, ` |
-| `details[].amountMinor` | int | required, signed | audit only |
-| `remarkSuffix` | string, null ok | ≤ 40 B | F7 ` \| {suffix}`, F7 ≤ 250 B |
+| `providerUid` | string | ≤ 250 B | F23 |
+| `remarks` | string | required, ≤ 250 B | F7, as sent |
+| `agentKey` | string | ≤ 9 B, trimmed | F20 |
+| `name` | string | required, ≤ 50 B | F24 |
+| `address` | string | ≤ 50 B | F25 |
+| `phone` | string | ≤ 50 B | F27 |
+| `email` | string | ≤ 50 B | F42 |
 
-"B" is bytes after Windows-1255. Nothing is ever truncated or transliterated: a
-value that does not fit or cannot be encoded is a 400 naming the field.
+The connector's own fields: F3 the receipt number, F4 `33`, and F26 (city) and
+F29 (first payment) **blank**, as the legacy wrote them. F7 is whatever the
+backend built — the invoice references joined `", "`, cut by the backend at the
+last whole reference with ` +N` — the connector neither builds nor cuts it.
+
+"B" is bytes after Windows-1255 — one per Hebrew letter, so 250 Hebrew letters
+(500 bytes of UTF-8) fit F7. Before encoding, `normalize1255` applies NFC,
+removes bidi controls (LRM/RLM, the embeddings, overrides and isolates, ALM),
+zero-width characters, the BOM, the soft hyphen and the apostrophe, and writes a
+line break as `. ` and a tab or no-break space as a space. Nothing is ever
+truncated or transliterated: a value that does not fit or cannot be encoded
+(Arabic, Cyrillic, an emoji) is a 400 naming the key. "Required" means
+something is left after that normalisation and trimming.
+
+Card codes compare as numbers, as the legacy PHP `==` did: `"02"` is issuer 2,
+and a `receiptCardNames` key `"01"` matches code `"1"`.
+
+The contract is pinned by `internal/api/handlers/testdata/receipt/wire.json`
+and `wire-blanks.json`: the backend's real `Receipt` class serialized by its
+real HTTP client (Symfony HttpClient's `json` option — Hebrew and quotes arrive
+as `\uXXXX`), produced by `generate.php` beside them in a throwaway
+`backend-php` container and pinned by sha256. If the backend's `Receipt`
+changes, regenerate them; never hand-edit them.
 
 ## Receipt states
 
@@ -274,11 +309,12 @@ because on a real install the herp folder sits under a web root. See
 Built-in card names (the legacy table): issuer `1` ישראכרט, `2` ויזה,
 `5` אלפא קארד/לאומי קארד; brand `3` דיינרס, `4` אמריקן אקספרס. Anything else
 leaves F17 blank with a warning — the legacy's "JCB" fallback is deliberately not
-kept.
+kept. Codes, the request's and the override keys alike, compare as numbers
+(`"02"` = `2`).
 
 ## Open questions
 
-Blocked on the customer side (plan 005 G1) and made configurable rather than
+Blocked on the customer side (plan 056 G1) and made configurable rather than
 guessed:
 
 - **BAT file pickup.** Does the receipt BAT (or a poller) pick up every file in
@@ -289,6 +325,10 @@ guessed:
 - **Seed range.** The legacy writer's F3 was its own credit-card row id. The seed
   must sit in a range the legacy can never reach, and the right N is not decided
   (Q-J3 / Q-J6).
+- **F7's legacy suffix.** The legacy F7 was `"{OrdId} | 2824019"`; what
+  `2824019` is has not been answered (July, G1). Until it is, F7 is the
+  backend's invoice references alone. The connector writes `remarks` as sent,
+  so adding it later is a backend change only.
 - **Card codes.** HYP issuer codes beyond 1/2/5 (6 looks like Max/Leumi Card) are
   not in the legacy table; until named via `receiptCardNames`, F17 is blank with
   a warning (Q-B1).
