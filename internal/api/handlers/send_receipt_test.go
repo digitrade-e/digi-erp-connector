@@ -115,6 +115,7 @@ func newReceiptInstall(t *testing.T, seed int64) *receiptInstall {
 		t.Fatal(err)
 	}
 	in.writer = w
+	t.Cleanup(func() { _ = w.Close() })
 	return in
 }
 
@@ -443,6 +444,7 @@ func TestSendReceipt_InternalFaultsAre5xx(t *testing.T) {
 		{"index unreadable", fmt.Errorf("%w: /secret/data/receipts/index/x.json", hasavshevet.ErrReceiptIndexUnreadable), 500, "RECEIPT_INDEX_UNREADABLE"},
 		{"stored request no longer builds", fmt.Errorf("%w: receipt 9 (key k): last4: must be exactly 4 digits", hasavshevet.ErrStoredReceiptUnbuildable), 500, "RECEIPT_STORED_REQUEST_INVALID"},
 		{"lock wait ran out", context.DeadlineExceeded, 503, "RECEIPT_WRITER_BUSY"},
+		{"data dir held by another process", fmt.Errorf("%w (/secret/data/receipts/writer.lock)", hasavshevet.ErrReceiptDataInUse), 503, "RECEIPT_DATA_IN_USE"},
 		{"disk", errors.New("open /secret/herp/KUPAIN_1.doc: permission denied"), 500, "RECEIPT_WRITE_FAILED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -538,6 +540,7 @@ func TestSendReceipt_UnbuildableStoredReceiptIs500(t *testing.T) {
 	}
 
 	// A restart: a fresh writer, whose first Write recovers the planted entry.
+	_ = in.writer.Close() // the old process is gone, and its lock with it
 	w, err := hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfig{SendReceiptDir: in.sendDir, DataDir: in.dataDir}, &noopLogger{})
 	if err != nil {
 		t.Fatal(err)

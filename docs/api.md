@@ -80,7 +80,7 @@ strictly: a missing or `null` key, an unknown field, a wrong type, a duplicate k
 or a key in the wrong case is a 400. Only a 400 is final for the backend; it
 retries anything else with the same key. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
-`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` (503), `RECEIPT_CONFIG_INVALID` /
+`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` (503), `RECEIPT_CONFIG_INVALID` /
 `RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
 `RECEIPT_WRITE_FAILED` (500). Full contract, field
 table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).

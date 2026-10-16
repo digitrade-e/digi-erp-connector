@@ -117,6 +117,7 @@ func TestSendReceipt_RetryAfterAKillBetweenReserveAndRenameIsOneReceipt(t *testi
 
 			// The restart: a fresh writer. No explicit Recover — the first Write
 			// must finish the interrupted receipt before anything else.
+			_ = in.writer.Close() // the old process is gone, and its lock with it
 			w, err := hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfig{SendReceiptDir: in.sendDir, DataDir: in.dataDir}, &noopLogger{})
 			if err != nil {
 				t.Fatal(err)

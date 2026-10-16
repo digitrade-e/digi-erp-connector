@@ -25,6 +25,10 @@ type receiptHarness struct {
 	sendDir string
 	dataDir string
 	cfg     ReceiptWriterConfig
+	// last is the writer newWriter built most recently. A new one closes it
+	// first: a "restart" means the old process — and its data-dir lock — is
+	// gone.
+	last *ReceiptWriter
 }
 
 func newReceiptHarness(t *testing.T, seed int64) *receiptHarness {
@@ -61,10 +65,15 @@ func (h *receiptHarness) writer() *ReceiptWriter {
 
 func (h *receiptHarness) newWriter() *ReceiptWriter {
 	h.t.Helper()
+	if h.last != nil {
+		_ = h.last.Close()
+	}
 	w, err := NewReceiptWriter(h.cfg, noopLogger{})
 	if err != nil {
 		h.t.Fatalf("NewReceiptWriter: %v", err)
 	}
+	h.last = w
+	h.t.Cleanup(func() { _ = w.Close() })
 	return w
 }
 
@@ -779,12 +788,13 @@ func TestReceiptWriter_RecoveredReceiptWarnsTheBatWasNotRun(t *testing.T) {
 			var calls atomic.Int32
 			countBat := func(context.Context, string) (int, string, error) { calls.Add(1); return 0, "", nil }
 
-			w2 := h.writer() // Recover finishes 1000
-			w2.runBat = countBat
-			for i := 0; i < 2; i++ {
-				w3 := h.writer() // and survives a restart
-				w3.runBat = countBat
-				for _, ww := range []*ReceiptWriter{w2, w3} {
+			// Recover finishes 1000, and the answer survives two more restarts.
+			// Each h.writer() is a new process: it closes the one before (and
+			// its data-dir lock), so the writers take turns.
+			for i := 0; i < 3; i++ {
+				ww := h.writer()
+				ww.runBat = countBat
+				for j := 0; j < 2; j++ {
 					res := mustWrite(t, ww, req)
 					if res.ReceiptNumber != 1000 || res.Import != ImportNotRun || !res.Replayed {
 						t.Fatalf("replay = %+v; want replayed 1000 / not_run", res)

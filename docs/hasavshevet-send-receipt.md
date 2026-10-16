@@ -41,6 +41,7 @@ Content-Type: application/json
 | `503` | `RECEIPTS_NOT_CONFIGURED` | No `sendReceiptDir`. Nothing read or written. |
 | `503` | `RECEIPT_NUMBER_STORE_UNAVAILABLE` | The number store is missing (not seeded), unreadable, exhausted, or was moved back (a number's history already exists). |
 | `503` | `RECEIPT_REQUEST_READ_FAILED` | The body could not be read to its end (the server's read timeout, a client that stalled or hung up). Nothing was read into a receipt — retry with the same key. Only the 1 MiB cap is a 400. |
+| `503` | `RECEIPT_DATA_IN_USE` | Another connector process holds this data directory's receipt data (see [Concurrency](#concurrency)). Nothing reserved — retry with the same key. |
 | `503` | `RECEIPT_WRITER_BUSY` | Another import held the lock for 20 s. Nothing reserved — retry with the same key. |
 | `500` | `RECEIPT_CONFIG_INVALID` | A `receiptCardNames` override cannot be written. The daemon refuses such a config at startup, so this should never be seen. |
 | `500` | `RECEIPT_INDEX_UNREADABLE` | An index entry is corrupt, or two keys hold one number. A person must look. |
@@ -246,6 +247,19 @@ be issued twice.
 Receipts and orders share one process-wide import lock: an order job (IMOVEIN +
 `has.exe`/`digi.bat`) and a receipt (KUPAIN + its BAT) never run at once. A
 receipt waits at most 20 s for it (`503 RECEIPT_WRITER_BUSY`, nothing reserved).
+
+**One process per data directory.** The import lock is in-process only, so
+two connector processes on one `DataDir` (a second service install, a console
+run beside the service) would each read the number store and give one number
+to two keys. The writer therefore holds an OS lock on
+`DataDir/receipts/writer.lock` — `LockFileEx` on Windows, `flock` on Linux —
+from its first `Recover` or receipt until it is closed or the process exits.
+The lock is the operating system's, not the file's: a file left behind by a
+crash locks nobody out. A second process **keeps serving orders and queries**
+but answers every receipt `503 RECEIPT_DATA_IN_USE` (nothing reserved); when the
+first process exits, the second takes over on its next receipt request without
+a restart. Its startup recovery fails with the same reason and is logged — the
+daemon still starts, as it does for any failed recovery.
 
 ⚠ The order importer has **no timeout** of its own (pre-existing). A hung
 `has.exe`/`digi.bat` now also blocks receipts — each answers 503 after 20 s until

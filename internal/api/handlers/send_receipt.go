@@ -52,7 +52,8 @@ type ReceiptWriter interface {
 //     into a receipt, so it is not the request's fault and never a 400.
 //   - 503 RECEIPTS_NOT_CONFIGURED — no sendReceiptDir; nothing is read or
 //     written. 503 RECEIPT_NUMBER_STORE_UNAVAILABLE — the number store is not
-//     seeded or not usable. 503 RECEIPT_WRITER_BUSY — the import lock was not
+//     seeded or not usable. 503 RECEIPT_DATA_IN_USE — another connector
+//     process holds the receipt data directory. 503 RECEIPT_WRITER_BUSY — the import lock was not
 //     free in time.
 //   - 500 — the connector is at fault (its card-name config, its index, the
 //     disk). Never 400: the backend must be free to send it again.
@@ -144,6 +145,9 @@ func writeReceiptError(w http.ResponseWriter, log logger.LoggerService, key stri
 		code, msg = "RECEIPT_STORED_REQUEST_INVALID", "A receipt already reserved by this connector cannot be finished; see the connector log"
 	case errors.Is(err, hasavshevet.ErrReceiptIndexUnreadable):
 		code, msg = "RECEIPT_INDEX_UNREADABLE", "The receipt idempotency index cannot be trusted; see the connector log"
+	case errors.Is(err, hasavshevet.ErrReceiptDataInUse):
+		status, code, msg = http.StatusServiceUnavailable, "RECEIPT_DATA_IN_USE",
+			"Another connector process holds this connector's receipt data; nothing was written — retry with the same idempotencyKey"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		status, code, msg = http.StatusServiceUnavailable, "RECEIPT_WRITER_BUSY",
 			"Another import is running; nothing was written — retry with the same idempotencyKey"

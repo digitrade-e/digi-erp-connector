@@ -14,6 +14,7 @@ import (
 
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
 )
 
 // KUPAINPRMName is the parameter file the receipt importer reads beside the
@@ -43,6 +44,17 @@ const recoveredWithoutBatWarning = "this receipt was completed by recovery after
 // never the current caller's: the FieldError that caused it is kept out of the
 // error chain so the route cannot answer it as a 400.
 var ErrStoredReceiptUnbuildable = errors.New("stored receipt request cannot be built")
+
+// ErrReceiptDataInUse means another writer — in practice another connector
+// process on the same data directory — holds the receipt data. The import lock
+// only serialises one process; two processes each reading the store would give
+// one number to two keys. This writer issues nothing until the other lets go
+// (exits), and then takes over on its next request.
+var ErrReceiptDataInUse = errors.New("the receipt data directory is in use by another connector process")
+
+// receiptLockName is the OS lock file in DataDir/receipts, held for as long as
+// a writer has recovered (from the first Recover or Write to Close or exit).
+const receiptLockName = "writer.lock"
 
 // ReceiptNumberStorePath is where the receipt number store lives inside the
 // connector's data directory. cutover-seed writes the seed here.
@@ -117,6 +129,9 @@ type ReceiptWriter struct {
 	// set back to false when the store could not be moved past a reserved
 	// number, so no new number is issued until Recover has repaired it.
 	recovered bool
+	// dataLock is the OS lock on DataDir/receipts/writer.lock (guarded by
+	// importLock). recovered is only ever true while it is held.
+	dataLock *filelock.Held
 
 	// Test seams.
 	crashPoint func(point string)
@@ -157,6 +172,9 @@ func (w *ReceiptWriter) Recover() error {
 }
 
 func (w *ReceiptWriter) recoverLocked() error {
+	if err := w.lockDataLocked(); err != nil {
+		return err
+	}
 	entries, err := w.index.all()
 	if err != nil {
 		return fmt.Errorf("recover receipts: %w", err)
@@ -206,6 +224,45 @@ func (w *ReceiptWriter) recoverLocked() error {
 	}
 	w.recovered = true
 	return nil
+}
+
+// lockDataLocked takes the data-directory lock if this writer does not hold
+// it yet. Caller holds importLock.
+func (w *ReceiptWriter) lockDataLocked() error {
+	if w.dataLock != nil {
+		return nil
+	}
+	dir := filepath.Join(w.cfg.DataDir, "receipts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("lock receipt data: %w", err)
+	}
+	path := filepath.Join(dir, receiptLockName)
+	l, err := filelock.Lock(path)
+	if errors.Is(err, filelock.ErrLocked) {
+		return fmt.Errorf("%w (%s)", ErrReceiptDataInUse, path)
+	}
+	if err != nil {
+		return fmt.Errorf("lock receipt data: %w", err)
+	}
+	w.dataLock = l
+	return nil
+}
+
+// Close releases the data-directory lock, so another connector process may
+// take over. The writer can be used again: its next Write recovers (and locks)
+// first. The OS releases the lock anyway when the process exits.
+func (w *ReceiptWriter) Close() error {
+	if err := lockImport(context.Background()); err != nil {
+		return err
+	}
+	defer unlockImport()
+	w.recovered = false
+	if w.dataLock == nil {
+		return nil
+	}
+	err := w.dataLock.Unlock()
+	w.dataLock = nil
+	return err
 }
 
 // Write produces the receipt for req, or answers the one its idempotency key
