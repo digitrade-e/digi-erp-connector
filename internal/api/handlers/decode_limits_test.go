@@ -2,7 +2,11 @@ package handlers
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -88,5 +92,47 @@ func TestCheckJSONKeys_RefusesNestingPastTheBound(t *testing.T) {
 	deep := deepBody(``, `{"next":`, `null`, `}`, ``, walkMaxDepth+1)
 	if err := checkJSONKeys(deep, reflect.TypeFor[*node]()); err == nil {
 		t.Fatalf("%d levels accepted", walkMaxDepth+1)
+	}
+}
+
+// failingBody yields half a document, then fails as a dropped connection does.
+type failingBody struct {
+	data []byte
+	err  error
+}
+
+func (f *failingBody) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+// A read that fails for transport reasons is a 503 (the backend retries), never
+// a 400 (the backend stops the receipt). Only the size cap stays a 400.
+func TestSendReceipt_BodyReadFailureIs503(t *testing.T) {
+	for name, readErr := range map[string]error{
+		"unexpected EOF": io.ErrUnexpectedEOF,
+		"timeout":        os.ErrDeadlineExceeded,
+		"reset":          errors.New("connection reset by peer"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := newReceiptInstall(t, 1000)
+			b := wireBytes(t)
+			req := httptest.NewRequest(http.MethodPost, "/api/sendReceipt", &failingBody{data: b[:len(b)/2], err: readErr})
+			rec := httptest.NewRecorder()
+			NewSendReceiptHandler(in.writer, true, &noopLogger{}).ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d %s; want 503", rec.Code, rec.Body.String())
+			}
+			if e := decodeError(t, rec); e.Code != "RECEIPT_REQUEST_READ_FAILED" {
+				t.Errorf("code = %q; want RECEIPT_REQUEST_READ_FAILED", e.Code)
+			}
+			if n := in.nextNumber(t); n != "1000" {
+				t.Errorf("store moved to %s", n)
+			}
+		})
 	}
 }

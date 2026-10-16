@@ -40,6 +40,7 @@ Content-Type: application/json
 | `400` | `VALIDATION_ERROR`, `details.field` names the field | The request is at fault. Nothing reserved, no number used. |
 | `503` | `RECEIPTS_NOT_CONFIGURED` | No `sendReceiptDir`. Nothing read or written. |
 | `503` | `RECEIPT_NUMBER_STORE_UNAVAILABLE` | The number store is missing (not seeded), unreadable, exhausted, or was moved back (a number's history already exists). |
+| `503` | `RECEIPT_REQUEST_READ_FAILED` | The body could not be read to its end (the server's read timeout, a client that stalled or hung up). Nothing was read into a receipt — retry with the same key. Only the 1 MiB cap is a 400. |
 | `503` | `RECEIPT_WRITER_BUSY` | Another import held the lock for 20 s. Nothing reserved — retry with the same key. |
 | `500` | `RECEIPT_CONFIG_INVALID` | A `receiptCardNames` override cannot be written. The daemon refuses such a config at startup, so this should never be seen. |
 | `500` | `RECEIPT_INDEX_UNREADABLE` | An index entry is corrupt, or two keys hold one number. A person must look. |
@@ -83,6 +84,8 @@ whose `details.field` is the key (or `body` for the document as a whole):
 - a key given twice, or one that matches only in another case (`AmountMinor`)
   — `encoding/json` alone would accept those two silently;
 - trailing data, more than 1 MiB, or not a single JSON object;
+- nesting deeper than encoding/json's own limit, or a value nested where the
+  receipt has a scalar (a flat body never nests);
 - a value that breaks the rule below.
 
 | Key | Type | Rule (else 400) | KUPAIN |

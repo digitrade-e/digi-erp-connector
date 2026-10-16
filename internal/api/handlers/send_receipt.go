@@ -47,6 +47,9 @@ type ReceiptWriter interface {
 //   - 400 VALIDATION_ERROR {details:{field}} — the request is at fault: an
 //     unknown field, a missing required field, a wrong type, or a value that
 //     cannot be written. No number is used.
+//   - 503 RECEIPT_REQUEST_READ_FAILED — the body could not be read to its end
+//     (a read timeout, a client that stalled or hung up); nothing was read
+//     into a receipt, so it is not the request's fault and never a 400.
 //   - 503 RECEIPTS_NOT_CONFIGURED — no sendReceiptDir; nothing is read or
 //     written. 503 RECEIPT_NUMBER_STORE_UNAVAILABLE — the number store is not
 //     seeded or not usable. 503 RECEIPT_WRITER_BUSY — the import lock was not
@@ -70,6 +73,18 @@ func NewSendReceiptHandler(writer ReceiptWriter, configured bool, log logger.Log
 
 		var body dto.SendReceiptRequest
 		if err := decodeJSONBodyStrict(w, r, &body); err != nil {
+			var re *bodyReadError
+			if errors.As(err, &re) {
+				// Not the content's fault, so never a 400: the backend stops a
+				// receipt on a 400 and retries anything else with the same key.
+				if log != nil {
+					log.Warn("sendReceipt: the request body could not be read (" + re.err.Error() + "); answered 503")
+				}
+				respond.Error(w, http.StatusServiceUnavailable,
+					"The request body could not be read to its end; nothing was written — retry with the same idempotencyKey",
+					"RECEIPT_REQUEST_READ_FAILED", nil)
+				return
+			}
 			field, msg := describeReceiptDecodeError(err)
 			receiptValidationError(w, &hasavshevet.FieldError{Field: field, Reason: msg})
 			return

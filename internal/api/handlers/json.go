@@ -64,7 +64,11 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
 func decodeJSONBodyStrict(w http.ResponseWriter, r *http.Request, dst any) error {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
-		return err
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return err // the request's own size: its fault
+		}
+		return &bodyReadError{err: err}
 	}
 	if err := checkJSONKeys(body, reflect.TypeOf(dst)); err != nil {
 		return err
@@ -77,6 +81,15 @@ func decodeJSONBodyStrict(w http.ResponseWriter, r *http.Request, dst any) error
 	}
 	return ensureEOF(dec)
 }
+
+// bodyReadError is a request body that could not be read to its end for a
+// reason that is not its content — the server's ReadTimeout, a client that
+// stalled or hung up. It is never answered as a 400: the request was not seen,
+// so nothing can be said about it.
+type bodyReadError struct{ err error }
+
+func (e *bodyReadError) Error() string { return "request body could not be read: " + e.err.Error() }
+func (e *bodyReadError) Unwrap() error { return e.err }
 
 // jsonKeyError is a key decodeJSONBodyStrict refuses. Path is slash-joined
 // ("details/reference"; array elements add nothing).
