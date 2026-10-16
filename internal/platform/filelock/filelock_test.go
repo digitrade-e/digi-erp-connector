@@ -113,3 +113,55 @@ func holdForParent(path string) {
 	_ = l
 	os.Exit(0) // exit without Unlock: the OS must release it
 }
+
+// The lock file is opened, never followed: a symlink planted under its name —
+// to a file the service can write — must leave the target untouched, and a
+// dangling one must not create its target. Lock refuses both.
+func TestLock_NeverFollowsASymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("precious\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "writer.lock")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if l, err := Lock(link); err == nil {
+		_ = l.Unlock()
+		t.Error("Lock followed a symlink")
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "precious\n" {
+		t.Errorf("the symlink's target was changed to %q", got)
+	}
+
+	dangling := filepath.Join(dir, "other.lock")
+	target := filepath.Join(dir, "created-elsewhere")
+	if err := os.Symlink(target, dangling); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := Lock(dangling); err == nil {
+		_ = l.Unlock()
+		t.Error("Lock followed a dangling symlink")
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a dangling symlink's target was created (%v)", err)
+	}
+}
+
+// An existing lock file's contents are not the lock's business: it is never
+// rewritten.
+func TestLock_LeavesTheFileContentsAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "writer.lock")
+	if err := os.WriteFile(path, []byte("left by someone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Unlock() }()
+	if got, _ := os.ReadFile(path); string(got) != "left by someone\n" {
+		t.Errorf("Lock rewrote the file to %q", got)
+	}
+}

@@ -10,7 +10,6 @@ package filelock
 import (
 	"errors"
 	"os"
-	"strconv"
 	"sync"
 )
 
@@ -26,21 +25,33 @@ type Held struct {
 
 // Lock takes the exclusive lock on path, creating the file (0600) if needed.
 // It never waits: a lock someone else holds is ErrLocked.
+//
+// The file is never followed and never written: a symlink under its name is
+// refused (O_NOFOLLOW on Unix; an Lstat check on both, which also refuses a
+// directory or device), so a link planted there cannot point the open — or a
+// create — at another file. Its contents are left as they are.
 func Lock(path string) (*Held, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+		return nil, &os.PathError{Op: "lock", Path: path, Err: errNotRegular}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|openNoFollow, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, &os.PathError{Op: "lock", Path: path, Err: errNotRegular}
 	}
 	if err := lockFile(f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	// For a person looking: which process holds it. Best effort, never read.
-	if err := f.Truncate(0); err == nil {
-		_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
-	}
 	return &Held{f: f}, nil
 }
+
+var errNotRegular = errors.New("not a regular file (a symlink or something else is in its place)")
 
 // Unlock releases the lock. The file stays; a second Unlock does nothing.
 func (l *Held) Unlock() error {

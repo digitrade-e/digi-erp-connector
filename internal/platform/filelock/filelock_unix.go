@@ -8,6 +8,10 @@ import (
 	"syscall"
 )
 
+// openNoFollow makes the open itself refuse a symlink, closing the window
+// between Lock's Lstat and its open.
+const openNoFollow = syscall.O_NOFOLLOW
+
 func lockFile(f *os.File) error {
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)

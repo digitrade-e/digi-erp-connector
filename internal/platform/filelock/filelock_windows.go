@@ -12,6 +12,11 @@ import (
 // The whole file is locked as one byte range of maximal length.
 const allBytes = ^uint32(0)
 
+// openNoFollow is 0: Windows has no open flag that refuses a symlink (and
+// creating one needs privileges there). Lock's Lstat check and the Stat of the
+// opened handle apply instead.
+const openNoFollow = 0
+
 func lockFile(f *os.File) error {
 	ol := new(windows.Overlapped)
 	err := windows.LockFileEx(windows.Handle(f.Fd()),
