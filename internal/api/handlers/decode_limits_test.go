@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -132,6 +133,44 @@ func TestSendReceipt_BodyReadFailureIs503(t *testing.T) {
 			}
 			if n := in.nextNumber(t); n != "1000" {
 				t.Errorf("store moved to %s", n)
+			}
+		})
+	}
+}
+
+// A 400 names the field and why — never the value. Card digits, dates, keys
+// and names go to logs and to the caller's error records; the field is enough.
+func TestSendReceipt_400MessagesNeverEchoTheValue(t *testing.T) {
+	for _, tc := range []struct {
+		key    string
+		value  any
+		secret string
+	}{
+		{"last4", "4580123412341234", "4580123412341234"},
+		{"last4", "45x0", "45x0"},
+		{"settledDate", "14/10/2026", "14/10/2026"},
+		{"settledDate", "2026-02-30", "2026-02-30"},
+		{"cardIssuer", "987", "987"},
+		{"cardBrand", "Vi", "Vi"},
+		{"idempotencyKey", "secret-not-a-uuid", "secret-not-a-uuid"},
+		{"amountMinor", json.Number("123456789"), "123456789"},
+		{"amountMinor", json.Number("6932.5"), "6932.5"},
+		{"amountMinor", "693200", "693200"},
+		{"installments", json.Number("77"), "77"},
+		{"name", "شركة", "شركة"},
+		{"name", "בל\"פ 🙂", "🙂"},
+		{"last4", json.Number("4242"), "4242"},
+	} {
+		t.Run(tc.key+"="+tc.secret, func(t *testing.T) {
+			in := newReceiptInstall(t, 1000)
+			m := wireMap(t)
+			m[tc.key] = tc.value
+			rec := postReceipt(t, NewSendReceiptHandler(in.writer, true, &noopLogger{}), mustJSON(t, m))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d %s; want 400", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), tc.secret) || strings.Contains(decodeError(t, rec).Error, tc.secret) {
+				t.Errorf("the 400 echoes the value %q: %s", tc.secret, rec.Body.String())
 			}
 		})
 	}

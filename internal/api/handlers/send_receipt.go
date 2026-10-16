@@ -179,7 +179,9 @@ func describeReceiptDecodeError(err error) (field, msg string) {
 		if te.Field == "" {
 			return "body", "must be a JSON object"
 		}
-		return strings.ReplaceAll(te.Field, ".", "/"), fmt.Sprintf("must be a %s, got a JSON %s", jsonKind(te.Type.Kind().String()), te.Value)
+		// te.Value is "number 6932.5" for a number: keep the kind, never the value.
+		gotKind, _, _ := strings.Cut(te.Value, " ")
+		return strings.ReplaceAll(te.Field, ".", "/"), fmt.Sprintf("must be a %s, got a JSON %s", jsonKind(te.Type.Kind().String()), gotKind)
 	}
 	var mbe *http.MaxBytesError
 	if errors.As(err, &mbe) {

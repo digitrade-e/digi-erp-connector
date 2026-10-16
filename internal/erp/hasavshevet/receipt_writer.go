@@ -273,7 +273,7 @@ func (w *ReceiptWriter) Close() error {
 func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*ReceiptResult, error) {
 	key, ok := canonicalReceiptKey(req.IdempotencyKey)
 	if !ok {
-		return nil, &FieldError{Field: "idempotencyKey", Reason: fmt.Sprintf("must be a UUID (8-4-4-4-12 hex digits), got %q", req.IdempotencyKey)}
+		return nil, &FieldError{Field: "idempotencyKey", Reason: "must be a UUID (8-4-4-4-12 hex digits)"}
 	}
 	// Full validation before any number is touched. The receipt number only
 	// fills F3, so any in-range number gives the same verdict.

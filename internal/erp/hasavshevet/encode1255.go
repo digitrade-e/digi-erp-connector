@@ -86,8 +86,10 @@ type UnencodableError struct {
 	Offset int // byte offset in the input
 }
 
+// Error names the character by its code point only: the message reaches the
+// caller in a 400, which never echoes the value itself.
 func (e *UnencodableError) Error() string {
-	return fmt.Sprintf("character %U %q at byte %d cannot be written in Windows-1255", e.Rune, e.Rune, e.Offset)
+	return fmt.Sprintf("character %U at byte %d cannot be written in Windows-1255", e.Rune, e.Offset)
 }
 
 // encode1255Strict encodes s to Windows-1255, one byte per character, and

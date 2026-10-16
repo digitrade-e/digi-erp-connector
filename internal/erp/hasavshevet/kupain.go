@@ -228,7 +228,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	// F5 receipt date, F6 value date: the settlement day, dd/mm/YYYY
 	day, err := time.Parse("2006-01-02", req.SettledDate)
 	if err != nil {
-		return nil, nil, &FieldError{Field: "settledDate", Reason: fmt.Sprintf("must be a YYYY-MM-DD date, got %q", req.SettledDate)}
+		return nil, nil, &FieldError{Field: "settledDate", Reason: "must be a YYYY-MM-DD calendar date"}
 	}
 	if err := put(5, "settledDate", day.Format("02/01/2006")); err != nil {
 		return nil, nil, err
@@ -253,7 +253,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 		return nil, nil, err
 	}
 	if req.Installments != 1 {
-		return nil, nil, &FieldError{Field: "installments", Reason: fmt.Sprintf("must be 1, got %d", req.Installments)}
+		return nil, nil, &FieldError{Field: "installments", Reason: "must be 1"}
 	}
 	if err := put(16, "installments", "1"); err != nil {
 		return nil, nil, err
@@ -261,10 +261,10 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 
 	// F17 card name, from the issuer or else the brand
 	if !isCardCode(req.CardIssuer) {
-		return nil, nil, &FieldError{Field: "cardIssuer", Reason: fmt.Sprintf("must be 0-2 digits, got %q", req.CardIssuer)}
+		return nil, nil, &FieldError{Field: "cardIssuer", Reason: "must be 0-2 digits"}
 	}
 	if !isCardCode(req.CardBrand) {
-		return nil, nil, &FieldError{Field: "cardBrand", Reason: fmt.Sprintf("must be 0-2 digits, got %q", req.CardBrand)}
+		return nil, nil, &FieldError{Field: "cardBrand", Reason: "must be 0-2 digits"}
 	}
 	name, from, warning := cardName(req.CardIssuer, req.CardBrand, cardNames)
 	if warning != "" {
@@ -315,7 +315,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 
 	// F28 last four digits
 	if !isFourASCIIDigits(req.Last4) {
-		return nil, nil, &FieldError{Field: "last4", Reason: fmt.Sprintf("must be exactly 4 digits, got %q", req.Last4)}
+		return nil, nil, &FieldError{Field: "last4", Reason: "must be exactly 4 digits"}
 	}
 	if err := put(28, "last4", req.Last4); err != nil {
 		return nil, nil, err
@@ -348,7 +348,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 // 5 → "0.05". The range is 1…99 999 999, which is what F12's 9 bytes hold.
 func formatAmount(minor int64) (string, error) {
 	if minor < 1 || minor > maxAmountMinor {
-		return "", &FieldError{Field: "amountMinor", Reason: fmt.Sprintf("must be 1-%d agorot, got %d", maxAmountMinor, minor)}
+		return "", &FieldError{Field: "amountMinor", Reason: fmt.Sprintf("must be 1-%d agorot", maxAmountMinor)}
 	}
 	return fmt.Sprintf("%d.%02d", minor/100, minor%100), nil
 }
