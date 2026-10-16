@@ -48,3 +48,26 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 		t.Errorf("%s is %v; want %v", path, got, want)
 	}
 }
+
+// On Windows the mode bits mean nothing, and os.Chmod is SetFileAttributes,
+// which needs FILE_WRITE_ATTRIBUTES: under a locked-down ACL it fails, and a
+// failure there must not turn every receipt into a 500. So the Windows chmod
+// is skipped; elsewhere its failure still counts.
+func TestPrivateDirChmod_SkippedOnWindowsOnly(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-dir") // os.Chmod fails on it here
+	if err := chmodPrivateDirFor("windows")(missing); err != nil {
+		t.Errorf("windows: %v; want the chmod skipped", err)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if err := chmodPrivateDirFor(goos)(missing); err == nil {
+			t.Errorf("%s: a failing chmod was ignored", goos)
+		}
+	}
+	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := chmodPrivateDirFor(runtime.GOOS)(dir); err != nil {
+			t.Fatal(err)
+		}
+		assertMode(t, dir, os.ModeDir|0o700)
+	}
+}

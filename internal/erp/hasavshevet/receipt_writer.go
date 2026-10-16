@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -503,16 +504,29 @@ func writeIfDifferent(path string, data []byte, perm os.FileMode) error {
 
 // privateDirs makes each directory exist with mode 0700 — also one that
 // already exists wider (cutover-seed's store write creates receipts/ 0755).
-// The receipt data holds names, phones, emails, card digits and codes. On
-// Windows the mode bits mean nothing; the data directory's ACLs apply.
+// The receipt data holds names, phones, emails, card digits and codes.
 func privateDirs(dirs ...string) error {
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
-		if err := os.Chmod(d, 0o700); err != nil {
+		if err := chmodPrivateDir(d); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// chmodPrivateDir tightens an existing directory to 0700.
+var chmodPrivateDir = chmodPrivateDirFor(runtime.GOOS)
+
+// chmodPrivateDirFor is a no-op on Windows: the mode bits mean nothing there
+// (the data directory's ACLs apply), and os.Chmod is SetFileAttributes, which
+// needs FILE_WRITE_ATTRIBUTES and fails under a locked-down ACL — that must
+// not make every receipt a 500. Elsewhere a failing chmod is an error.
+func chmodPrivateDirFor(goos string) func(dir string) error {
+	if goos == "windows" {
+		return func(string) error { return nil }
+	}
+	return func(dir string) error { return os.Chmod(dir, 0o700) }
 }
