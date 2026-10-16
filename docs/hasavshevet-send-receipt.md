@@ -116,8 +116,13 @@ last whole reference with ` +N` — the connector neither builds nor cuts it.
 "B" is bytes after Windows-1255 — one per Hebrew letter, so 250 Hebrew letters
 (500 bytes of UTF-8) fit F7. Before encoding, `normalize1255` applies NFC,
 removes bidi controls (LRM/RLM, the embeddings, overrides and isolates, ALM),
-zero-width characters, the BOM, the soft hyphen and the apostrophe, and writes a
-line break as `. ` and a tab or no-break space as a space. Nothing is ever
+the zero-width non-joiner and joiner (U+200C, U+200D), the BOM, the soft hyphen
+and the apostrophe, and writes a line break (`\r\n`, `\r`, `\n`) as `. ` and a
+tab or no-break space as a space. Other invisible characters are **refused, not
+removed** — the zero-width space (U+200B) and the Unicode line and paragraph
+separators (U+2028, U+2029) are in neither its list nor Windows-1255, so a value
+carrying one is a 400. Whitespace, line breaks and the removed marks around a
+value are trimmed first, so a trailing break is never written as `.`. Nothing is ever
 truncated or transliterated: a value that does not fit or cannot be encoded
 (Arabic, Cyrillic, an emoji) is a 400 naming the key. "Required" means
 something is left after that normalisation and trimming.

@@ -16,7 +16,7 @@ func TestKUPAINRecord_SurroundingLineBreaksAreTrimmedNotWritten(t *testing.T) {
 	r.AgentKey = "\t17\n"
 	r.Name = "\n" + `לקוח בדיקה בע"מ` + "\r\n"
 	r.Remarks = "INV-1001, INV-1002 | 2824019\n"
-	r.Address = "‏\nרחוב הדוגמה 12\n‏" // invisible marks around the breaks
+	r.Address = "\u200F\nרחוב הדוגמה 12\n\u200F" // invisible marks around the breaks
 	r.Phone = "04-0000000 \n"
 	r.Email = "\ttest@example.com\n"
 	r.ProviderUID = "26101112345678901234567\n"
@@ -28,7 +28,7 @@ func TestKUPAINRecord_SurroundingLineBreaksAreTrimmedNotWritten(t *testing.T) {
 }
 
 func TestKUPAINRecord_ALineBreakAloneIsNotAValue(t *testing.T) {
-	for _, blank := range []string{"\n", "\r\n", " \n\t", "‏\n", "\n‏‬"} {
+	for _, blank := range []string{"\n", "\r\n", " \n\t", "\u200F\n", "\n\u200F\u202C"} {
 		for key, mutate := range map[string]func(*ReceiptRequest, string){
 			"accountKey":       func(r *ReceiptRequest, v string) { r.AccountKey = v },
 			"confirmationCode": func(r *ReceiptRequest, v string) { r.ConfirmationCode = v },

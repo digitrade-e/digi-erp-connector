@@ -30,8 +30,9 @@ const maxImportDetail = 1000
 
 // Crash points for tests: where a process kill is simulated.
 const (
-	crashAfterIndexReserved = "index-reserved" // the index owns the number; the store has not moved on
-	crashAfterStoreAdvanced = "store-advanced" // the store has moved on; no file is in place yet
+	crashAfterIndexReserved  = "index-reserved"        // the index owns the number; the store has not moved on
+	crashAfterStoreAdvanced  = "store-advanced"        // the store has moved on; no file is in place yet
+	crashBeforeImportStarted = "before-import-started" // written; "import started" not yet recorded
 )
 
 // recoveredWithoutBatWarning is stored on a model-(b) receipt that Recover
@@ -413,6 +414,7 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 		return nil
 	}
 	e.Import = ImportStarted
+	w.crash(crashBeforeImportStarted)
 	if err := w.index.save(e); err != nil {
 		// Unrecorded, a crash during the BAT would let a repeat run it again.
 		e.Import = ImportNotRun

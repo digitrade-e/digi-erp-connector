@@ -102,3 +102,24 @@ func TestKUPAINRecord_HebrewBidiThroughNormalize1255(t *testing.T) {
 		wantFieldError(t, err, key)
 	}
 }
+
+// What normalize1255 removes and what it refuses, as the doc says: ZWNJ, ZWJ,
+// the BOM and the soft hyphen are removed; the zero-width SPACE (U+200B) and
+// the Unicode line/paragraph separators (U+2028/U+2029) are not in its list and
+// not in Windows-1255, so a value carrying them is a 400.
+func TestKUPAINRecord_InvisibleCharactersStrippedOrRefused(t *testing.T) {
+	for _, c := range []string{"\u200C", "\u200D", "\uFEFF", "\u00AD"} {
+		r := goldenReceipt()
+		r.Name = "לקוח" + c + " בדיקה בע\"מ"
+		rec, _ := mustBuild(t, r)
+		if got := field(t, rec, 24); !bytes.Equal(got, padded(t, `לקוח בדיקה בע"מ`, 50)) {
+			t.Errorf("%+q: F24 = %q; want it removed", c, decode1255(t, got))
+		}
+	}
+	for _, c := range []string{"\u200B", "\u2028", "\u2029"} {
+		r := goldenReceipt()
+		r.Name = "לקוח" + c + "בדיקה"
+		_, _, err := buildKUPAINRecord(r, goldenReceiptNumber, ReceiptCardNames{})
+		wantFieldError(t, err, "name")
+	}
+}
