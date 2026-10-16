@@ -3,6 +3,7 @@ package hasavshevet
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/charmap"
@@ -67,6 +68,15 @@ func normalize1255(s string) string {
 		i += size
 	}
 	return b.String()
+}
+
+// trimEdges removes what surrounds a value and is never part of it: whitespace
+// (line breaks included) and the invisible characters normalize1255 strips.
+// It runs on the RAW value, before normalize1255 — which writes a line break as
+// ". " — so a trailing "\n" is dropped rather than written, and a value that is
+// nothing but breaks and marks is empty.
+func trimEdges(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || strippedRunes[r] })
 }
 
 // UnencodableError reports the first character that has no Windows-1255 byte

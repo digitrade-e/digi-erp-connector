@@ -187,22 +187,20 @@ func generateKUPAINDOC(req ReceiptRequest, receiptNumber int64, cardNames Receip
 func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames ReceiptCardNames) ([]byte, []string, error) {
 	var warnings []string
 	vals := make(map[int][]byte, len(kupainFields))
+	// put writes one request value. What surrounds it — whitespace, line
+	// breaks, invisible marks — is trimmed from the RAW value first (trimEdges),
+	// then normalize1255 runs (inside encodeField): normalising first would turn
+	// a trailing "\n" into a written ". ".
 	put := func(num int, wire, value string) error {
-		b, err := encodeField(wire, value, kupainWidth(num))
+		b, err := encodeField(wire, trimEdges(value), kupainWidth(num))
 		if err != nil {
 			return err
 		}
 		vals[num] = b
 		return nil
 	}
-	// putTrimmed is put for identifiers (F2, F20, F22, F43): surrounding
-	// whitespace is not part of a key, so it is dropped before the width check
-	// and the trimmed value is what is written.
-	putTrimmed := func(num int, wire, value string) error {
-		return put(num, wire, strings.TrimSpace(normalize1255(value)))
-	}
 	required := func(wire, value string) error {
-		if strings.TrimSpace(normalize1255(value)) == "" {
+		if strings.TrimSpace(normalize1255(trimEdges(value))) == "" {
 			return &FieldError{Field: wire, Reason: "is required"}
 		}
 		return nil
@@ -212,7 +210,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if err := required("accountKey", req.AccountKey); err != nil {
 		return nil, nil, err
 	}
-	if err := putTrimmed(2, "accountKey", req.AccountKey); err != nil {
+	if err := put(2, "accountKey", req.AccountKey); err != nil {
 		return nil, nil, err
 	}
 
@@ -285,13 +283,13 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	}
 
 	// F20 agent, F22 confirmation code, F23 provider UID
-	if err := putTrimmed(20, "agentKey", req.AgentKey); err != nil {
+	if err := put(20, "agentKey", req.AgentKey); err != nil {
 		return nil, nil, err
 	}
 	if err := required("confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
-	if err := putTrimmed(22, "confirmationCode", req.ConfirmationCode); err != nil {
+	if err := put(22, "confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
 	if err := put(23, "providerUid", req.ProviderUID); err != nil {
@@ -327,7 +325,7 @@ func buildKUPAINRecord(req ReceiptRequest, receiptNumber int64, cardNames Receip
 	if err := put(42, "email", req.Email); err != nil {
 		return nil, nil, err
 	}
-	if err := putTrimmed(43, "confirmationCode", req.ConfirmationCode); err != nil {
+	if err := put(43, "confirmationCode", req.ConfirmationCode); err != nil {
 		return nil, nil, err
 	}
 
