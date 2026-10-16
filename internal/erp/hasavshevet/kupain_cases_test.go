@@ -123,3 +123,59 @@ func TestKUPAINRecord_InvisibleCharactersStrippedOrRefused(t *testing.T) {
 		wantFieldError(t, err, "name")
 	}
 }
+
+// Widths are Windows-1255 BYTES after normalize1255, never runes. Two kinds of
+// rune grow into two bytes: a Hebrew presentation form (U+FB2A שׁ becomes ש +
+// shin dot) and an inner line break (written ". "). Counted in runes, a value
+// one byte too wide would pass and shift every field after it.
+func TestKUPAINRecord_WidthIsCountedInEncodedBytesNotRunes(t *testing.T) {
+	fields := []struct {
+		key   string
+		num   int
+		width int
+		set   func(*ReceiptRequest, string)
+	}{
+		{"accountKey", 2, 15, func(r *ReceiptRequest, v string) { r.AccountKey = v }},
+		{"remarks", 7, 250, func(r *ReceiptRequest, v string) { r.Remarks = v }},
+		{"agentKey", 20, 9, func(r *ReceiptRequest, v string) { r.AgentKey = v }},
+		{"confirmationCode", 22, 9, func(r *ReceiptRequest, v string) { r.ConfirmationCode = v }},
+		{"providerUid", 23, 250, func(r *ReceiptRequest, v string) { r.ProviderUID = v }},
+		{"name", 24, 50, func(r *ReceiptRequest, v string) { r.Name = v }},
+		{"address", 25, 50, func(r *ReceiptRequest, v string) { r.Address = v }},
+		{"phone", 27, 50, func(r *ReceiptRequest, v string) { r.Phone = v }},
+		{"email", 42, 50, func(r *ReceiptRequest, v string) { r.Email = v }},
+	}
+	classes := []struct {
+		name    string
+		grow    string // one rune that is written as two bytes
+		written string
+	}{
+		{"presentation form", "שׁ", "שׁ"},
+		{"inner line break", "\n", ". "},
+	}
+	for _, f := range fields {
+		for _, c := range classes {
+			t.Run(f.key+"/"+c.name, func(t *testing.T) {
+				// w runes, w+1 bytes: one byte too wide.
+				r := goldenReceipt()
+				f.set(&r, strings.Repeat("א", f.width-2)+c.grow+"א")
+				rec, _, err := buildKUPAINRecord(r, goldenReceiptNumber, ReceiptCardNames{})
+				wantFieldError(t, err, f.key)
+				if rec != nil {
+					t.Fatal("a record was built")
+				}
+				// w-1 runes, exactly w bytes: fits, and is written whole.
+				r = goldenReceipt()
+				f.set(&r, strings.Repeat("א", f.width-3)+c.grow+"א")
+				rec, _ = mustBuild(t, r)
+				want := strings.Repeat("א", f.width-3) + c.written + "א"
+				if got := field(t, rec, f.num); !bytes.Equal(got, padded(t, want, f.width)) {
+					t.Errorf("F%d = %q; want %q", f.num, decode1255(t, got), want)
+				}
+				if len(rec) != 1259 {
+					t.Errorf("record is %d bytes", len(rec))
+				}
+			})
+		}
+	}
+}
