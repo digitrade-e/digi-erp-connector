@@ -83,14 +83,24 @@ func decodeJSONBodyStrict(w http.ResponseWriter, r *http.Request, dst any) error
 type jsonKeyError struct {
 	Path      string
 	Duplicate bool
+	TooDeep   bool // a value nested deeper than walkMaxDepth under a type that nests
 }
 
 func (e *jsonKeyError) Error() string {
-	if e.Duplicate {
+	switch {
+	case e.Duplicate:
 		return e.Path + ": key given more than once"
+	case e.TooDeep:
+		return e.Path + ": nested too deeply"
 	}
 	return e.Path + ": not a field (keys are case-sensitive)"
 }
+
+// walkMaxDepth bounds how many objects/arrays the key walk descends through.
+// It only descends where the Go type itself nests (struct, map, slice, array);
+// a request body here is a small document — a receipt is flat — so anything
+// deeper is refused rather than walked.
+const walkMaxDepth = 8
 
 // checkJSONKeys returns a *jsonKeyError for the first duplicate or undeclared
 // key, else nil. Malformed JSON is left for the decoder to report, so the
@@ -99,18 +109,27 @@ func checkJSONKeys(body []byte, t reflect.Type) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var ke *jsonKeyError
-	if err := walkJSONKeys(dec, t, ""); errors.As(err, &ke) {
+	if err := walkJSONKeys(dec, t, "", 0); errors.As(err, &ke) {
 		return ke
 	}
 	return nil
 }
 
 // walkJSONKeys consumes one JSON value. t is the Go type it decodes into, or
-// nil when unknown (a type mismatch the decoder will report, or an any): then
-// only duplicates are checked beneath it.
-func walkJSONKeys(dec *json.Decoder, t reflect.Type, path string) error {
+// nil when unknown (a type mismatch the decoder will report, or an any).
+//
+// It descends only where t itself nests. Any other value — a scalar's, an
+// unknown type's, however deeply nested — is skipped whole with Decode, which
+// is bounded by encoding/json's scanner; walking it token by token cost
+// O(depth²) memory (a 70 KB body allocated 227 MB). depth counts the objects
+// and arrays already entered.
+func walkJSONKeys(dec *json.Decoder, t reflect.Type, path string, depth int) error {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
+	}
+	if t == nil || !nests(t) {
+		var skip json.RawMessage
+		return dec.Decode(&skip)
 	}
 	tok, err := dec.Token()
 	if err != nil {
@@ -119,6 +138,13 @@ func walkJSONKeys(dec *json.Decoder, t reflect.Type, path string) error {
 	delim, ok := tok.(json.Delim)
 	if !ok {
 		return nil
+	}
+	if depth >= walkMaxDepth {
+		p := path
+		if p == "" {
+			p = "body"
+		}
+		return &jsonKeyError{Path: p, TooDeep: true}
 	}
 	switch delim {
 	case '{':
@@ -152,7 +178,7 @@ func walkJSONKeys(dec *json.Decoder, t reflect.Type, path string) error {
 				}
 				next = ft
 			}
-			if err := walkJSONKeys(dec, next, p); err != nil {
+			if err := walkJSONKeys(dec, next, p, depth+1); err != nil {
 				return err
 			}
 		}
@@ -162,13 +188,22 @@ func walkJSONKeys(dec *json.Decoder, t reflect.Type, path string) error {
 			elem = t.Elem()
 		}
 		for dec.More() {
-			if err := walkJSONKeys(dec, elem, path); err != nil {
+			if err := walkJSONKeys(dec, elem, path, depth+1); err != nil {
 				return err
 			}
 		}
 	}
 	_, err = dec.Token() // the closing delimiter
 	return err
+}
+
+// nests reports whether a value of type t can hold keys the walk must check.
+func nests(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Struct, reflect.Map, reflect.Slice, reflect.Array:
+		return true
+	}
+	return false
 }
 
 // jsonFieldTypes maps a struct's exact JSON keys to their field types.

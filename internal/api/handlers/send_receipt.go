@@ -147,6 +147,9 @@ func describeReceiptDecodeError(err error) (field, msg string) {
 		if ke.Duplicate {
 			return ke.Path, "is given more than once"
 		}
+		if ke.TooDeep {
+			return ke.Path, "is nested too deeply"
+		}
 		return ke.Path, "is not a sendReceipt field (keys are case-sensitive)"
 	}
 	if name := unknownJSONField(err); name != "" {
