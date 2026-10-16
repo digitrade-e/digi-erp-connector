@@ -20,7 +20,19 @@ func drainTestQueue(t *testing.T) (*OrderQueue, string, context.CancelFunc) {
 		NewOrderNumberStore(filepath.Join(dir, "lastOrderNumber.json")), noopLogger{})
 	q := NewOrderQueue(sender, noopLogger{})
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	// Cancel AND wait for the worker to exit. Cancelling alone let a job the
+	// test released at its end (a deferred unlockImport) still be writing
+	// into dir while t.TempDir's RemoveAll ran: "directory not empty" under
+	// contention. Cleanups run last-in first-out, so this one finishes before
+	// the TempDir registered above is removed.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-q.done:
+		case <-time.After(10 * time.Second):
+			t.Error("the order worker did not exit within 10 s of its cancel")
+		}
+	})
 	q.Start(ctx)
 	return q, dir, cancel
 }
