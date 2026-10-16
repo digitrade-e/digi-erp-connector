@@ -233,7 +233,7 @@ func (w *ReceiptWriter) lockDataLocked() error {
 		return nil
 	}
 	dir := filepath.Join(w.cfg.DataDir, "receipts")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := privateDirs(dir, w.index.dir, filepath.Dir(w.historyDir), w.historyDir); err != nil {
 		return fmt.Errorf("lock receipt data: %w", err)
 	}
 	path := filepath.Join(dir, receiptLockName)
@@ -380,16 +380,22 @@ func (w *ReceiptWriter) complete(e *receiptIndexEntry, notes ...string) error {
 
 	// History first and the .doc last: its rename is the moment the importer
 	// can see the receipt, so everything it depends on is in place before it.
+	// The history copies hold personal data and are the service's alone; the
+	// herp pair is the importer's to read.
+	if err := privateDirs(histDir); err != nil {
+		return err
+	}
 	for _, f := range []struct {
 		path string
 		data []byte
+		perm os.FileMode
 	}{
-		{histDoc, doc},
-		{histPrm, prm},
-		{prmPath, prm},
-		{docPath, doc},
+		{histDoc, doc, 0o600},
+		{histPrm, prm, 0o600},
+		{prmPath, prm, 0o644},
+		{docPath, doc, 0o644},
 	} {
-		if err := writeIfDifferent(f.path, f.data); err != nil {
+		if err := writeIfDifferent(f.path, f.data, f.perm); err != nil {
 			return err
 		}
 	}
@@ -486,9 +492,25 @@ func sameReceiptRequest(stored, got ReceiptRequest, key string) bool {
 
 // writeIfDifferent atomically writes data to path unless path already holds
 // exactly data, in which case the file (and its mtime) is left alone.
-func writeIfDifferent(path string, data []byte) error {
+func writeIfDifferent(path string, data []byte, perm os.FileMode) error {
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
 		return nil
 	}
-	return atomicfile.Write(path, data, 0o644)
+	return atomicfile.Write(path, data, perm)
+}
+
+// privateDirs makes each directory exist with mode 0700 — also one that
+// already exists wider (cutover-seed's store write creates receipts/ 0755).
+// The receipt data holds names, phones, emails, card digits and codes. On
+// Windows the mode bits mean nothing; the data directory's ACLs apply.
+func privateDirs(dirs ...string) error {
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(d, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
 }
