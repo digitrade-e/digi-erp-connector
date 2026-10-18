@@ -49,7 +49,7 @@ func TestValidateReceipts_RefusesTheOrderFolder(t *testing.T) {
 			if tc.receipt == "" && tc.name == "symlink to the order folder" {
 				t.Skip("no symlink")
 			}
-			cfg := Config{SendOrderDir: tc.order, SendReceiptDir: tc.receipt}
+			cfg := Config{ERP: ERPHasavshevet, SendOrderDir: tc.order, SendReceiptDir: tc.receipt}
 			err := cfg.ValidateReceipts()
 			if tc.wantErr && err == nil {
 				t.Fatalf("ValidateReceipts(%q, %q) = nil; want refused", tc.order, tc.receipt)
@@ -135,11 +135,11 @@ receiptCardNames:
 // directory (System32 under the SCM). Daemon and GUI share this refusal.
 func TestValidateReceipts_RefusesARelativeFolder(t *testing.T) {
 	for _, dir := range []string{"herp", `.\herp`, "./herp", "../x/herp"} {
-		if err := (Config{SendReceiptDir: dir}).ValidateReceipts(); err == nil || !strings.Contains(err.Error(), "absolute") {
+		if err := (Config{ERP: ERPHasavshevet, SendReceiptDir: dir}).ValidateReceipts(); err == nil || !strings.Contains(err.Error(), "absolute") {
 			t.Errorf("ValidateReceipts(%q) = %v; want refused as not absolute", dir, err)
 		}
 	}
-	if err := (Config{SendReceiptDir: "  " + t.TempDir() + " "}).ValidateReceipts(); err != nil {
+	if err := (Config{ERP: ERPHasavshevet, SendReceiptDir: "  " + t.TempDir() + " "}).ValidateReceipts(); err != nil {
 		t.Errorf("an absolute folder with spaces around it was refused: %v", err)
 	}
 }
@@ -204,5 +204,22 @@ func TestReceiptParamFileRoundTripsAndIsOmittedWhenUnset(t *testing.T) {
 	}
 	if strings.Contains(string(out), "hasReceiptParamFile") {
 		t.Errorf("an unconfigured config writes hasReceiptParamFile:\n%s", out)
+	}
+}
+
+// A connector that writes no receipts (erp: sap, or no sendReceiptDir) is never
+// stopped by a receipt key, however wrong: orders must keep running.
+func TestValidateReceipts_DormantKeysNeverRefuse(t *testing.T) {
+	orders := t.TempDir()
+	for name, cfg := range map[string]Config{
+		"sap, relative sendReceiptDir":    {ERP: ERPSAP, SendReceiptDir: "herp"},
+		"sap, sendReceiptDir = order dir": {ERP: ERPSAP, SendOrderDir: orders, SendReceiptDir: orders},
+		"sap, relative receipt BAT":       {ERP: ERPSAP, SendReceiptDir: orders + "/herp", HasReceiptBatFile: "k.bat"},
+		"no erp, sendReceiptDir = order":  {SendOrderDir: orders, SendReceiptDir: orders},
+		"hasavshevet, no sendReceiptDir":  {ERP: ERPHasavshevet, HasReceiptBatFile: "k.bat", HasReceiptParamFile: "k.prm"},
+	} {
+		if err := cfg.ValidateReceipts(); err != nil {
+			t.Errorf("%s: ValidateReceipts = %v; want nil (receipts are not configured)", name, err)
+		}
 	}
 }

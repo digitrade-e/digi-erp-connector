@@ -28,13 +28,13 @@ func TestValidateReceiptConfig(t *testing.T) {
 		{"BAT and has.exe both set", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: herp,
 			HasReceiptBatFile: filepath.Join(dir, "kupain.bat"),
 			HasExePath:        filepath.Join(dir, "has.exe"), HasReceiptParamFile: filepath.Join(dir, "kupain_perm.bat")}, "ambiguous"},
-		{"a card name that fits", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{
+		{"a card name that fits", config.Config{ERP: config.ERPHasavshevet, SendReceiptDir: herp, ReceiptCardNames: config.ReceiptCardNamesConfig{
 			Issuer: map[string]string{"6": "מקס"}}}, ""},
-		{"a card name too wide for F17", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{
+		{"a card name too wide for F17", config.Config{ERP: config.ERPHasavshevet, SendReceiptDir: herp, ReceiptCardNames: config.ReceiptCardNamesConfig{
 			Issuer: map[string]string{"6": strings.Repeat("א", 26)}}}, "receipt card names"},
-		{"a card name not in Windows-1255", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{
+		{"a card name not in Windows-1255", config.Config{ERP: config.ERPHasavshevet, SendReceiptDir: herp, ReceiptCardNames: config.ReceiptCardNamesConfig{
 			Brand: map[string]string{"2": "فيزا"}}}, "receipt card names"},
-		{"a blank card code", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{
+		{"a blank card code", config.Config{ERP: config.ERPHasavshevet, SendReceiptDir: herp, ReceiptCardNames: config.ReceiptCardNamesConfig{
 			Brand: map[string]string{" ": "ויזה"}}}, "receipt card names"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,5 +83,18 @@ func TestCardNamesConfigErrorIsNotAFieldError(t *testing.T) {
 	var ce *CardNamesConfigError
 	if !errors.As(err, &ce) || errors.As(err, &fe) {
 		t.Fatalf("err = %v; want a CardNamesConfigError and no FieldError", err)
+	}
+}
+
+// The card-name check, too, applies only where receipts are configured.
+func TestValidateReceiptConfig_DormantCardNamesNeverRefuse(t *testing.T) {
+	long := config.ReceiptCardNamesConfig{Issuer: map[string]string{"6": strings.Repeat("א", 26)}}
+	for name, cfg := range map[string]config.Config{
+		"sap":                            {ERP: config.ERPSAP, SendReceiptDir: t.TempDir(), ReceiptCardNames: long},
+		"hasavshevet, no sendReceiptDir": {ERP: config.ERPHasavshevet, ReceiptCardNames: long},
+	} {
+		if err := ValidateReceiptConfig(cfg); err != nil {
+			t.Errorf("%s: ValidateReceiptConfig = %v; want nil", name, err)
+		}
 	}
 }
