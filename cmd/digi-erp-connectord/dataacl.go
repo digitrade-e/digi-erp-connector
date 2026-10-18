@@ -16,15 +16,16 @@ import (
 
 // Seams for the tests; dataacl's protection is a no-op outside Windows.
 var (
-	protectTreeFn   = dataacl.ProtectTree
-	protectFileFn   = dataacl.ProtectFile
-	moveAsideFn     = dataacl.MoveAside
-	fileTrustedFn   = dataacl.FileTrusted
-	fileIDFn        = dataacl.FileID
-	setLogPathFn    = logger.SetFilePath
-	newBootstrapLog = logger.NewBootstrap
-	reportRefusalFn = reportRefusal
-	ensureDataDirFn = ensureDataDir
+	protectTreeFn       = dataacl.ProtectTree
+	protectFileFn       = dataacl.ProtectFile
+	moveAsideFn         = dataacl.MoveAside
+	fileTrustedFn       = dataacl.FileTrusted
+	fileIDFn            = dataacl.FileID
+	setLogPathFn        = logger.SetFilePath
+	newBootstrapLog     = logger.NewBootstrap
+	reportRefusalFn     = reportRefusal
+	ensureDataDirFn     = ensureDataDir
+	clearRefusalStateFn = clearRefusalState
 )
 
 // startRefused is Start's error when the data directory could not be

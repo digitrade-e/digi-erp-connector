@@ -81,6 +81,7 @@ func (a *serverApp) Start() error {
 	if err != nil {
 		return a.refuse(early, err)
 	}
+	clearRefusalStateFn() // the next refusal, even for the same reason, is reported at once
 	mark := freshServerLog(dataDir, rep, early)
 
 	// Bootstrap logger writes directly to server.log so we capture pre-config

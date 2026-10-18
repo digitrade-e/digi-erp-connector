@@ -193,3 +193,18 @@ func TestFreshServerLog_KeepsItsOwnLog(t *testing.T) {
 		t.Errorf("a mis-marked server.log was moved %d times; want once", moves)
 	}
 }
+
+// The refusal stamp round-trips through the registry (a test value).
+func TestRefusalState_RoundTrips(t *testing.T) {
+	old := refusalStateValue
+	refusalStateValue = "LastRefusalTest"
+	t.Cleanup(func() { clearRefusalState(); refusalStateValue = old })
+	saveRefusalState("abc 123")
+	if got := loadRefusalState(); got != "abc 123" {
+		t.Fatalf("loaded %q; want %q (HKLM\\%s)", got, "abc 123", refusalStateKey)
+	}
+	clearRefusalState()
+	if got := loadRefusalState(); got != "" {
+		t.Errorf("after clear: %q", got)
+	}
+}
