@@ -3,6 +3,7 @@
 package dataacl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,8 +99,12 @@ func assertOnlyOurs(t *testing.T, path, sddl, user string) {
 	if i < 0 {
 		t.Fatalf("%s: no DACL in %s", path, sddl)
 	}
-	aces := strings.Split(strings.Trim(sddl[i+2:], "PAIRCU"), "(")
-	n := 0
+	dacl := sddl[i+2:]
+	if j := strings.Index(dacl, "S:"); j >= 0 {
+		dacl = dacl[:j]
+	}
+	aces := strings.Split(strings.TrimLeft(dacl, "PAIRCU"), "(")
+	n, sawOW := 0, false
 	for _, ace := range aces {
 		ace = strings.TrimSuffix(ace, ")")
 		if ace == "" {
@@ -118,11 +123,69 @@ func assertOnlyOurs(t *testing.T, path, sddl, user string) {
 		}
 		switch sid {
 		case SIDLocalSystem, SIDAdministrators, user:
+		case SIDOwnerRights:
+			sawOW = true
+			if r := parts[2]; r != "RC" && !strings.EqualFold(r, "0x20000") {
+				t.Errorf("%s: OWNER RIGHTS granted %q in %s; want READ_CONTROL only", path, r, sddl)
+			}
 		default:
-			t.Errorf("%s: ACE for %s in %s; want only SYSTEM, Administrators, %s", path, parts[5], sddl, user)
+			t.Errorf("%s: ACE for %s in %s; want only SYSTEM, Administrators, %s, OWNER RIGHTS", path, parts[5], sddl, user)
 		}
 	}
 	if n == 0 {
 		t.Errorf("%s: empty DACL %s", path, sddl)
+	}
+	if !sawOW {
+		t.Errorf("%s: no OWNER RIGHTS ACE in %s", path, sddl)
+	}
+}
+
+// What the OWNER RIGHTS ACE buys, pinned on the OS: the owner of a file — this
+// test, which created it — keeps an implicit WRITE_DAC as long as no ACE names
+// OWNER RIGHTS (it can rewrite a DACL that grants it nothing), and loses it
+// once an OWNER RIGHTS ACE grants READ_CONTROL alone. The production DACL also
+// grants SYSTEM, Administrators and the service account (this test process is
+// one of them), so the owner effect is shown here on a DACL without those.
+func TestOwnerRights_RemovesTheOwnersImplicitWriteDAC(t *testing.T) {
+	const stranger = "S-1-5-21-1-2-3-4242" // nobody this process is
+	set := func(path, sddl string) error {
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatalf("parse %s: %v", sddl, err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	}
+	newFile := func(name string) string {
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	without := newFile("without-ow")
+	if err := set(without, "D:P(A;;FA;;;"+stranger+")"); err != nil {
+		t.Fatalf("first set: %v", err)
+	}
+	if err := set(without, "D:P(A;;FA;;;"+stranger+")"); err != nil {
+		t.Fatalf("without OWNER RIGHTS the owner could not rewrite the DACL (%v); the premise of this test does not hold", err)
+	}
+
+	with := newFile("with-ow")
+	if err := set(with, "D:P(A;;FA;;;"+stranger+")(A;;RC;;;"+SIDOwnerRights+")"); err != nil {
+		t.Fatalf("first set: %v", err)
+	}
+	err := set(with, "D:P(A;;FA;;;"+stranger+")")
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("with OWNER RIGHTS = READ_CONTROL the owner rewrote the DACL (err %v); want ERROR_ACCESS_DENIED", err)
+	}
+	// READ_CONTROL is still there: the owner can read the DACL.
+	if _, err := windows.GetNamedSecurityInfo(with, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION); err != nil {
+		t.Errorf("the owner can no longer read the DACL: %v", err)
 	}
 }
