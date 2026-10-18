@@ -17,6 +17,44 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 )
 
+// newUILoggerFn is a seam for the launch-order test.
+var newUILoggerFn = newUILogger
+
+// startGUILogs is the GUI's launch sequence for its logs, in order: walk the
+// data directory (prepareGUIDataDir), then open ui.log — only if the walk
+// allowed it — register it for a fresh reopen, and write the walk's own lines
+// into it. serverOK says whether server.log may be opened once the config is
+// loaded (openGUIServerLog).
+func startGUILogs(dataDir, uiPath, serverPath string) (ui *uiLogger, serverOK bool, protectErr error) {
+	early := &lineLogger{}
+	ok, protectErr := prepareGUIDataDir(dataDir, []string{uiPath, serverPath}, early)
+	ui = newUILoggerFn(ok[uiPath])
+	heldLogs[uiPath] = ui.reopenFresh
+	for _, line := range early.lines {
+		ui.Printf("%s", line)
+	}
+	return ui, ok[serverPath], protectErr
+}
+
+// openGUIServerLog opens the GUI's server.log logger (open: logger.New with
+// the loaded config) when startGUILogs allowed it, stderr otherwise, wrapped
+// so a save's walk can reopen it fresh.
+func openGUIServerLog(serverOK bool, serverPath string, open func() (logger.LoggerService, error)) *swapLogger {
+	var inner logger.LoggerService
+	if serverOK {
+		if l, err := open(); err == nil {
+			inner = l
+		}
+	}
+	if inner == nil {
+		inner = logger.NewStderr()
+		inner.Warn("server.log could not be opened (see ui.log); using stderr")
+	}
+	s := &swapLogger{inner: inner, path: serverPath, open: open}
+	heldLogs[serverPath] = s.reopenFresh
+	return s
+}
+
 // heldLogs are the log files the GUI holds open, by path, each with what
 // closes it, moves it aside and opens a fresh one. main registers them.
 var heldLogs = map[string]func(){}

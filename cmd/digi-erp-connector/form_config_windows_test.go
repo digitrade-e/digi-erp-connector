@@ -132,3 +132,25 @@ func TestPersistConfig_AddsNoACEForTheOperator(t *testing.T) {
 		}
 	}
 }
+
+// A save whose walk had to reset a log the GUI holds open reopens that log
+// fresh (persistConfig -> reopenHeldLogs).
+func TestPersistConfig_ReopensAResetHeldLog(t *testing.T) {
+	t.Setenv("PROGRAMDATA", t.TempDir())
+	held := filepath.Join(paths.DataDir(), "ui.log")
+	reopened := 0
+	oldT, oldH := guiProtectTreeFn, heldLogs
+	guiProtectTreeFn = func(string, dataacl.TreeOptions) (dataacl.Report, error) {
+		return dataacl.Report{Reset: 1, ResetPaths: []string{held}}, nil
+	}
+	heldLogs = map[string]func(){held: func() { reopened++ }}
+	t.Cleanup(func() { guiProtectTreeFn, heldLogs = oldT, oldH })
+	cfg := config.Default()
+	cfg.ERP = config.ERPSAP
+	if _, err := persistConfig(cfg, "", &recLogger{}); err != nil {
+		t.Fatalf("persistConfig: %v", err)
+	}
+	if reopened != 1 {
+		t.Errorf("the reset held log was reopened %d times; want once", reopened)
+	}
+}

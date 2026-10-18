@@ -32,16 +32,8 @@ func main() {
 	// no log, and saving is refused until it is fixed.
 	uiPath, _ := paths.UILogFilePath()
 	serverPath, _ := paths.LoggerFilePath()
-	early := &lineLogger{}
-	logsOK, protectErr := prepareGUIDataDir(paths.DataDir(), []string{uiPath, serverPath}, early)
-	uiLogOK, serverLogOK := logsOK[uiPath], logsOK[serverPath]
-
-	uiLog := newUILogger(uiLogOK)
+	uiLog, serverLogOK, protectErr := startGUILogs(paths.DataDir(), uiPath, serverPath)
 	defer uiLog.Close()
-	heldLogs[uiPath] = uiLog.reopenFresh
-	for _, line := range early.lines {
-		uiLog.Printf("%s", line)
-	}
 
 	// The GUI has no console when launched from the shortcut, so a panic would
 	// otherwise vanish. Log it and tell the operator where to look.
@@ -85,19 +77,7 @@ func main() {
 		uiLog.Printf("config loaded")
 	}
 
-	openServerLog := func() (logger.LoggerService, error) { return logger.New(cfg) }
-	inner, logErr := logger.LoggerService(nil), error(nil)
-	if serverLogOK {
-		inner, logErr = openServerLog()
-	} else {
-		logErr = fmt.Errorf("server.log could not be prepared (see ui.log)")
-	}
-	if logErr != nil {
-		inner = logger.NewStderr()
-		inner.Warn("logger init failed; using stderr")
-	}
-	logSvc := &swapLogger{inner: inner, path: serverPath, open: openServerLog}
-	heldLogs[serverPath] = logSvc.reopenFresh
+	logSvc := openGUIServerLog(serverLogOK, serverPath, func() (logger.LoggerService, error) { return logger.New(cfg) })
 	defer logSvc.Close()
 
 	uiLog.Printf("building window")

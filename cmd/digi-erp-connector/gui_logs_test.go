@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 )
 
@@ -86,5 +88,48 @@ func TestReopenHeldLogs(t *testing.T) {
 	reopenHeldLogs(dataacl.Report{ResetPaths: []string{`C:\d\config.yaml`, srv}})
 	if strings.Join(reopened, ",") != srv {
 		t.Errorf("reopened %v; want only server.log", reopened)
+	}
+}
+
+// T4-4: the GUI's launch sequence for its logs, in order — the walk, then
+// ui.log (opened only if the walk allowed it), then, once the config is
+// loaded, server.log (likewise). A refused walk opens neither file.
+func TestGUILaunchSequence(t *testing.T) {
+	dir := t.TempDir()
+	ui, srv := dir+`\ui.log`, dir+`\server.log`
+	run := func(t *testing.T, walkErr error) []string {
+		var calls []string
+		oldT, oldTr, oldU, oldH := guiProtectTreeFn, guiFileTrustedFn, newUILoggerFn, heldLogs
+		guiProtectTreeFn = func(string, dataacl.TreeOptions) (dataacl.Report, error) {
+			calls = append(calls, "walk")
+			return dataacl.Report{}, walkErr
+		}
+		guiFileTrustedFn = func(string) (bool, error) { return true, nil }
+		newUILoggerFn = func(usable bool) *uiLogger {
+			calls = append(calls, fmt.Sprintf("ui:%v", usable))
+			return newUILogger(false)
+		}
+		heldLogs = map[string]func(){}
+		t.Cleanup(func() { guiProtectTreeFn, guiFileTrustedFn, newUILoggerFn, heldLogs = oldT, oldTr, oldU, oldH })
+
+		uiLog, serverOK, _ := startGUILogs(dir, ui, srv)
+		calls = append(calls, "config")
+		openGUIServerLog(serverOK, srv, func() (logger.LoggerService, error) {
+			calls = append(calls, "server")
+			return logger.NewStderr(), nil
+		})
+		if _, ok := heldLogs[ui]; !ok || uiLog == nil {
+			t.Error("ui.log was not registered for a fresh reopen")
+		}
+		if _, ok := heldLogs[srv]; !ok {
+			t.Error("server.log was not registered for a fresh reopen")
+		}
+		return calls
+	}
+	if got := strings.Join(run(t, nil), ","); got != "walk,ui:true,config,server" {
+		t.Errorf("launch order %s; want walk,ui:true,config,server", got)
+	}
+	if got := strings.Join(run(t, dataacl.ErrReparsePoint), ","); got != "walk,ui:false,config" {
+		t.Errorf("refused launch %s; want walk,ui:false,config (no file opened)", got)
 	}
 }
