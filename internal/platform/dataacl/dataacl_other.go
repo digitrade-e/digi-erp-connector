@@ -7,3 +7,6 @@ func ProtectDir(string) error { return nil }
 
 // ProtectFile does nothing outside Windows.
 func ProtectFile(string) error { return nil }
+
+// ProtectTree does nothing outside Windows.
+func ProtectTree(string) (Report, error) { return Report{}, nil }

@@ -17,9 +17,16 @@
 // itself access again. With it the owner's implicit rights are exactly what the
 // ACE grants. READ_CONTROL is kept (reading who has access reveals nothing the
 // DACL protects, and tools such as icacls and Explorer need it to show the
-// owner its own object); WRITE_DAC and every data right are not. The owner
-// itself is left as it is: changing it needs privileges a service account may
-// not hold, and the owner no longer carries any power here.
+// owner its own object); WRITE_DAC and every data right are not.
+//
+// ProtectTree (the daemon's start) also refuses a data directory that is, or
+// contains, a symlink or junction, resets every entry under it that carries a
+// DACL of its own to the inherited one — so an ACL planted before the first
+// protected start, or added by hand, does not survive — and, when running as
+// SYSTEM, makes SYSTEM the directory's owner (WRITE_OWNER is part of SYSTEM's
+// Full Control ACE). Run under any other account it leaves the owner alone:
+// that account may not be allowed to assign SYSTEM as owner, and with the
+// OWNER RIGHTS ACE the owner carries no power here anyway.
 //
 // Elsewhere both functions do nothing: on Linux the data directory is
 // /etc/digi-erp-connector, root's, and files are written 0600.
