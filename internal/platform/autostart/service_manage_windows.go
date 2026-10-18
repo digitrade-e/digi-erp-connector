@@ -80,9 +80,13 @@ func EnsureWindowsServiceAutoStart(name, exePath string) (bool, error) {
 // (recoveryDelays), also on a non-crash failure (a non-zero exit). Best
 // effort: the service works without it.
 func setRecovery(s *mgr.Service) {
-	actions := make([]mgr.RecoveryAction, 0, len(recoveryDelays))
-	for _, d := range recoveryDelays {
-		actions = append(actions, mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: d})
+	var actions []mgr.RecoveryAction
+	for _, a := range recoveryActions() {
+		t := mgr.NoAction
+		if a.restart {
+			t = mgr.ServiceRestart
+		}
+		actions = append(actions, mgr.RecoveryAction{Type: t, Delay: a.delay})
 	}
 	_ = s.SetRecoveryActions(actions, uint32(recoveryResetPeriod.Seconds()))
 	_ = s.SetRecoveryActionsOnNonCrashFailures(true)

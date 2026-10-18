@@ -63,7 +63,9 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status 
 			}
 			status <- svc.Status{State: svc.StopPending, WaitHint: uint32(stopWaitHint.Milliseconds())}
 			h.stopApp()
-			status <- svc.Status{State: svc.Stopped}
+			// No STOPPED of our own (as for a failed Start): the framework's
+			// final update carries the exit code, so the SCM's failure actions
+			// fire for a runtime crash too.
 			return false, 1
 		}
 	}

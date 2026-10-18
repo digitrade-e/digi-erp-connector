@@ -154,6 +154,23 @@ var recoveryDelays = []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Min
 
 const recoveryResetPeriod = 24 * time.Hour
 
+// recoveryAction is one SCM failure action, portable so the plan is tested
+// everywhere: restart (or do nothing) after delay.
+type recoveryAction struct {
+	restart bool
+	delay   time.Duration
+}
+
+// recoveryActions is the list setRecovery hands the SCM: a restart at each
+// planned delay.
+func recoveryActions() []recoveryAction {
+	out := make([]recoveryAction, 0, len(recoveryDelays))
+	for _, d := range recoveryDelays {
+		out = append(out, recoveryAction{restart: true, delay: d})
+	}
+	return out
+}
+
 type ServiceApp interface {
 	Start() error
 	Stop(ctx context.Context)

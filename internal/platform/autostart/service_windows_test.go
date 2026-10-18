@@ -72,3 +72,40 @@ func TestExecute_ReportsAServiceSpecificExitCode(t *testing.T) {
 		}
 	}
 }
+
+// crashingApp starts, then its server dies (Errors fires).
+type crashingApp struct {
+	errs    chan error
+	stopped bool
+}
+
+func (a *crashingApp) Start() error         { a.errs <- errors.New("listener died"); return nil }
+func (a *crashingApp) Stop(context.Context) { a.stopped = true }
+func (a *crashingApp) Errors() <-chan error { return a.errs }
+func (*crashingApp) Logger() Logger         { return nil }
+
+// A runtime failure (the server dies after a good start) ends with a
+// non-zero exit and NO STOPPED of Execute's own: the framework's final
+// update carries the code, so the SCM's failure actions fire for a crash too.
+func TestExecute_RuntimeFailureLeavesTheFinalStatusToTheFramework(t *testing.T) {
+	app := &crashingApp{errs: make(chan error, 1)}
+	status := make(chan svc.Status, 10)
+	specific, code := (&serviceHandler{app: app}).Execute(nil, make(chan svc.ChangeRequest), status)
+	if specific || code != 1 {
+		t.Errorf("Execute = %v, %d; want a plain exit code 1", specific, code)
+	}
+	if !app.stopped {
+		t.Error("the app was not stopped")
+	}
+	close(status)
+	var states []svc.State
+	for s := range status {
+		states = append(states, s.State)
+		if s.State == svc.Stopped {
+			t.Errorf("Execute sent %+v itself", s)
+		}
+	}
+	if n := len(states); n < 2 || states[n-2] != svc.Running || states[n-1] != svc.StopPending {
+		t.Errorf("states %v; want … Running, StopPending", states)
+	}
+}

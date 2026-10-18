@@ -158,3 +158,17 @@ func TestRecoveryPlan(t *testing.T) {
 		t.Errorf("reset period %v", recoveryResetPeriod)
 	}
 }
+
+// The action list setRecovery hands the SCM: every action a restart, at the
+// planned delays — never "no action" in between or at the end.
+func TestRecoveryActions(t *testing.T) {
+	got := recoveryActions()
+	if len(got) != len(recoveryDelays) {
+		t.Fatalf("actions %+v; want %d", got, len(recoveryDelays))
+	}
+	for i, a := range got {
+		if !a.restart || a.delay != recoveryDelays[i] {
+			t.Errorf("action %d = %+v; want a restart after %v", i, a, recoveryDelays[i])
+		}
+	}
+}
