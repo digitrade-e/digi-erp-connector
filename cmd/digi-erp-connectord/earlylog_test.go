@@ -123,3 +123,25 @@ func TestStart_RefusalOpensNoFileLog(t *testing.T) {
 
 // The service handler finds the checkpoint hook through this interface.
 var _ autostart.StartProgressSetter = (*serverApp)(nil)
+
+// A data directory that cannot even be created is refused the same way: no
+// file log, the refusal report, exit code 2.
+func TestStart_EnsureDataDirFailureIsARefusal(t *testing.T) {
+	oldE, oldB, oldR := ensureDataDirFn, newBootstrapLog, reportRefusalFn
+	boom := errors.New("access denied")
+	ensureDataDirFn = func(string) error { return boom }
+	opened := 0
+	newBootstrapLog = func() logger.LoggerService { opened++; return &quietLogger{} }
+	var reported error
+	reportRefusalFn = func(_ []string, err error) { reported = err }
+	t.Cleanup(func() { ensureDataDirFn, newBootstrapLog, reportRefusalFn = oldE, oldB, oldR })
+
+	err := (&serverApp{}).Start()
+	var ec autostart.ExitCoder
+	if !errors.Is(err, boom) || !errors.As(err, &ec) || ec.ExitCode() != autostart.ExitDataDirRefused {
+		t.Fatalf("Start = %v; want the error with exit code %d", err, autostart.ExitDataDirRefused)
+	}
+	if opened != 0 || !errors.Is(reported, boom) {
+		t.Errorf("bootstrap log opened %d times, refusal reported %v; want 0 and the error", opened, reported)
+	}
+}

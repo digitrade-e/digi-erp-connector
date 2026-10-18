@@ -24,6 +24,7 @@ var (
 	setLogPathFn    = logger.SetFilePath
 	newBootstrapLog = logger.NewBootstrap
 	reportRefusalFn = reportRefusal
+	ensureDataDirFn = ensureDataDir
 )
 
 // startRefused is Start's error when the data directory could not be

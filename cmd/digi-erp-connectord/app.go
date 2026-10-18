@@ -73,7 +73,7 @@ func (a *serverApp) Start() error {
 	// before the config is read, so also on a first install's start, which has
 	// no config yet (Windows only; a no-op elsewhere). Fails closed.
 	dataDir := paths.DataDir()
-	if err := ensureDataDir(dataDir); err != nil {
+	if err := ensureDataDirFn(dataDir); err != nil {
 		early.Error(fmt.Sprintf("could not create the data directory %s; not starting", dataDir), err)
 		return a.refuse(early, err)
 	}

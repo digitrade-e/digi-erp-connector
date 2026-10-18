@@ -182,4 +182,14 @@ func TestFreshServerLog_KeepsItsOwnLog(t *testing.T) {
 	if moves != 0 {
 		t.Errorf("our own, marked server.log was moved aside")
 	}
+
+	// T4-2: the same trusted, unreset file under a marker naming another
+	// object is not provably ours: it is moved aside.
+	if err := os.WriteFile(filepath.Join(paths.DataDir(), logIDName), []byte("00000000-0000000000000000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshServerLog(paths.DataDir(), dataacl.Report{}, &quietLogger{})
+	if moves != 1 {
+		t.Errorf("a mis-marked server.log was moved %d times; want once", moves)
+	}
 }
