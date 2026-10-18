@@ -14,15 +14,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// persistConfig wired end to end with %PROGRAMDATA% in a temp dir: every save
-// protects config.yaml at ConfigFilePath() after it is written; the data
-// directory only on the save that creates config.yaml, or the first save after
-// a launch that found no data directory — and then BEFORE anything is written
-// (R2-2): no config.yaml and no secrets\ yet when ProtectTree runs.
+// persistConfig wired end to end with %PROGRAMDATA% in a temp dir: EVERY
+// save protects the data directory first — before the secret or config.yaml
+// is written (R2-2, R3-2) — and config.yaml after it is written.
 func TestPersistConfig_ProtectsWhatItSaves(t *testing.T) {
 	t.Setenv("PROGRAMDATA", t.TempDir())
-	dataDirMissingAtLaunch.Store(false)
-	t.Cleanup(func() { dataDirMissingAtLaunch.Store(false) })
 	cfgPath, err := paths.ConfigFilePath()
 	if err != nil {
 		t.Fatal(err)
@@ -31,11 +27,8 @@ func TestPersistConfig_ProtectsWhatItSaves(t *testing.T) {
 	cfg := config.Default()
 	cfg.ERP = config.ERPSAP // no stored-procedure setup
 
-	save := func(wantDir bool) {
-		t.Helper()
+	for i := 0; i < 3; i++ {
 		var order []string
-		// Only a save that creates them can show the order: what earlier saves
-		// wrote is there already.
 		_, cfgBefore := os.Stat(cfgPath)
 		_, secBefore := os.Stat(secretsDir)
 		oldT, oldF := guiProtectTreeFn, guiProtectFileFn
@@ -44,7 +37,7 @@ func TestPersistConfig_ProtectsWhatItSaves(t *testing.T) {
 			_, secErr := os.Stat(secretsDir)
 			order = append(order, "tree:"+p)
 			if (cfgBefore != nil && cfgErr == nil) || (secBefore != nil && secErr == nil) {
-				t.Errorf("ProtectTree ran after this save wrote (config.yaml: %v, secrets: %v)", cfgErr, secErr)
+				t.Errorf("save %d: ProtectTree ran after this save wrote (config.yaml: %v, secrets: %v)", i, cfgErr, secErr)
 			}
 			return dataacl.Report{}, nil
 		}
@@ -55,24 +48,14 @@ func TestPersistConfig_ProtectsWhatItSaves(t *testing.T) {
 			order = append(order, "file:"+p)
 			return nil
 		}
-		t.Cleanup(func() { guiProtectTreeFn, guiProtectFileFn = oldT, oldF })
-
 		if _, err := persistConfig(cfg, "a password", &recLogger{}); err != nil {
 			t.Fatalf("persistConfig: %v", err)
 		}
-		want := []string{"file:" + cfgPath}
-		if wantDir {
-			want = append([]string{"tree:" + paths.DataDir()}, want...)
-		}
-		if strings.Join(order, "|") != strings.Join(want, "|") {
-			t.Errorf("calls %v; want %v", order, want)
+		guiProtectTreeFn, guiProtectFileFn = oldT, oldF
+		if got, want := strings.Join(order, "|"), "tree:"+paths.DataDir()+"|file:"+cfgPath; got != want {
+			t.Errorf("save %d: calls %s; want %s", i, got, want)
 		}
 	}
-	save(true)  // first save: config.yaml did not exist
-	save(false) // a later save in the session
-	dataDirMissingAtLaunch.Store(true)
-	save(true)  // the first save after a launch that found no data directory
-	save(false) // …and only that one
 }
 
 // The elevated GUI adds no ACE of its own: Administrators covers it, so its

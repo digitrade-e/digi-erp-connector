@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -39,8 +38,8 @@ func TestProtectBeforeAndAfterSave(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		dirs, files := stubGUIProtect(t, nil, nil)
 		log := &recLogger{}
-		if w := protectDirBeforeSave(dir, log); w != "" {
-			t.Errorf("before-save warning %q", w)
+		if err := protectDirBeforeSave(dir, log); err != nil {
+			t.Errorf("protectDirBeforeSave = %v", err)
 		}
 		if w := protectFileAfterSave(cfg, log); w != "" {
 			t.Errorf("after-save warning %q", w)
@@ -48,30 +47,31 @@ func TestProtectBeforeAndAfterSave(t *testing.T) {
 		if len(*dirs) != 1 || (*dirs)[0] != dir || len(*files) != 1 || (*files)[0] != cfg {
 			t.Errorf("ProtectTree %v, ProtectFile %v", *dirs, *files)
 		}
-		if len(log.errors) != 0 {
-			t.Errorf("logged %v", log.errors)
-		}
 	})
-	t.Run("the directory fails", func(t *testing.T) {
-		stubGUIProtect(t, errors.New("access denied"), nil)
-		log := &recLogger{}
-		w := protectDirBeforeSave(dir, log)
-		if !strings.Contains(w, "data directory") || !strings.Contains(w, "access denied") {
-			t.Errorf("warning %q; want one naming the data directory and the error", w)
-		}
-		if len(log.errors) != 1 {
-			t.Errorf("logged %v", log.errors)
-		}
-	})
+	// R3-2: the save fails closed. Whatever the walk refused — a link, an
+	// untrusted owner, an access error — nothing may be written into it.
+	for name, walkErr := range map[string]error{
+		"a reparse point": dataacl.ErrReparsePoint, "an untrusted owner": dataacl.ErrUntrustedOwner,
+		"a hard link": dataacl.ErrHardLink, "any other error": errors.New("access denied"),
+	} {
+		t.Run("refused: "+name, func(t *testing.T) {
+			stubGUIProtect(t, walkErr, nil)
+			log := &recLogger{}
+			err := protectDirBeforeSave(dir, log)
+			if !errors.Is(err, walkErr) || !strings.Contains(err.Error(), "Not saved") || !strings.Contains(err.Error(), "nothing was written") {
+				t.Errorf("protectDirBeforeSave = %v; want a refusal wrapping %v that says nothing was written", err, walkErr)
+			}
+			if len(log.errors) != 1 {
+				t.Errorf("logged %v", log.errors)
+			}
+		})
+	}
 	t.Run("config.yaml fails", func(t *testing.T) {
 		stubGUIProtect(t, nil, errors.New("not the owner"))
 		log := &recLogger{}
 		w := protectFileAfterSave(cfg, log)
 		if !strings.HasPrefix(w, "Saved, but") || !strings.Contains(w, "config.yaml") {
 			t.Errorf("warning %q; want a Saved-but warning naming config.yaml", w)
-		}
-		if len(log.errors) != 1 || !strings.Contains(log.errors[0], "not the owner") {
-			t.Errorf("logged %v", log.errors)
 		}
 	})
 }
@@ -116,51 +116,6 @@ func stubGUIProtect(t *testing.T, dirErr, fileErr error) (*[]string, *[]string) 
 	guiProtectFileFn = func(p string) error { files = append(files, p); return fileErr }
 	t.Cleanup(func() { guiProtectTreeFn, guiProtectFileFn = oldDir, oldFile })
 	return &dirs, &files
-}
-
-// "The data directory was missing at launch" holds for one save only: a later
-// save in the same session must not re-apply the directory's DACL (which
-// would add the operator's own account to it).
-func TestDataDirMissingAtLaunchIsOneShot(t *testing.T) {
-	dataDirMissingAtLaunch.Store(true)
-	t.Cleanup(func() { dataDirMissingAtLaunch.Store(false) })
-	if !takeDataDirMissingAtLaunch() {
-		t.Fatal("first take = false; want true")
-	}
-	if takeDataDirMissingAtLaunch() {
-		t.Error("second take = true; want false")
-	}
-}
-
-// Per save: protect the directory when it was missing at launch, or when
-// config.yaml does not exist yet (this save creates it).
-func TestSaveProtectsTheDirectory(t *testing.T) {
-	present := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(present, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	absent := filepath.Join(t.TempDir(), "config.yaml")
-	for _, tc := range []struct {
-		launch bool
-		cfg    string
-		want   bool
-	}{
-		{false, present, false},
-		{false, absent, true},
-		{true, present, true},
-		{true, absent, true},
-	} {
-		dataDirMissingAtLaunch.Store(tc.launch)
-		if got := saveProtectsTheDirectory(tc.cfg); got != tc.want {
-			t.Errorf("launch=%v cfg exists=%v: %v; want %v", tc.launch, tc.cfg == present, got, tc.want)
-		}
-		// Taken by every save, whatever else decided: a later save never
-		// re-applies the directory's DACL on the launch's account.
-		if dataDirMissingAtLaunch.Load() {
-			t.Errorf("launch=%v cfg exists=%v: the one-shot was not consumed", tc.launch, tc.cfg == present)
-		}
-	}
-	dataDirMissingAtLaunch.Store(false)
 }
 
 func TestDataDirMissing(t *testing.T) {

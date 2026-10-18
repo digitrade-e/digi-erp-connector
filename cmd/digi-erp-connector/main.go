@@ -31,7 +31,6 @@ func main() {
 	// log files first: one that is not exactly ours is moved aside before it is
 	// opened, so the GUI never appends to a file object someone else may hold.
 	missing := dataDirMissing(paths.DataDir())
-	dataDirMissingAtLaunch.Store(missing)
 	uiLogOK, serverLogOK := true, true
 	if !missing {
 		if p, err := paths.UILogFilePath(); err == nil {

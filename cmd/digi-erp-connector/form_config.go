@@ -147,17 +147,14 @@ func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bo
 // solely by price/stock. Failing the whole save there would make such a node
 // impossible to configure at all.
 func persistConfig(cfg config.Config, password string, logSvc logger.LoggerService) (warning string, err error) {
-	// Decided per save, before anything is written: does this save also
-	// protect the data directory (config_acl.go)? If so it does it first, so
-	// everything below is written into the protected tree (R2-2).
-	dataDir := paths.DataDir()
+	// Every save protects the data directory first, and writes nothing if
+	// that fails (config_acl.go): everything below lands in a tree the walk
+	// accepted.
 	cfgPath, cfgPathErr := paths.ConfigFilePath()
-	var notes []string
-	if cfgPathErr == nil && saveProtectsTheDirectory(cfgPath) {
-		if w := protectDirBeforeSave(dataDir, logSvc); w != "" {
-			notes = append(notes, w)
-		}
+	if err := protectDirBeforeSave(paths.DataDir(), logSvc); err != nil {
+		return "", err
 	}
+	var notes []string
 
 	if cfg.ERP == config.ERPHasavshevet {
 		if w := ensureProceduresBestEffort(cfg, password, logSvc); w != "" {
