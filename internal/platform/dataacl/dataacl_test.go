@@ -239,3 +239,28 @@ func TestMoveAside(t *testing.T) {
 		t.Errorf("the original is still there (%v)", err)
 	}
 }
+
+// R4-2a: an owner the walk trusts only through Administrators membership —
+// direct, or nested via a domain group — is handed to BUILTIN\Administrators,
+// so the domain is asked at most once; with claimOwn (the elevated GUI) so is
+// what this process's own account owns. Built-in owners are left alone.
+func TestNeedsClaim(t *testing.T) {
+	const me, admin = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-500"
+	for _, tc := range []struct {
+		owner    string
+		claimOwn bool
+		want     bool
+	}{
+		{SIDLocalSystem, true, false},
+		{SIDAdministrators, true, false},
+		{SIDTrustedInstaller, true, false},
+		{me, false, false},
+		{me, true, true},
+		{admin, false, true},
+		{admin, true, true},
+	} {
+		if got := needsClaim(tc.owner, me, tc.claimOwn); got != tc.want {
+			t.Errorf("needsClaim(%s, claimOwn=%v) = %v; want %v", tc.owner, tc.claimOwn, got, tc.want)
+		}
+	}
+}

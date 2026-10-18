@@ -66,7 +66,13 @@ func protectDataDir(dataDir string, progress func(), log logger.LoggerService) (
 		log.Error(fmt.Sprintf("could not make SYSTEM the owner of the data directory %s; continuing", dataDir), rep.OwnerErr)
 	}
 	if rep.AdminsErr != nil {
-		log.Warn(fmt.Sprintf("data directory: could not list the Administrators members (%v); only the built-in owners were trusted", rep.AdminsErr))
+		log.Warn(fmt.Sprintf("data directory: could not list the Administrators members (%v); each owner's membership was resolved on its own instead", rep.AdminsErr))
+	}
+	if rep.Claimed > 0 {
+		log.Info(fmt.Sprintf("data directory: %d entries owned by administrators were handed to BUILTIN\\Administrators", rep.Claimed))
+	}
+	if rep.ClaimErr != nil {
+		log.Warn(fmt.Sprintf("data directory: could not hand an entry to Administrators (%v); its owner is still trusted, and will be resolved again next start", rep.ClaimErr))
 	}
 	return rep, nil
 }

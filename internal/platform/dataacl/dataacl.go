@@ -80,8 +80,9 @@ type Report struct {
 	RootSet    bool     // the directory's own DACL was rewritten
 	OwnerSet   bool     // the directory's owner was set to SYSTEM (only when running as SYSTEM)
 	OwnerErr   error    // setting the owner failed; not fatal
-	AdminsErr  error    // the Administrators members could not be listed; only the fixed owners were trusted
-	Claimed    int      // entries whose owner was set to Administrators (TreeOptions.ClaimForAdministrators)
+	AdminsErr  error    // the Administrators members could not be listed; members are then resolved one by one (NetUserGetLocalGroups)
+	Claimed    int      // entries whose owner was set to Administrators (needsClaim)
+	ClaimErr   error    // the first claim that failed; not fatal (the owner stays trusted)
 }
 
 // TreeOptions tunes ProtectTree.
@@ -102,6 +103,10 @@ const progressEvery = 64
 // testHookBeforeEntry, if set, runs before each entry under the root is
 // opened (tests swap an entry for a junction there).
 var testHookBeforeEntry func(path string)
+
+// testIndirectOverride, if set, answers the nested-membership question in
+// place of the real lookup (tests stand in for a domain).
+var testIndirectOverride func(sid string) (bool, error)
 
 var sidPattern = regexp.MustCompile(`^S-1-[0-9]+(-[0-9]+)+$`)
 
@@ -139,6 +144,21 @@ func trustedOwner(owner, tokenUser string, admins map[string]bool, indirect func
 		return false, fmt.Errorf("could not resolve whether %s is an administrator: %w", owner, err)
 	}
 	return ok, nil
+}
+
+// needsClaim reports whether an entry owned by owner (already trusted) is
+// handed to BUILTIN\Administrators: when it is trusted only through
+// Administrators membership — so a nested membership needs the domain at
+// most once (R4-2a) — and, with claimOwn (the elevated GUI), when this
+// process's own account owns it. Built-in owners are left alone.
+func needsClaim(owner, tokenUser string, claimOwn bool) bool {
+	switch owner {
+	case SIDLocalSystem, SIDAdministrators, SIDTrustedInstaller:
+		return false
+	case tokenUser:
+		return claimOwn
+	}
+	return true
 }
 
 // longPathFor gives a Windows absolute path its \\?\ form (\\?\UNC\ for a

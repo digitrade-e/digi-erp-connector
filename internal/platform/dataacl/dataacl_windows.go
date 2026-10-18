@@ -119,7 +119,8 @@ type trust struct {
 	adminsErr  error
 	adminsName string          // the local Administrators group's (localized) name
 	indirect   map[string]bool // owners resolved as members through a nested group
-	claim      bool            // TreeOptions.ClaimForAdministrators
+	indirectFn func(sid string) (bool, error)
+	claim      bool // TreeOptions.ClaimForAdministrators
 	baSID      *windows.SID
 	root       *windows.SECURITY_DESCRIPTOR
 	childDir   *windows.SECURITY_DESCRIPTOR
@@ -149,6 +150,10 @@ func newTrust() (*trust, error) {
 		t.adminsName = name
 	}
 	t.admins, t.adminsErr = localAdministrators(ba)
+	t.indirectFn = t.isIndirectAdministrator
+	if testIndirectOverride != nil {
+		t.indirectFn = testIndirectOverride
+	}
 
 	for _, x := range []struct {
 		dst       **windows.SECURITY_DESCRIPTOR
@@ -193,6 +198,9 @@ func (t *trust) isIndirectAdministrator(sidStr string) (bool, error) {
 		return false, err
 	}
 	account, domain, use, err := sid.LookupAccount("")
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		return false, fmt.Errorf("%s resolves to no account (a deleted user, or one of an unreachable domain): %w", sidStr, err)
+	}
 	if err != nil {
 		return false, fmt.Errorf("look up %s: %w", sidStr, err)
 	}
@@ -266,9 +274,8 @@ func localAdministrators(ba *windows.SID) (map[string]bool, error) {
 }
 
 // check refuses an untrusted owner and reports whether n's DACL differs from
-// want; with claim set, an entry this process's account owns is handed to
-// Administrators (n must be open with WRITE_OWNER).
-func (t *trust) check(path string, n node, want *windows.SECURITY_DESCRIPTOR) (differs, claimed bool, err error) {
+// want, and whether its owner is to be handed to Administrators (needsClaim).
+func (t *trust) check(path string, n node, want *windows.SECURITY_DESCRIPTOR) (differs, claim bool, err error) {
 	sd, err := windows.GetSecurityInfo(n.h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -279,20 +286,33 @@ func (t *trust) check(path string, n node, want *windows.SECURITY_DESCRIPTOR) (d
 		return false, false, fmt.Errorf("dataacl: read the owner of %s: %w", path, err)
 	}
 	o := owner.String()
-	ok, why := trustedOwner(o, t.tokenUser, t.admins, t.isIndirectAdministrator)
+	ok, why := trustedOwner(o, t.tokenUser, t.admins, t.indirectFn)
 	if !ok {
 		if why != nil {
 			return false, false, fmt.Errorf("%w: %s is owned by %s (%v)", ErrUntrustedOwner, path, o, why)
 		}
 		return false, false, fmt.Errorf("%w: %s is owned by %s", ErrUntrustedOwner, path, o)
 	}
-	if t.claim && o == t.tokenUser && o != SIDLocalSystem && o != SIDAdministrators {
-		if err := setOwner(n.h, t.baSID); err != nil {
-			return false, false, fmt.Errorf("dataacl: make Administrators the owner of %s: %w", path, err)
-		}
-		claimed = true
+	return !sameDACL(sd.String(), want.String()), needsClaim(o, t.tokenUser, t.claim), nil
+}
+
+// claimOwner hands path to BUILTIN\Administrators through a second handle
+// opened for WRITE_OWNER (granted by the DACL just written) and checked to be
+// the very object the walk inspected (same volume and file index).
+func (t *trust) claimOwner(path string, n node) error {
+	m, err := open(path, windows.READ_CONTROL|windows.WRITE_OWNER)
+	if err != nil {
+		return err
 	}
-	return !sameDACL(sd.String(), want.String()), claimed, nil
+	defer windows.CloseHandle(m.h)
+	if m.info.VolumeSerialNumber != n.info.VolumeSerialNumber ||
+		m.info.FileIndexHigh != n.info.FileIndexHigh || m.info.FileIndexLow != n.info.FileIndexLow {
+		return fmt.Errorf("%w: %s changed during the walk", ErrOutsideTree, path)
+	}
+	if err := setOwner(m.h, t.baSID); err != nil {
+		return fmt.Errorf("dataacl: make Administrators the owner of %s: %w", path, err)
+	}
+	return nil
 }
 
 func setOwner(h windows.Handle, owner *windows.SID) error {
@@ -304,15 +324,6 @@ func setOwner(h windows.Handle, owner *windows.SID) error {
 		return err
 	}
 	return windows.SetKernelObjectSecurity(h, windows.OWNER_SECURITY_INFORMATION, sd)
-}
-
-// access is what the walk opens an entry with.
-func (t *trust) access() uint32 {
-	a := uint32(windows.READ_CONTROL | windows.WRITE_DAC)
-	if t.claim {
-		a |= windows.WRITE_OWNER
-	}
-	return a
 }
 
 // write sets want as n's DACL through its handle; no propagation.
@@ -346,7 +357,7 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 	w := &walker{t: t, opt: opt}
 	w.rep.AdminsErr = t.adminsErr
 
-	root, err := open(dir, t.access())
+	root, err := open(dir, windows.READ_CONTROL|windows.WRITE_DAC)
 	if err != nil {
 		return w.rep, err
 	}
@@ -357,18 +368,18 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 	if w.rootFinal, err = finalPath(root.h); err != nil {
 		return w.rep, err
 	}
-	differs, claimed, err := t.check(dir, root, t.root)
+	differs, claim, err := t.check(dir, root, t.root)
 	if err != nil {
 		return w.rep, err
-	}
-	if claimed {
-		w.rep.Claimed++
 	}
 	if differs {
 		if err := write(dir, root, t.root, true); err != nil {
 			return w.rep, err
 		}
 		w.rep.RootSet = true
+	}
+	if claim {
+		w.claim(dir, root)
 	}
 	if err := w.children(dir, ""); err != nil {
 		return w.rep, err
@@ -377,6 +388,18 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 		w.rep.OwnerSet, w.rep.OwnerErr = setOwnerSystem(dir, w.rootFinal)
 	}
 	return w.rep, nil
+}
+
+// claim hands an entry to Administrators; a failure is recorded, not fatal —
+// the owner is trusted either way.
+func (w *walker) claim(path string, n node) {
+	if err := w.t.claimOwner(path, n); err != nil {
+		if w.rep.ClaimErr == nil {
+			w.rep.ClaimErr = err
+		}
+		return
+	}
+	w.rep.Claimed++
 }
 
 // children walks the entries of the directory at path (whose handle the
@@ -404,7 +427,7 @@ func (w *walker) entry(path, rel string) error {
 	if testHookBeforeEntry != nil {
 		testHookBeforeEntry(path)
 	}
-	n, err := open(path, w.t.access())
+	n, err := open(path, windows.READ_CONTROL|windows.WRITE_DAC)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil // removed meanwhile
 	}
@@ -424,12 +447,9 @@ func (w *walker) entry(path, rel string) error {
 	if n.dir() {
 		want = w.t.childDir
 	}
-	differs, claimed, err := w.t.check(path, n, want)
+	differs, claim, err := w.t.check(path, n, want)
 	if err != nil {
 		return err
-	}
-	if claimed {
-		w.rep.Claimed++
 	}
 	if differs {
 		if err := write(path, n, want, false); err != nil {
@@ -437,6 +457,9 @@ func (w *walker) entry(path, rel string) error {
 		}
 		w.rep.Reset++
 		w.rep.ResetPaths = append(w.rep.ResetPaths, path)
+	}
+	if claim {
+		w.claim(path, n)
 	}
 	w.rep.Entries++
 	if w.opt.Progress != nil && w.rep.Entries%progressEvery == 0 {

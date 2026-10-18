@@ -850,4 +850,64 @@ func TestIsIndirectAdministrator(t *testing.T) {
 	if ok, err := tr.isIndirectAdministrator("S-1-5-32-545"); err != nil || ok {
 		t.Errorf("isIndirectAdministrator(Users group) = %v, %v; want false", ok, err)
 	}
+	// T4-3: a real local user that is not an administrator — the built-in
+	// Guest, this machine's SID + 501 (disabled, but an account).
+	me := currentUserSID(t)
+	guest := me[:strings.LastIndex(me, "-")] + "-501"
+	if ok, err := tr.isIndirectAdministrator(guest); err != nil || ok {
+		t.Errorf("isIndirectAdministrator(Guest %s) = %v, %v; want false, nil", guest, ok, err)
+	}
+	// R4-3: an orphaned SID (an account that no longer exists) is never an
+	// administrator, and says why.
+	if ok, err := tr.isIndirectAdministrator("S-1-5-21-1-2-3-4242"); ok || err == nil || !strings.Contains(err.Error(), "no account") {
+		t.Errorf("isIndirectAdministrator(orphan) = %v, %v; want false with a 'no account' reason", ok, err)
+	}
+}
+
+// R4-2a: an entry owned by an account the walk trusts only through
+// Administrators membership is handed to BUILTIN\Administrators — after
+// which the membership never needs resolving again; an owner whose
+// membership cannot be resolved is refused with the reason.
+func TestProtectTree_ClaimsAResolvedAdminOwner(t *testing.T) {
+	if !enablePrivilege(t, "SeRestorePrivilege") {
+		t.Skip("SeRestorePrivilege not held: an arbitrary owner cannot be set here")
+	}
+	const member, orphan = "S-1-5-32-545", "S-1-5-21-1-2-3-4242" // stand-ins the resolver answers for
+	dir := filepath.Join(t.TempDir(), "data")
+	f := filepath.Join(dir, "config.yaml")
+	mkfile(t, f)
+	setOwnerTo := func(sidStr string) {
+		sid, err := windows.StringToSid(sidStr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(f, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+			t.Fatalf("set owner %s: %v", sidStr, err)
+		}
+	}
+	var asked []string
+	testIndirectOverride = func(sid string) (bool, error) {
+		asked = append(asked, sid)
+		if sid == member {
+			return true, nil
+		}
+		return false, errors.New("resolves to no account")
+	}
+	t.Cleanup(func() { testIndirectOverride = nil })
+
+	setOwnerTo(member)
+	rep := protectTree(t, dir)
+	if o := ownerOf(t, f); o != SIDAdministrators || rep.Claimed != 1 {
+		t.Errorf("owner %s, claimed %d; want Administrators, 1", o, rep.Claimed)
+	}
+	asked = nil
+	protectTree(t, dir)
+	if len(asked) != 0 {
+		t.Errorf("the resolver was asked again (%v) after the claim", asked)
+	}
+
+	setOwnerTo(orphan)
+	if _, err := ProtectTree(dir, TreeOptions{}); !errors.Is(err, ErrUntrustedOwner) || !strings.Contains(err.Error(), "no account") {
+		t.Errorf("an unresolvable owner = %v; want ErrUntrustedOwner with the reason", err)
+	}
 }
