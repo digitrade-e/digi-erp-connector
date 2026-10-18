@@ -34,13 +34,25 @@ func (n node) dir() bool {
 	return n.info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 }
 
-// Another process holding an entry with DELETE access (or without sharing
-// what open asks) is a sharing violation; it usually passes, so open retries
-// shareRetries times, shareRetryDelay apart, before failing.
+// A sharing violation — another process holding a file without sharing the
+// data access asked for — usually passes, so opens that ask for data access
+// (listing a directory, appending to a log) retry shareRetries times,
+// shareRetryDelay apart, before failing. The walk's per-entry opens ask only
+// for security rights, which Windows never subjects to sharing.
 var (
 	shareRetries    = 3
 	shareRetryDelay = 250 * time.Millisecond
 )
+
+func retryShare(f func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := f()
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || attempt >= shareRetries {
+			return err
+		}
+		time.Sleep(shareRetryDelay)
+	}
+}
 
 // longPath is longPathFor on Windows: raw CreateFile calls get the \\?\ form.
 func longPath(p string) string { return longPathFor(p, true) }
@@ -53,13 +65,10 @@ func open(path string, access uint32) (node, error) {
 		return node{}, err
 	}
 	var h windows.Handle
-	for attempt := 0; ; attempt++ {
-		h, err = windows.CreateFile(p, access, openShare, nil, windows.OPEN_EXISTING, openFlags, 0)
-		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || attempt >= shareRetries {
-			break
-		}
-		time.Sleep(shareRetryDelay)
-	}
+	err = retryShare(func() (e error) {
+		h, e = windows.CreateFile(p, access, openShare, nil, windows.OPEN_EXISTING, openFlags, 0)
+		return e
+	})
 	if err != nil {
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 			return node{}, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
@@ -373,8 +382,8 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 // children walks the entries of the directory at path (whose handle the
 // caller holds), parents before children, in name order.
 func (w *walker) children(path, rel string) error {
-	f, err := os.Open(path)
-	if err != nil {
+	var f *os.File
+	if err := retryShare(func() (e error) { f, e = os.Open(path); return e }); err != nil {
 		return err
 	}
 	names, err := f.Readdirnames(-1)
@@ -528,8 +537,12 @@ func OpenLog(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	h, err := windows.CreateFile(p, windows.FILE_APPEND_DATA|windows.SYNCHRONIZE, openShare, nil,
-		windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	var h windows.Handle
+	err = retryShare(func() (e error) {
+		h, e = windows.CreateFile(p, windows.FILE_APPEND_DATA|windows.SYNCHRONIZE, openShare, nil,
+			windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		return e
+	})
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}

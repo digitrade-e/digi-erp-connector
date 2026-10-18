@@ -746,23 +746,23 @@ func TestProtectTree_LongPaths(t *testing.T) {
 	}
 	f := filepath.Join(p, "KUPAIN_1.doc")
 	mkfile(t, f)
+	depth := strings.Count(strings.TrimPrefix(p, dir), `\`)
 	rep := protectTree(t, dir)
-	if rep.Entries < 8 {
-		t.Errorf("report %+v; want the deep tree walked", rep)
+	if rep.Entries != depth+1 {
+		t.Errorf("walked %d entries; want the %d folders and the file", rep.Entries, depth)
 	}
 	onlyInherited(t, `\\?\`+f)
 }
 
-// A sharing violation (another process holds the entry with DELETE access)
-// is retried; one that does not pass in time fails the walk.
-func TestProtectTree_RetriesASharingViolation(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "data")
-	f := filepath.Join(dir, "held.json")
+// Opens that ask for data access retry a sharing violation; here OpenLog
+// against a file held without any sharing: a hold released within the
+// retries passes, one that is not fails after them.
+func TestOpenLog_RetriesASharingViolation(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "server.log")
 	mkfile(t, f)
 	hold := func() windows.Handle {
 		p, _ := windows.UTF16PtrFromString(f)
-		h, err := windows.CreateFile(p, windows.DELETE|windows.GENERIC_READ,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+		h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -771,19 +771,41 @@ func TestProtectTree_RetriesASharingViolation(t *testing.T) {
 
 	h := hold()
 	go func() { time.Sleep(300 * time.Millisecond); windows.CloseHandle(h) }()
-	if _, err := ProtectTree(dir, TreeOptions{}); err != nil {
-		t.Fatalf("ProtectTree while the hold ends within the retries = %v; want success", err)
+	l, err := OpenLog(f)
+	if err != nil {
+		t.Fatalf("OpenLog while the hold ends within the retries = %v; want success", err)
 	}
+	l.Close()
 
 	h = hold()
 	defer windows.CloseHandle(h)
 	start := time.Now()
-	_, err := ProtectTree(dir, TreeOptions{})
-	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
-		t.Fatalf("ProtectTree while held = %v; want a sharing violation", err)
+	if l, err := OpenLog(f); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		if l != nil {
+			l.Close()
+		}
+		t.Fatalf("OpenLog while held = %v; want a sharing violation", err)
 	}
 	if d := time.Since(start); d < time.Duration(shareRetries)*shareRetryDelay {
 		t.Errorf("gave up after %v; want %d retries %v apart", d, shareRetries, shareRetryDelay)
+	}
+}
+
+// The walk's per-entry opens ask only for security rights, which Windows never
+// subjects to sharing: a file held exclusively does not block the walk.
+func TestProtectTree_IsNotBlockedByAnExclusiveHolder(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	f := filepath.Join(dir, "held.json")
+	mkfile(t, f)
+	p, _ := windows.UTF16PtrFromString(f)
+	h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.DELETE, 0, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(h)
+	rep := protectTree(t, dir)
+	if rep.Reset != 1 {
+		t.Errorf("report %+v; want the held file walked and written", rep)
 	}
 }
 
