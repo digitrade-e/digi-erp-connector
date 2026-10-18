@@ -102,11 +102,23 @@ form (short 8.3 path, junction) still matches.
 | Secret | Where | Protection |
 |---|---|---|
 | DB password | `secrets/db_password_<erp>.bin` | Windows DPAPI, machine scope. **Plaintext on Unix** — the daemon supports Linux but its secret storage does not protect anything there. |
-| Auth password and signing secret | `config.yaml` | File mode 0600 only. Plaintext by design: the operator has to read the password back to give it to the calling backend. |
+| Auth password and signing secret | `config.yaml` | Windows: the data directory's protected DACL (below). Unix: file mode 0600. Plaintext by design: the operator has to read the password back to give it to the calling backend. |
 
 Both files are written atomically. Writes report failure — a secret write that
 silently "succeeded" while failing used to leave the daemon starting with the wrong
 password and no explanation.
+
+**The data directory's DACL (Windows).** `%ProgramData%`'s default ACL lets
+every local user read what is under it — `config.yaml`, and with receipts on the
+receipt index and history (names, phones, emails, card last 4, confirmation
+codes). At every start the daemon replaces the data directory's DACL with a
+protected one granting Full Control to SYSTEM (`S-1-5-18`),
+BUILTIN\Administrators (`S-1-5-32-544`) and the service's own account, inherited
+by everything beneath, and sets the same on `config.yaml`
+(`internal/platform/dataacl`). Failing on the directory stops the daemon (fail
+closed); failing on `config.yaml` alone is logged. The owner of the directory
+keeps its implicit right to change the DACL — whoever created it, normally an
+administrator or the installer.
 
 None of these values is ever logged. Log lines about the DB password mention only
 its length; the line recording first-run secret generation says that it happened

@@ -187,7 +187,10 @@ automatically if the probe fails, so a failed deploy never leaves the API down.
 
 Neither ever contains the API password, the DB password or the signing secret.
 `server.log` is written by the service (LocalSystem), so a non-elevated process may not be able to append
-to it — if the GUI or a tool seems to log nothing, that is usually why.
+to it — if the GUI or a tool seems to log nothing, that is usually why. Since the service gives the data
+directory a protected DACL (SYSTEM + Administrators only, see
+[configuration.md](configuration.md#data-directory-permissions-windows)), **reading** the logs or any other
+file there also needs an elevated prompt or editor.
 
 Useful check — is anything failing to authenticate, and with which username?
 

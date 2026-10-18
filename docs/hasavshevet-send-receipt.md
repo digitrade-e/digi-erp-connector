@@ -162,24 +162,35 @@ Per idempotency key, in `DataDir/receipts/index/<key>.json`:
 
 | `import` | Meaning |
 |---|---|
-| `not_run` | No BAT run: model (a), or a receipt finished by recovery (in model (b) its `warnings` then say so on every replay). Imported by hand. |
-| `started` | The BAT was started and the process died before its outcome was recorded. It may or may not have imported. **Never re-run** for this key — a person checks Hashavshevet. |
-| `ok` | The BAT exited 0. |
-| `failed` | The BAT exited non-zero, failed to start, or ran past 90 s. The receipt is still written; import it by hand. Never re-run. |
+| `not_run` | No import run: model (a), or a receipt finished by recovery (in model (b) its `warnings` then say so on every replay). Imported by hand. |
+| `started` | The import (BAT or `has.exe`) was started and the process died before its outcome was recorded. It may or may not have imported. **Never re-run** for this key — a person checks Hashavshevet. |
+| `ok` | The import exited 0. |
+| `failed` | The import exited non-zero, failed to start, or ran past 90 s. The receipt is still written; import it by hand. Never re-run. |
 
 The backend records `written` regardless of `import`, and logs at error for
 `failed` and `started`.
 
 ## Import models (a) and (b)
 
-- **Model (a)** — `hasReceiptBatFile` empty (the default). Files only; someone
-  imports them in Hashavshevet. `import` is always `not_run`.
-- **Model (b)** — `hasReceiptBatFile` set. After each receipt is written the BAT
-  runs once via `cmd.exe /C`, from its own folder, with a **90 s** deadline that
-  survives the caller hanging up, plus a 5 s `WaitDelay` so a killed `cmd.exe`
-  whose importer still holds the output pipe cannot stretch the deadline.
-  `import` becomes `started` before it runs, then `ok` or `failed`. Off until
-  the BAT itself is confirmed (G-2).
+- **Model (a)** — `hasReceiptBatFile` and `hasReceiptParamFile` empty (the
+  default). Files only; someone imports them in Hashavshevet. `import` is always
+  `not_run`.
+- **Model (b)** — the connector imports each receipt itself, right after writing
+  it, under the import lock — as `sendOrder` does (plan 056 §8 A-2). Two
+  runners, the mirror of the order importer's, **exactly one of which may be
+  set** (both = the daemon refuses to start, the GUI to save):
+  - `hasReceiptBatFile` — a Masofon KUPAIN BAT, run via `cmd.exe /C` from its own
+    folder;
+  - `hasReceiptParamFile` — the orders' `has.exe` (`hasExePath`, which must then
+    be absolute) run with this parameter file, from `sendReceiptDir`.
+
+  Either way it runs once, with a **90 s** deadline that survives the caller
+  hanging up, plus a 5 s `WaitDelay` so a killed process whose child still holds
+  the output pipe cannot stretch the deadline. `import` becomes `started` before
+  it runs, then `ok` or `failed`; a key whose import started never runs it again.
+  Which runner a write node uses follows how its `sendOrder` runs (read its
+  `config.yaml` at install: `hasBatFile` → a receipt BAT, `hasExePath` → a
+  receipt parameter file).
 
 ## Numbering and the seed
 
@@ -226,7 +237,7 @@ One Write, under the import lock:
    `KUPAIN_{n}.doc` — each by atomic rename (temp name `.KUPAIN_{n}.doc.tmp-*`),
    so a poller sees a whole file or none;
 5. persist `written`;
-6. model (b) only: the BAT, as above.
+6. model (b) only: the import (BAT or `has.exe`), as above.
 
 If step 4 fails for a fresh number, n stays reserved and the **next** Write —
 whatever its key — finishes n before issuing n+1, so the importer never sees n+1
@@ -241,10 +252,11 @@ scheduled task) sees it reappear and can import it twice. Check for such a
 consumer when moving off the quarantine folder (see [Open questions](#open-questions)).
 
 `Recover()` runs at daemon startup: it finishes every `reserved` receipt (files
-only — never the BAT) and moves the store past every indexed number. In model
+only — never the import) and moves the store past every indexed number. In model
 (b) such a receipt keeps `import: not_run`, which on its own reads like a
 model-(a) answer, so recovery also stores a warning on its index entry ("…the
-receipt BAT was not run for it — import it by hand") that **every replay of the
+receipt BAT was not run for it — import it by hand", or "…the receipt has.exe
+was not run…") that **every replay of the
 key returns in `warnings`**, besides the line in `server.log`. If it fails, the
 daemon still starts (orders and queries are unaffected) and each receipt request
 retries it.
@@ -264,7 +276,7 @@ be issued twice.
 ## Concurrency
 
 Receipts and orders share one process-wide import lock: an order job (IMOVEIN +
-`has.exe`/`digi.bat`) and a receipt (KUPAIN + its BAT) never run at once. A
+`has.exe`/`digi.bat`) and a receipt (KUPAIN + its BAT or `has.exe`) never run at once. A
 receipt waits at most 20 s for it (`503 RECEIPT_WRITER_BUSY`, nothing reserved).
 
 **One process per data directory.** The import lock is in-process only, so
@@ -278,7 +290,14 @@ crash locks nobody out. A second process **keeps serving orders and queries**
 but answers every receipt `503 RECEIPT_DATA_IN_USE` (nothing reserved); when the
 first process exits, the second takes over on its next receipt request without
 a restart. Its startup recovery fails with the same reason and is logged — the
-daemon still starts, as it does for any failed recovery.
+daemon still starts, as it does for any failed recovery. On Windows a held
+`writer.lock` also cannot be deleted (the handle does not share delete).
+
+The receipt data is personal data. On Windows the whole data directory gets a
+**protected DACL** at every daemon start (SYSTEM, Administrators and the service
+account only; the daemon does not start if it cannot be set) — see
+[configuration.md](configuration.md#data-directory-permissions-windows). On Linux
+the receipt directories are 0700 and their files 0600.
 
 ⚠ The order importer has **no timeout** of its own (pre-existing). A hung
 `has.exe`/`digi.bat` now also blocks receipts — each answers 503 after 20 s until
@@ -325,7 +344,8 @@ stop may take up to ~2.5 min; a stop still pending after that is reported as
 erp: hasavshevet
 sendOrderDir: C:\Hash7\orders
 sendReceiptDir: C:\Apache24\htdocs\herp   # the receipt importer's folder
-hasReceiptBatFile: ""                     # model (b) only
+hasReceiptBatFile: ""                     # model (b), BAT way — or:
+hasReceiptParamFile: ""                   # model (b), has.exe way (uses hasExePath); never both
 receiptCardNames:                          # optional overrides of F17
   issuer:
     "6": מקס

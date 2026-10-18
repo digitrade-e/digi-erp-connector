@@ -96,14 +96,15 @@ nothing imports them — occasionally useful for diagnosis.
 ## Hasavshevet receipts
 
 Optional, for `POST /api/sendReceipt` — see
-[hasavshevet-send-receipt.md](hasavshevet-send-receipt.md). All three keys are
+[hasavshevet-send-receipt.md](hasavshevet-send-receipt.md). All four keys are
 omitted from the file when unset, and without `sendReceiptDir` the route answers
 `503 RECEIPTS_NOT_CONFIGURED`. None has a GUI widget; a GUI save keeps them.
 
 | Key | Meaning |
 |---|---|
 | `sendReceiptDir` | The receipt importer's folder: only `KUPAIN_{n}.doc` and `KUPAIN.prm` are written here. **Must be absolute and must not be `sendOrderDir`** (compared after resolving `..`, trailing separators and symlinks; case-insensitively on Windows) — the daemon will not start and the GUI will not save. Receipts are configured only with `erp: hasavshevet` and this set. |
-| `hasReceiptBatFile` | Model (b): this BAT runs once (via `cmd.exe /C`, from its own folder, 90 s cap) after each receipt is written. Empty is model (a): files only, imported by hand. |
+| `hasReceiptBatFile` | Model (b), the BAT way: this BAT runs once (via `cmd.exe /C`, from its own folder, 90 s cap) after each receipt is written. **Absolute.** Empty (and no `hasReceiptParamFile`) is model (a): files only, imported by hand. |
+| `hasReceiptParamFile` | Model (b), the `has.exe` way — the mirror of the orders' `hasExePath` + `hasParamFile`: the orders' `has.exe` (`hasExePath`) runs once with this parameter file, from `sendReceiptDir`, 90 s cap, after each receipt is written. **Absolute, needs an absolute `hasExePath`, and is refused together with `hasReceiptBatFile`** (ambiguous) — the daemon will not start and the GUI will not save. `hasExePath` alone imports no receipt. |
 | `receiptCardNames` | `{issuer: {code: name}, brand: {code: name}}` — overrides of the receipt's card name (F17), keyed by the raw HYP code. Codes compare as numbers (`"06"` is `6`). A name that is not Windows-1255 or is wider than 25 bytes, a blank code, or two keys of one table naming the same code (`"6"` and `"06"`) stops the daemon and the GUI save. |
 
 The receipt number store (`receipts/receiptNumber.json`), the idempotency index
@@ -120,6 +121,29 @@ serves orders and queries but answers receipts `503 RECEIPT_DATA_IN_USE`, and
 takes over once the first has stopped. The file itself is not the lock — one
 left behind by a crash locks nobody out — so never delete it to "unlock" a
 connector; stop the other process.
+
+## Data directory permissions (Windows)
+
+At every start, right after `config.yaml` loads, the daemon gives the data
+directory a **protected DACL** — nothing inherited from `%ProgramData%`, whose
+default ACL lets every local user read — granting Full Control to exactly
+`SYSTEM`, `BUILTIN\Administrators` and the account the service runs as
+(LocalSystem, so in practice the first two). Everything under it inherits that:
+`config.yaml`, `secrets\`, `queries.json`, the logs and the receipt data. It
+then sets the same on `config.yaml` itself.
+
+- If the directory's DACL cannot be set, the daemon **does not start** (logged:
+  `could not set the protected DACL on the data directory`).
+- If only `config.yaml`'s cannot, it logs an error and starts: the file already
+  inherits the directory's DACL (every save is a temp file created in the
+  directory and renamed over it).
+- Nothing to configure, and nothing happens on Linux.
+
+Consequence: anything that reads the data directory must run **elevated** or as
+SYSTEM — the GUI does (desktop shortcut), and so must `cutover-seed`, Notepad on
+`server.log`, or a backup job. Explicit ACEs an operator added to a file inside
+the directory are kept; extra grants on the directory itself are removed at the
+next start.
 
 ## `db`
 

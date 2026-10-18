@@ -69,10 +69,12 @@ internal/
     autostart/          ← Windows service registration/control
     paths/              ← data dir + config path (PROGRAMDATA-based)
     atomicfile/         ← THE way to write a file: temp + sync + rename
+    filelock/           ← OS lock on a file (flock / LockFileEx): one receipt writer per DataDir
+    dataacl/            ← protected DACL on DataDir + config.yaml (Windows; no-op elsewhere)
   secrets/              ← Windows DPAPI (machine scope)
 ```
 
-Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/). Linux: `/etc/digi-erp-connector/`.
+Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/, receipts/, history/receipts/). Linux: `/etc/digi-erp-connector/`. On Windows the daemon gives it a **protected DACL** at every start (SYSTEM + Administrators + the service account, inherited beneath; `cmd/digi-erp-connectord/dataacl.go`): failing on the directory stops the daemon, failing on config.yaml alone is logged. Never widen it back — it holds credentials and receipt PII.
 
 ## API endpoints (all `/api/*` require `Authorization: Bearer <token from /auth/token>`; all rate-limited)
 
@@ -141,9 +143,10 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 - The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` creates it (write-if-absent).
 - One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt. Never restore or copy `DataDir/receipts` while the service runs — stop it first (a running writer trusts its in-memory recovery state).
 - **One process per data directory**: the writer holds an OS lock on `DataDir/receipts/writer.lock` (`internal/platform/filelock`: flock / LockFileEx) from its first Recover/Write to `Close` (called last in `Stop`) or exit; a second process answers receipts 503 `RECEIPT_DATA_IN_USE`. The importMu is in-process only.
-- The store never persists a next number outside 1…999 999 999 + 1; history and index files are 0600 in 0700 dirs on Unix (no chmod on Windows — ACLs).
+- The store never persists a next number outside 1…999 999 999 + 1; history and index files are 0600 in 0700 dirs on Unix (no chmod on Windows — the DataDir's protected DACL, `internal/platform/dataacl`).
+- Import model (b) has two runners, mirroring sendOrder: `hasReceiptBatFile` (cmd.exe /C) **or** `hasReceiptParamFile` (the orders' `hasExePath`, cwd sendReceiptDir) — never both (refused); same 90 s cap + 5 s WaitDelay, `started` recorded before it runs, never re-run for a key, never run by Recover.
 - 4xx only for request faults — and never echo a value (a key path at most 64 bytes); a body read cut short is 503, not 400; `CardNamesConfigError`, a stored request that no longer builds (`ErrStoredReceiptUnbuildable`) and every other connector fault are 5xx. The response never carries `ReceiptResult.Files`.
-- Config guard `hasavshevet.ValidateReceiptConfig` (sendReceiptDir ≠ sendOrderDir, card names writable) is called by both `api.NewServer` and the GUI save.
+- Config guard `hasavshevet.ValidateReceiptConfig` (sendReceiptDir ≠ sendOrderDir, one absolute receipt importer, card names writable) is called by both `api.NewServer` and the GUI save.
 - Contract pinned by `handlers/send_receipt_test.go` against `testdata/receipt/wire.json` + `wire-blanks.json`: the backend's REAL `Receipt` serialized by its HTTP client (`generate.php` beside them, run in a throwaway `backend-php` container; sha256 checked). Regenerate, never hand-edit.
 - The strict decoder's key walk descends only where the Go type nests (≤ 8 levels) and skips other values with `Decode` — walking them token by token cost O(depth²) memory.
 - Every text value is edge-trimmed on the RAW value, then `normalize1255`, then strict Windows-1255; widths are encoded bytes (U+FB2A and an inner line break are two).
