@@ -121,9 +121,15 @@ following a reparse point and with its ancestors held open, refused if it is a
 reparse point, a multiply-linked file, resolves elsewhere, or has an untrusted
 owner, and its security is read and written through that handle with no
 propagation — so no link can point a SYSTEM write at a file outside the
-directory. Any failure but the owner change stops the daemon (fail closed). The
-elevated GUI applies the same before its first save writes anything. Logs whose
-permissions had to be reset are moved aside and restarted. See
+directory. Every refusal and every failure of the walk stops the daemon (fail
+closed) without opening a file there — the reason goes to the Windows Event
+Log; what is only logged: the SYSTEM owner change, the extra `config.yaml` check
+after the config loads, and a failed listing of the Administrators group (then
+only the built-in owners are trusted). The elevated GUI walks the same way at
+launch, before it opens a log, and before every save — refusing the save, with
+nothing written, when the walk fails — and makes Administrators the owner of
+what it created. Logs that are not provably the daemon's own file are moved
+aside and restarted. See
 [configuration.md](configuration.md#data-directory-permissions-windows).
 
 The link refusals are **Windows-only**. On Linux nothing here runs: the data

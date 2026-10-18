@@ -137,21 +137,22 @@ receipt data.
 
 | When | By | What |
 |---|---|---|
-| Every service start, **before `server.log` is opened and before the config is read** — so also the installer's first `sc start`, which has no config yet (the service creates the directory then, and owns it) | the daemon | the directory and everything under it (below). If this fails the daemon **does not start**. |
+| Every service start, **before `server.log` is opened and before the config is read** — so also the installer's first `sc start`, which has no config yet (the service creates the directory then, and owns it) | the daemon | the directory and everything under it (below). If this fails the daemon **does not start** (exit code 2, below). |
 | Every service start, right after `config.yaml` loads | the daemon | `config.yaml` once more (a config written between the walk and the load). A failure is logged; the daemon starts. |
-| The GUI save that creates `config.yaml`, or the first save after a GUI launch that found no data directory — **before** that save writes the secret or `config.yaml` | the elevated GUI | the directory and everything under it, as the daemon does. |
-| Every GUI save, after `config.yaml` is written | the elevated GUI | `config.yaml`. |
+| Every GUI launch, **before the GUI opens any log** (creating the directory if needed) | the elevated GUI | the directory and everything under it. If this fails the GUI logs nowhere in it and **refuses to save**. |
+| **Every** GUI save, **before** it writes the secret or `config.yaml`, and again after | the elevated GUI | the directory and everything under it. If the walk before the save fails, **the save is refused and nothing is written**; one after the save is a "Saved, but…" note (the service re-checks at its start). |
 
-A GUI failure is a note in the status bar ("Saved, but…") and a line in the log,
-not a refused save: the service sets the DACL again when it starts. Nothing to
-configure; nothing happens on Linux.
+The GUI's walk also makes `BUILTIN\Administrators` the owner of everything the
+operator's own account created there (`config.yaml`, `secrets\*.bin`, the
+directory) — an owner the daemon always trusts, however the operator is an
+administrator. Nothing to configure; nothing happens on Linux.
 
-**How the walk works.** The daemon opens the directory, then every entry under
-it — parents before children — **by handle, never following a link**, and keeps
-every ancestor folder open so none can be renamed or replaced meanwhile. It
-reads each entry's security through that handle and writes it only if it
-differs from the template, without any propagation (the walk writes each
-child's inherited ACEs itself). So:
+**How the walk works.** It opens the directory, then every entry under it —
+parents before children — **by handle, never following a link**, and keeps every
+ancestor folder open so none can be renamed or replaced meanwhile. It reads each
+entry's security through that handle and writes it only if it differs from the
+template, without any propagation (the walk writes each child's inherited ACEs
+itself). So:
 
 - A file or folder that carries an ACL of its own — protected, NULL, explicit
   ACEs, or the old `%ProgramData%` ACEs — gets the inherited DACL. A folder
@@ -159,32 +160,43 @@ child's inherited ACEs itself). So:
   ACEs an operator added under the data directory are dropped at the next
   start**.
 - A start where everything already matches **only reads** (measured on the
-  Windows CI: 3,032 entries in 0.4–0.6 s; the first, full rewrite 2.2 s). While
-  it runs the service reports start progress to the service manager, so a large
-  directory never looks hung.
+  Windows CI, 3,032 entries: steady state 0.15–0.6 s, the first full rewrite
+  1.15–2.2 s). While it runs the service reports start progress to the service
+  manager, and the GUI waits as long as progress keeps coming.
 
-**What stops the start** (the daemon changes nothing further and logs the
-path):
+**What stops the start** (nothing further is changed; the path is named):
 
 - the directory, or anything under it, is a **symlink, junction or other
   reparse point** — data written through it would land outside the protected
-  tree (Data Deduplication files count as regular files only to Go; a
-  deduplicated file under the data directory is refused too);
+  tree. **Data Deduplication files are refused too** (they are reparse points);
 - a file under it has **more than one hard link** — its permissions are shared
   with the other name, which may be anywhere on the volume;
 - an entry is **owned by someone untrusted** — anyone but SYSTEM,
-  Administrators (the group, or a direct member of it), TrustedInstaller and the
-  service's account. A planted entry is owned by its planter, who may still hold
-  it open. Members through a nested (e.g. domain) group are not recognised: take
-  ownership (see troubleshooting).
+  Administrators (the group, or a member of it, directly or through a nested
+  group such as Domain Admins — looked up with the domain), TrustedInstaller and
+  the service's account. A planted entry is owned by its planter, who may still
+  hold it open. If membership cannot be resolved (e.g. the domain controller is
+  unreachable), the entry is refused;
+- an entry's final path is not where the walk expects it, or the walk cannot
+  open or read an entry at all (access denied).
 
-**Logs.** If the walk had to rewrite `server.log`'s permissions (always on the
-first start after an upgrade from 1.0.17), the daemon renames it to
-`server.log.<UTC time>.old` and starts a fresh file, so nothing new is appended
-to a file someone may have opened earlier; if it cannot rename it, it does not
-start. The GUI does the same for `ui.log` and `server.log` before opening them
-(it then simply does not log into one it cannot move). Logs are always opened
-without following a link.
+A refused start opens **no file** in the data directory: the reason goes to the
+**Windows Event Log** (Application, source `digi-erp-connectord`), the service
+stops with service exit code **2** (`sc query digi-erp-connectord` shows it), the
+service manager restarts it after 1 min and 5 min (then not again until a day
+without failures), and the GUI says the service refused to start and where to
+look. See [troubleshooting.md](troubleshooting.md#the-service-will-not-start-or-starts-and-stops).
+
+**Logs.** `server.log` gets a fresh file object at a start unless it is provably
+the daemon's own: exactly ours, not reset by this start's walk, and the very
+file a previous start created fresh (its file ID is recorded in
+`.server-log-id`). So the first start after an upgrade from 1.0.17 renames it to
+`server.log.<UTC time>.old`, and a start that could not rename it tries again the
+next time. If it cannot be renamed (a program holds it open), the daemon logs to
+a new `server-<UTC time>.log` this time and warns, rather than refusing to start.
+The GUI does the same for `ui.log` and `server.log` before opening them (also
+after an upgrade), and reopens one fresh if a save's walk had to reset it. Logs
+are always opened without following a link.
 
 **Owner.** When the daemon runs as SYSTEM it also makes SYSTEM the directory's
 owner (a failure is logged, not fatal). Under any other account the owner is left
@@ -195,15 +207,26 @@ an implicit right to read and rewrite its DACL, whatever the DACL says — and
 the owner can be a plain user, since Users may create folders in
 `%ProgramData%`. The OWNER RIGHTS ACE replaces those implicit rights with what it
 grants: the owner can still see who has access (READ_CONTROL, which `icacls`
-and Explorer need), but cannot change it or read data unless it is SYSTEM, an
-Administrator or the service account.
+and Explorer need), but cannot open the object to change it or to read data
+unless it is SYSTEM, an Administrator or the service account. That holds for
+opening a handle (pinned on the Windows CI); a rewrite through
+`SetNamedSecurityInfo` was once seen to go through in 18 CI runs, so OWNER
+RIGHTS is not the guarantee — refusing untrusted owners outright is.
 
 Consequence: anything that reads the data directory must run **elevated** or as
 SYSTEM — the GUI does (desktop shortcut), and so must `cutover-seed`, Notepad on
 `server.log`, or a backup job.
 
+**Probe** (elevated PowerShell, when a start is refused for an owner):
+
+```powershell
+Get-ChildItem C:\ProgramData\digi-erp-connector -Recurse -Force | % { (Get-Acl $_.FullName).Owner + '  ' + $_.FullName }
+(Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).EnableLUA   # 0 = UAC off
+whoami /groups
+```
+
 Follow-up (not in this release): `history\receipts\` and the moved-aside
-`*.old` logs grow without limit; a retention policy is owed.
+`*.old` / `server-*.log` logs grow without limit; a retention policy is owed.
 
 ## `db`
 

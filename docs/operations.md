@@ -191,8 +191,10 @@ to it — if the GUI or a tool seems to log nothing, that is usually why. Since 
 directory a protected DACL (SYSTEM + Administrators only, see
 [configuration.md](configuration.md#data-directory-permissions-windows)), **reading** the logs or any other
 file there also needs an elevated prompt or editor. The first start after an upgrade from 1.0.17 rewrites the permissions of
-everything in the data directory and moves `server.log` aside (`server.log.<UTC time>.old`); close any program
-tailing it before the upgrade, or the service will not start until it is closed.
+everything in the data directory and moves `server.log` aside (`server.log.<UTC time>.old`; the GUI does the same
+for `ui.log`). If a program is tailing it, the service logs to a new `server-<UTC time>.log` that time and moves
+`server.log` aside at the next start. If the service refuses to start (`sc query` shows `SERVICE_EXIT_CODE : 2`), the
+reason is in the Windows Event Log (Application, source `digi-erp-connectord`) — not in `server.log`.
 
 Useful check — is anything failing to authenticate, and with which username?
 

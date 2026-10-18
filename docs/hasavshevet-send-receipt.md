@@ -304,8 +304,9 @@ The receipt data is personal data. On Windows the whole data directory gets a
 account only when it is not an admin; OWNER RIGHTS read-only, so the owner
 cannot rewrite it; set by handle before server.log is opened and before the
 config loads, with every entry that carries its own ACL rewritten and any link,
-hard link or untrusted owner refusing startup; the elevated GUI applies it
-before its first save writes anything) — see
+hard link or untrusted owner refusing startup — then with no file opened in it
+and the reason in the Event Log; the elevated GUI walks it at launch and before
+every save, refusing a save it cannot protect) — see
 [configuration.md](configuration.md#data-directory-permissions-windows). On Linux
 the receipt directories are 0700 and their files 0600.
 
