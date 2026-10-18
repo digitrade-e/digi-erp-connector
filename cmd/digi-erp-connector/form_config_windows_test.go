@@ -34,13 +34,17 @@ func TestPersistConfig_ProtectsWhatItSaves(t *testing.T) {
 	save := func(wantDir bool) {
 		t.Helper()
 		var order []string
+		// Only a save that creates them can show the order: what earlier saves
+		// wrote is there already.
+		_, cfgBefore := os.Stat(cfgPath)
+		_, secBefore := os.Stat(secretsDir)
 		oldT, oldF := guiProtectTreeFn, guiProtectFileFn
 		guiProtectTreeFn = func(p string, _ dataacl.TreeOptions) (dataacl.Report, error) {
 			_, cfgErr := os.Stat(cfgPath)
 			_, secErr := os.Stat(secretsDir)
 			order = append(order, "tree:"+p)
-			if wantDir && (cfgErr == nil || secErr == nil) {
-				t.Errorf("ProtectTree ran after the save wrote (config.yaml: %v, secrets: %v)", cfgErr, secErr)
+			if (cfgBefore != nil && cfgErr == nil) || (secBefore != nil && secErr == nil) {
+				t.Errorf("ProtectTree ran after this save wrote (config.yaml: %v, secrets: %v)", cfgErr, secErr)
 			}
 			return dataacl.Report{}, nil
 		}
