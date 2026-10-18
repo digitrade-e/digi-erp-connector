@@ -19,7 +19,6 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
-	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 	"github.com/digitrade-e/digi-erp-connector/internal/secrets"
@@ -53,22 +52,14 @@ type serverApp struct {
 // checkpoint callback (autostart.StartProgressSetter).
 func (a *serverApp) SetStartProgress(f func()) { a.startProgress = f }
 
-// freshLogIfReset moves server.log aside when the walk had to rewrite its
-// DACL (logNeedsFreshFile), so the bootstrap logger starts a new file object.
-// If it cannot be moved — someone holds it open without FILE_SHARE_DELETE —
-// the daemon does not start rather than keep writing into it.
-func freshLogIfReset(rep dataacl.Report, log logger.LoggerService) error {
-	logPath, err := paths.LoggerFilePath()
-	if err != nil || !logNeedsFreshFile(logPath, rep) {
-		return nil
-	}
-	to, err := moveAsideFn(logPath)
-	if err != nil {
-		log.Error("server.log's permissions had to be reset, and it could not be moved aside to start a fresh one (close any program holding it open); not starting", err)
-		return err
-	}
-	log.Warn(fmt.Sprintf("server.log's permissions had to be reset; the old file was moved to %s and a fresh one started", to))
-	return nil
+// refuse ends a start whose data directory could not be created or
+// protected (R3-1): no file log is opened in it — a junctioned or swapped
+// root would take SYSTEM's writes elsewhere — so the reason and the early
+// lines go to the Windows Event Log, and the service exits with
+// autostart.ExitDataDirRefused.
+func (a *serverApp) refuse(early *earlyLog, err error) error {
+	reportRefusalFn(early.lines(), err)
+	return &startRefused{err: err}
 }
 
 func (a *serverApp) Start() error {
@@ -82,15 +73,15 @@ func (a *serverApp) Start() error {
 	// before the config is read, so also on a first install's start, which has
 	// no config yet (Windows only; a no-op elsewhere). Fails closed.
 	dataDir := paths.DataDir()
-	rep, err := dataacl.Report{}, ensureDataDir(dataDir)
-	if err == nil {
-		rep, err = protectDataDir(dataDir, a.startProgress, early)
-	} else {
+	if err := ensureDataDir(dataDir); err != nil {
 		early.Error(fmt.Sprintf("could not create the data directory %s; not starting", dataDir), err)
+		return a.refuse(early, err)
 	}
-	if err == nil {
-		err = freshLogIfReset(rep, early)
+	rep, err := protectDataDir(dataDir, a.startProgress, early)
+	if err != nil {
+		return a.refuse(early, err)
 	}
+	mark := freshServerLog(dataDir, rep, early)
 
 	// Bootstrap logger writes directly to server.log so we capture pre-config
 	// failures (config.Load errors, permissions, missing dirs) even when
@@ -98,9 +89,8 @@ func (a *serverApp) Start() error {
 	// refuses a reparse point or a hard link (dataacl.OpenLog).
 	bootstrapLog := newBootstrapLog()
 	early.replayInto(bootstrapLog)
-	if err != nil {
-		_ = bootstrapLog.Close()
-		return err
+	if mark && !logger.IsStderr(bootstrapLog) {
+		markServerLog(dataDir, bootstrapLog)
 	}
 
 	cfg, err := config.Load()

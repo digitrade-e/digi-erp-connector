@@ -129,3 +129,57 @@ func TestStart_MovesAResetServerLogAside(t *testing.T) {
 		t.Errorf("a start that reset nothing moved the log aside again: %v", again)
 	}
 }
+
+// R3-4: a server.log that is not provably ours and cannot be moved aside
+// (a program holds it) does not refuse the start: the daemon logs to a new,
+// uniquely named file, writes no marker, and so tries again next start.
+func TestFreshServerLog_FallsBackWhenItCannotMoveTheLog(t *testing.T) {
+	t.Setenv("PROGRAMDATA", t.TempDir())
+	logPath, _ := paths.LoggerFilePath()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("held\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldM, oldS := moveAsideFn, setLogPathFn
+	moves := 0
+	moveAsideFn = func(string) (string, error) { moves++; return "", errors.New("in use") }
+	var alt string
+	setLogPathFn = func(p string) { alt = p }
+	t.Cleanup(func() { moveAsideFn, setLogPathFn = oldM, oldS })
+
+	if mark := freshServerLog(paths.DataDir(), dataacl.Report{}, &quietLogger{}); mark {
+		t.Error("asked to mark a log it did not open fresh")
+	}
+	if moves < 2 {
+		t.Errorf("moved %d times; want retries", moves)
+	}
+	if ok, _ := filepath.Match(filepath.Join(paths.DataDir(), "server-*.log"), alt); !ok {
+		t.Errorf("fallback log %q; want server-<time>.log in the data directory", alt)
+	}
+}
+
+// A server.log that is exactly ours and is the object the marker names is kept.
+func TestFreshServerLog_KeepsItsOwnLog(t *testing.T) {
+	t.Setenv("PROGRAMDATA", t.TempDir())
+	logPath, _ := paths.LoggerFilePath()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("ours\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataacl.ProtectTree(paths.DataDir(), dataacl.TreeOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	markServerLog(paths.DataDir(), &quietLogger{})
+	oldM := moveAsideFn
+	moves := 0
+	moveAsideFn = func(string) (string, error) { moves++; return "", nil }
+	t.Cleanup(func() { moveAsideFn = oldM })
+	freshServerLog(paths.DataDir(), dataacl.Report{}, &quietLogger{})
+	if moves != 0 {
+		t.Errorf("our own, marked server.log was moved aside")
+	}
+}

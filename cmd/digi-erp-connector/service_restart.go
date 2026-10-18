@@ -58,3 +58,20 @@ func restartService(stop, start func() error) string {
 	}
 	return "Server service restarted."
 }
+
+// startFailureMessage is what the GUI says when the service did not start.
+// A daemon that refused because its data directory could not be protected
+// stops with autostart.ExitDataDirRefused; it says so and where to look,
+// instead of a bare timeout.
+func startFailureMessage(err error) string {
+	var stopped *autostart.ServiceStoppedError
+	if errors.As(err, &stopped) {
+		if stopped.ServiceSpecificExitCode == autostart.ExitDataDirRefused {
+			return "The service refused to start: its data directory could not be protected. " +
+				"The reason is in the Windows Event Log (Application, source digi-erp-connectord); " +
+				"see \"The service will not start\" in the troubleshooting guide."
+		}
+		return "The service stopped while starting (" + stopped.Error() + "); see server.log (and any server.log.*.old) in the data directory."
+	}
+	return "Failed to start server service: " + err.Error()
+}

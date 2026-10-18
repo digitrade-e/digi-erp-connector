@@ -50,6 +50,52 @@ func newStartCheckpoints(send func(checkpoint uint32)) func() {
 	}
 }
 
+// ExitDataDirRefused is the daemon's service-specific exit code when it refused
+// to start because its data directory could not be protected (the reason is
+// in the Windows Event Log, Application, source digi-erp-connectord). `sc
+// query` shows it as SERVICE_EXIT_CODE.
+const ExitDataDirRefused uint32 = 2
+
+// ExitCoder is a Start error that carries a service-specific exit code.
+type ExitCoder interface {
+	ExitCode() uint32
+}
+
+// ServiceStoppedError: the service stopped while it was being started.
+type ServiceStoppedError struct {
+	Win32ExitCode           uint32
+	ServiceSpecificExitCode uint32
+}
+
+func (e *ServiceStoppedError) Error() string {
+	return fmt.Sprintf("the service stopped while starting (exit code %d, service exit code %d)", e.Win32ExitCode, e.ServiceSpecificExitCode)
+}
+
+// startWaitFloor is the least a caller waits for a starting service between
+// checkpoints.
+const startWaitFloor = 30 * time.Second
+
+// startWaitCap bounds a whole start wait, however many checkpoints come.
+const startWaitCap = 10 * time.Minute
+
+type startSnapshot struct {
+	checkpoint uint32
+	waitHint   time.Duration
+}
+
+// nextStartDeadline moves the wait's deadline when the service reports a new
+// checkpoint: to its wait hint from now, at least startWaitFloor.
+func nextStartDeadline(deadline time.Time, prevCheckpoint uint32, cur startSnapshot, now time.Time) time.Time {
+	if cur.checkpoint == prevCheckpoint {
+		return deadline
+	}
+	hint := cur.waitHint
+	if hint < startWaitFloor {
+		hint = startWaitFloor
+	}
+	return now.Add(hint)
+}
+
 type ServiceApp interface {
 	Start() error
 	Stop(ctx context.Context)

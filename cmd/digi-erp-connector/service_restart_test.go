@@ -76,3 +76,19 @@ func TestStoppingStatusNamesTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// R3-1: a service that refused to start because its data directory could
+// not be protected is named as such — not a bare 30 s timeout.
+func TestStartFailureMessage(t *testing.T) {
+	refused := &autostart.ServiceStoppedError{Win32ExitCode: 1066, ServiceSpecificExitCode: autostart.ExitDataDirRefused}
+	if m := startFailureMessage(fmt.Errorf("wait: %w", refused)); !strings.Contains(m, "refused to start") || !strings.Contains(m, "Event Log") {
+		t.Errorf("message %q; want it to say the service refused and where to look", m)
+	}
+	other := &autostart.ServiceStoppedError{Win32ExitCode: 1, ServiceSpecificExitCode: 0}
+	if m := startFailureMessage(other); !strings.Contains(m, "stopped") {
+		t.Errorf("message %q", m)
+	}
+	if m := startFailureMessage(errors.New("boom")); !strings.Contains(m, "boom") {
+		t.Errorf("message %q", m)
+	}
+}

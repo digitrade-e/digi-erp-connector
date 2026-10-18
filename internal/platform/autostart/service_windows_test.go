@@ -47,3 +47,23 @@ func TestExecute_ReportsStartCheckpoints(t *testing.T) {
 		t.Errorf("last status %+v; want Stopped", got[3])
 	}
 }
+
+type codedErr struct{}
+
+func (codedErr) Error() string    { return "refused" }
+func (codedErr) ExitCode() uint32 { return ExitDataDirRefused }
+
+type refusingApp struct{ progressApp }
+
+func (*refusingApp) Start() error { return codedErr{} }
+
+// A Start error carrying an exit code is reported as the service-specific
+// exit code, which `sc query` and the GUI show.
+func TestExecute_ReportsAServiceSpecificExitCode(t *testing.T) {
+	status := make(chan svc.Status, 10)
+	h := &serviceHandler{app: &refusingApp{}}
+	specific, code := h.Execute(nil, make(chan svc.ChangeRequest), status)
+	if !specific || code != ExitDataDirRefused {
+		t.Errorf("Execute = %v, %d; want a service-specific %d", specific, code, ExitDataDirRefused)
+	}
+}

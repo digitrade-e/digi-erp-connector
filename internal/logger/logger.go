@@ -1,11 +1,14 @@
 package logger
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
@@ -26,7 +29,7 @@ type service struct {
 }
 
 func New(cfg config.Config) (LoggerService, error) {
-	logPath, err := paths.LoggerFilePath()
+	logPath, err := filePath()
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +75,45 @@ func (s *swallowingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// pathOverride, when set (SetFilePath), replaces server.log's path for New and
+// NewBootstrap: the daemon logs to a fresh, uniquely named file when it could
+// not move a foreign server.log aside.
+var pathOverride atomic.Value // string
+
+// SetFilePath makes New and NewBootstrap open path instead of server.log
+// ("" restores server.log).
+func SetFilePath(path string) { pathOverride.Store(path) }
+
+func filePath() (string, error) {
+	if p, _ := pathOverride.Load().(string); p != "" {
+		return p, nil
+	}
+	return paths.LoggerFilePath()
+}
+
+// TimedWriter is implemented by a file logger that can write a line with a
+// given timestamp — the daemon replays lines logged before server.log could
+// be opened with the time they were logged at.
+type TimedWriter interface {
+	WriteAt(t time.Time, level, msg string)
+}
+
+// WriteAt writes one line stamped t (the format LstdFlags gives).
+func (s *service) WriteAt(t time.Time, level, msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	fmt.Fprintf(s.logger.Writer(), "%s [%s] %s\n", t.Format("2006/01/02 15:04:05"), level, msg)
+}
+
+// IsStderr reports whether l is the stderr logger (NewStderr, or the
+// fallback of New/NewBootstrap) rather than a file.
+func IsStderr(l LoggerService) bool {
+	s, ok := l.(*service)
+	return ok && s.file == nil
+}
+
 func NewStderr() LoggerService {
 	return &service{
 		logger: log.New(os.Stderr, "", log.LstdFlags),
@@ -86,7 +128,7 @@ func NewStderr() LoggerService {
 // On any failure (path resolution, mkdir, file open) it falls back to
 // stderr — never returns nil.
 func NewBootstrap() LoggerService {
-	logPath, err := paths.LoggerFilePath()
+	logPath, err := filePath()
 	if err != nil || logPath == "" {
 		return NewStderr()
 	}

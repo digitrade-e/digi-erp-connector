@@ -34,6 +34,10 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status 
 
 	if err := h.app.Start(); err != nil {
 		status <- svc.Status{State: svc.Stopped}
+		var ec ExitCoder
+		if errors.As(err, &ec) {
+			return true, ec.ExitCode() // service-specific: `sc query` shows it
+		}
 		return false, 1
 	}
 

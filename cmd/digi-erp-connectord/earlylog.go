@@ -2,46 +2,91 @@ package main
 
 import (
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
 
 const isWindows = runtime.GOOS == "windows"
 
-// earlyLog is Start's log until server.log may be opened — which is only
-// after the data directory is protected (an earlier open would keep appending
-// to a file object someone else may hold). It writes to stderr (nothing, under
-// the service manager) and keeps every line for replayInto.
+type earlyEntry struct {
+	at    time.Time
+	level string
+	msg   string
+}
+
+// earlyLog is Start's log until server.log may be opened — only after the
+// data directory is protected (an earlier open would keep appending to a file
+// object someone else may hold, or follow a link). It writes to stderr at
+// once (nothing, under the service manager) and keeps every line, with its
+// time, for replayInto — or for the refusal report when the start is refused
+// and no file log is ever opened.
 type earlyLog struct {
-	mu     sync.Mutex
-	lines  []func(logger.LoggerService)
-	stderr logger.LoggerService
+	mu      sync.Mutex
+	entries []earlyEntry
+	stderr  logger.LoggerService
 }
 
 func newEarlyLog() *earlyLog { return &earlyLog{stderr: logger.NewStderr()} }
 
-func (e *earlyLog) add(f func(logger.LoggerService)) {
+func (e *earlyLog) add(level, msg string, echo func(logger.LoggerService)) {
 	e.mu.Lock()
-	e.lines = append(e.lines, f)
+	e.entries = append(e.entries, earlyEntry{at: time.Now(), level: level, msg: strings.TrimSpace(msg)})
 	e.mu.Unlock()
-	f(e.stderr)
+	echo(e.stderr)
 }
 
-func (e *earlyLog) Info(m string)    { e.add(func(l logger.LoggerService) { l.Info(m) }) }
-func (e *earlyLog) Warn(m string)    { e.add(func(l logger.LoggerService) { l.Warn(m) }) }
-func (e *earlyLog) Success(m string) { e.add(func(l logger.LoggerService) { l.Success(m) }) }
+func (e *earlyLog) Info(m string)    { e.add("INFO", m, func(l logger.LoggerService) { l.Info(m) }) }
+func (e *earlyLog) Warn(m string)    { e.add("WARN", m, func(l logger.LoggerService) { l.Warn(m) }) }
+func (e *earlyLog) Success(m string) { e.add("OK", m, func(l logger.LoggerService) { l.Success(m) }) }
 func (e *earlyLog) Error(m string, err error) {
-	e.add(func(l logger.LoggerService) { l.Error(m, err) })
+	full := m
+	if err != nil {
+		full = m + ": " + err.Error()
+	}
+	e.add("ERROR", full, func(l logger.LoggerService) { l.Error(m, err) })
 }
 func (e *earlyLog) Close() error { return nil }
 
-// replayInto writes every line logged so far into l, in order.
+// lines is the buffer as text, each line stamped.
+func (e *earlyLog) lines() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, 0, len(e.entries))
+	for _, x := range e.entries {
+		out = append(out, x.at.Format("2006/01/02 15:04:05")+" ["+x.level+"] "+x.msg)
+	}
+	return out
+}
+
+// shouldReplay is false for the stderr fallback: the lines are there already.
+func shouldReplay(l logger.LoggerService) bool { return !logger.IsStderr(l) }
+
+// replayInto writes every line logged so far into l, in order, with the time
+// it was logged at when l can take one (logger.TimedWriter).
 func (e *earlyLog) replayInto(l logger.LoggerService) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for _, f := range e.lines {
-		f(l)
+	if !shouldReplay(l) {
+		e.entries = nil
+		return
 	}
-	e.lines = nil
+	tw, timed := l.(logger.TimedWriter)
+	for _, x := range e.entries {
+		switch {
+		case timed:
+			tw.WriteAt(x.at, x.level, x.msg)
+		case x.level == "ERROR":
+			l.Error(x.msg, nil)
+		case x.level == "WARN":
+			l.Warn(x.msg)
+		case x.level == "OK":
+			l.Success(x.msg)
+		default:
+			l.Info(x.msg)
+		}
+	}
+	e.entries = nil
 }

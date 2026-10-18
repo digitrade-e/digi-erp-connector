@@ -57,7 +57,7 @@ func (f *mainForm) onStartServer() {
 			return
 		}
 		if err := autostart.StartWindowsService(connectordWindowsServiceName); err != nil {
-			f.Synchronize(func() { f.finish("Failed to start server service: " + err.Error()) })
+			f.Synchronize(func() { f.finish(startFailureMessage(err)) })
 			return
 		}
 
