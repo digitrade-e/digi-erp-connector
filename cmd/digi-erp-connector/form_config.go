@@ -17,6 +17,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"github.com/digitrade-e/digi-erp-connector/internal/secrets"
 )
 
@@ -146,6 +147,11 @@ func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bo
 // solely by price/stock. Failing the whole save there would make such a node
 // impossible to configure at all.
 func persistConfig(cfg config.Config, password string, logSvc logger.LoggerService) (warning string, err error) {
+	// The data directory is "ours to protect" when this GUI created it at
+	// launch, or when the secret and config.yaml below are about to.
+	dataDir := paths.DataDir()
+	createdDir := guiCreatedDataDir || dataDirMissing(dataDir)
+
 	if cfg.ERP == config.ERPHasavshevet {
 		warning = ensureProceduresBestEffort(cfg, password, logSvc)
 	}
@@ -160,6 +166,13 @@ func persistConfig(cfg config.Config, password string, logSvc logger.LoggerServi
 
 	if err := config.Save(cfg); err != nil {
 		return "", fmt.Errorf("error saving config: %w", err)
+	}
+
+	// The daemon's protected DACL, now rather than at the service's next start.
+	if cfgPath, pathErr := paths.ConfigFilePath(); pathErr == nil {
+		if w := protectSavedConfig(dataDir, cfgPath, createdDir, logSvc); w != "" {
+			warning = strings.TrimSpace(warning + " " + w)
+		}
 	}
 	return warning, nil
 }

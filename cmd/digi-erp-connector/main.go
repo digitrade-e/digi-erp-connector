@@ -19,11 +19,16 @@ import (
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
 func main() {
 	// walk requires all UI work on one OS thread.
 	runtime.LockOSThread()
+
+	// Before ui.log creates it: whether this GUI made the data directory, so
+	// its first save gives it the protected DACL (config_acl.go).
+	guiCreatedDataDir = dataDirMissing(paths.DataDir())
 
 	uiLog := newUILogger()
 	defer uiLog.Close()
