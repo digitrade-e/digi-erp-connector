@@ -160,8 +160,8 @@ itself). So:
   ACEs an operator added under the data directory are dropped at the next
   start**.
 - A start where everything already matches **only reads** (measured on the
-  Windows CI, 3,032 entries: steady state 0.27–0.60 s, the first full rewrite
-  1.40–2.31 s). While it runs the service reports start progress to the service
+  Windows CI, 3,032 entries: steady state 0.25–0.61 s, the first full rewrite
+  1.23–2.31 s). While it runs the service reports start progress to the service
   manager, and the GUI waits as long as progress keeps coming.
 
 **What stops the start** (nothing further is changed; the path is named):
@@ -176,15 +176,19 @@ itself). So:
   group such as Domain Admins — looked up with the domain), TrustedInstaller and
   the service's account. A planted entry is owned by its planter, who may still
   hold it open. If membership cannot be resolved (e.g. the domain controller is
-  unreachable), the entry is refused — and an owner whose SID resolves to no
-  account at all (a deleted user) is refused for good, until the file is
-  replaced (troubleshooting). An owner trusted through membership is handed to
+  unreachable), the entry is refused. An owner whose SID resolves to "no
+  account" is either a deleted user — refused until the file is replaced or
+  re-owned (troubleshooting) — or a domain account while the domain cannot be
+  reached, which clears once it can (Windows gives the same answer for both). An owner trusted through membership is handed to
   `BUILTIN\Administrators` once resolved, so the domain is needed at most once;
 - an entry's final path is not where the walk expects it, or the walk cannot
   open or read an entry at all (access denied).
 
 A refused start opens **no file** in the data directory: the reason goes to the
-**Windows Event Log** (Application, source `digi-erp-connectord`), the service
+**Windows Event Log** (Application, source `digi-erp-connectord`; the same reason
+at most once a day, a new reason at once — the last one is stamped in
+`HKLM\SOFTWARE\digi-erp-connector`, value `LastRefusal`, and a good start clears
+it), the service
 stops with service exit code **2** (`sc query digi-erp-connectord` shows it), the
 service manager restarts it after 1 min, 5 min and then every 30 min (the count
 resets after a day without failures), and the GUI says the service refused to start and where to
