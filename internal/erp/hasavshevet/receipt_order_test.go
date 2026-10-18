@@ -33,6 +33,7 @@ func TestReceiptWriter_BatNeverRunsWhenItsStartCannotBeRecorded(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
+	skipOnWindowsModeBits(t)
 	h := newReceiptHarness(t, 1000)
 	h.cfg.HasReceiptBatFile = filepath.Join(h.sendDir, "kupain.bat")
 	w := h.writer()

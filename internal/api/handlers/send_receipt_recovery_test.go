@@ -122,6 +122,8 @@ func TestSendReceipt_RetryAfterAKillBetweenReserveAndRenameIsOneReceipt(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Before TempDir's cleanup: Windows cannot delete a held lock file.
+			t.Cleanup(func() { _ = w.Close() })
 			h := NewSendReceiptHandler(w, true, &noopLogger{})
 			for range 2 {
 				rec := postReceipt(t, h, wireBytes(t))

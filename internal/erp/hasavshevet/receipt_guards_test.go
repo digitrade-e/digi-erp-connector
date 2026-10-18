@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,7 @@ func TestReceiptWriter_AdvanceFailureNeverReissuesTheNumber(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
+	skipOnWindowsModeBits(t)
 	if err := os.Chmod(rdir, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +68,7 @@ func TestReceiptIndex_UnreadableEntryIsNotANewKey(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores file permissions")
 	}
+	skipOnWindowsModeBits(t)
 	if err := os.Chmod(p, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -154,5 +157,16 @@ func TestReceiptNumberStore_NeverPersistsANumberPastF3(t *testing.T) {
 	}
 	if _, err := s.Peek(); !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("Peek after the last number = %v; want ErrStoreUnavailable (exhausted)", err)
+	}
+}
+
+// skipOnWindowsModeBits skips a guard test that makes a file or folder
+// unwritable with chmod: on Windows os.Chmod only toggles the read-only
+// attribute, which a directory ignores and which does not stop reads. The
+// guards themselves are platform-independent and run on Linux.
+func skipOnWindowsModeBits(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod cannot make a path unwritable/unreadable on Windows")
 	}
 }

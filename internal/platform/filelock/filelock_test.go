@@ -160,8 +160,12 @@ func TestLock_LeavesTheFileContentsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = l.Unlock() }()
-	if got, _ := os.ReadFile(path); string(got) != "left by someone\n" {
-		t.Errorf("Lock rewrote the file to %q", got)
+	// Read after Unlock: on Windows the byte-range lock also refuses reads
+	// through other handles while it is held.
+	if err := l.Unlock(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "left by someone\n" {
+		t.Errorf("Lock rewrote the file to %q (%v)", got, err)
 	}
 }

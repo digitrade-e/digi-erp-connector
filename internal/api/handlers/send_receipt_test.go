@@ -545,6 +545,8 @@ func TestSendReceipt_UnbuildableStoredReceiptIs500(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Before TempDir's cleanup: Windows cannot delete a held lock file.
+	t.Cleanup(func() { _ = w.Close() })
 	rec := postReceipt(t, NewSendReceiptHandler(w, true, &noopLogger{}), wireBytes(t))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d (%s); want 500", rec.Code, rec.Body.String())

@@ -240,6 +240,7 @@ func TestBuildReceiptWriter_RecoversAtStartup(t *testing.T) {
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
+	t.Cleanup(func() { _ = w.Close() }) // before TempDir's: Windows cannot delete a held lock file
 	// The trimmed folder is the one written to.
 	if _, err := os.Stat(filepath.Join(herp, "KUPAIN_1000.doc")); err != nil {
 		t.Errorf("the reserved receipt was not finished at startup: %v", err)
@@ -269,6 +270,7 @@ func TestBuildReceiptWriter_FailedRecoveryIsNotFatal(t *testing.T) {
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v; want a writer and no error", w, err)
 	}
+	t.Cleanup(func() { _ = w.Close() }) // before TempDir's: Windows cannot delete a held lock file
 	if len(log.errors) != 1 || !strings.Contains(log.errors[0], "recovery") {
 		t.Errorf("errors logged = %v; want the recovery failure", log.errors)
 	}
@@ -317,6 +319,9 @@ func TestStop_DoesNotHangOnAHeldImportLock(t *testing.T) {
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
+	// Runs after the deferred release below (cleanups follow defers) and
+	// before TempDir's: Windows cannot delete a lock file Stop left held.
+	t.Cleanup(func() { _ = w.Close() })
 	release, err := hasavshevet.HoldImports(context.Background())
 	if err != nil {
 		t.Fatal(err)
