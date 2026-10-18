@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -33,14 +34,32 @@ func (n node) dir() bool {
 	return n.info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 }
 
+// Another process holding an entry with DELETE access (or without sharing
+// what open asks) is a sharing violation; it usually passes, so open retries
+// shareRetries times, shareRetryDelay apart, before failing.
+var (
+	shareRetries    = 3
+	shareRetryDelay = 250 * time.Millisecond
+)
+
+// longPath is longPathFor on Windows: raw CreateFile calls get the \\?\ form.
+func longPath(p string) string { return longPathFor(p, true) }
+
 // open opens path by handle without following it and refuses a reparse
 // point and a multiply-linked file. A missing path wraps os.ErrNotExist.
 func open(path string, access uint32) (node, error) {
-	p, err := windows.UTF16PtrFromString(path)
+	p, err := windows.UTF16PtrFromString(longPath(path))
 	if err != nil {
 		return node{}, err
 	}
-	h, err := windows.CreateFile(p, access, openShare, nil, windows.OPEN_EXISTING, openFlags, 0)
+	var h windows.Handle
+	for attempt := 0; ; attempt++ {
+		h, err = windows.CreateFile(p, access, openShare, nil, windows.OPEN_EXISTING, openFlags, 0)
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || attempt >= shareRetries {
+			break
+		}
+		time.Sleep(shareRetryDelay)
+	}
 	if err != nil {
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 			return node{}, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
@@ -85,13 +104,17 @@ func finalPath(h windows.Handle) (string, error) {
 
 // trust is who the walk trusts and what it writes, computed once.
 type trust struct {
-	tokenUser string
-	account   string // the extra SID in the templates ("" = none)
-	admins    map[string]bool
-	adminsErr error
-	root      *windows.SECURITY_DESCRIPTOR
-	childDir  *windows.SECURITY_DESCRIPTOR
-	childFile *windows.SECURITY_DESCRIPTOR
+	tokenUser  string
+	account    string // the extra SID in the templates ("" = none)
+	admins     map[string]bool
+	adminsErr  error
+	adminsName string          // the local Administrators group's (localized) name
+	indirect   map[string]bool // owners resolved as members through a nested group
+	claim      bool            // TreeOptions.ClaimForAdministrators
+	baSID      *windows.SID
+	root       *windows.SECURITY_DESCRIPTOR
+	childDir   *windows.SECURITY_DESCRIPTOR
+	childFile  *windows.SECURITY_DESCRIPTOR
 }
 
 func newTrust() (*trust, error) {
@@ -111,6 +134,11 @@ func newTrust() (*trust, error) {
 		return nil, fmt.Errorf("dataacl: check Administrators membership: %w", err)
 	}
 	t.account = accountFor(t.tokenUser, isAdmin)
+	t.baSID = ba
+	t.indirect = map[string]bool{}
+	if name, _, _, err := ba.LookupAccount(""); err == nil {
+		t.adminsName = name
+	}
 	t.admins, t.adminsErr = localAdministrators(ba)
 
 	for _, x := range []struct {
@@ -137,7 +165,62 @@ func newTrust() (*trust, error) {
 var (
 	netapi32                    = windows.NewLazySystemDLL("netapi32.dll")
 	procNetLocalGroupGetMembers = netapi32.NewProc("NetLocalGroupGetMembers")
+	procNetUserGetLocalGroups   = netapi32.NewProc("NetUserGetLocalGroups")
 )
+
+// isIndirectAdministrator resolves whether the user sid belongs to the local
+// Administrators group through a nested group (NetUserGetLocalGroups with
+// LG_INCLUDE_INDIRECT — for a domain user that asks the domain). Not a user,
+// or not a member: false. Unresolvable: an error (the caller fails closed).
+func (t *trust) isIndirectAdministrator(sidStr string) (bool, error) {
+	if ok, seen := t.indirect[sidStr]; seen {
+		return ok, nil
+	}
+	if t.adminsName == "" {
+		return false, errors.New("the Administrators group's name is unknown")
+	}
+	sid, err := windows.StringToSid(sidStr)
+	if err != nil {
+		return false, err
+	}
+	account, domain, use, err := sid.LookupAccount("")
+	if err != nil {
+		return false, fmt.Errorf("look up %s: %w", sidStr, err)
+	}
+	if use != windows.SidTypeUser {
+		t.indirect[sidStr] = false
+		return false, nil
+	}
+	user, err := windows.UTF16PtrFromString(domain + `\` + account)
+	if err != nil {
+		return false, err
+	}
+	var (
+		buf         *byte
+		read, total uint32
+	)
+	const (
+		levelNamesOnly    = 0 // LOCALGROUP_USERS_INFO_0: one LPWSTR each
+		lgIncludeIndirect = 1
+	)
+	r, _, _ := procNetUserGetLocalGroups.Call(0, uintptr(unsafe.Pointer(user)), levelNamesOnly, lgIncludeIndirect,
+		uintptr(unsafe.Pointer(&buf)), uintptr(^uint32(0)), uintptr(unsafe.Pointer(&read)), uintptr(unsafe.Pointer(&total)))
+	if r != 0 {
+		return false, fmt.Errorf("list the local groups of %s\\%s: %w", domain, account, syscall.Errno(r))
+	}
+	defer windows.NetApiBufferFree(buf)
+	ok := false
+	if read > 0 {
+		for _, name := range unsafe.Slice((**uint16)(unsafe.Pointer(buf)), read) {
+			if strings.EqualFold(windows.UTF16PtrToString(name), t.adminsName) {
+				ok = true
+				break
+			}
+		}
+	}
+	t.indirect[sidStr] = ok
+	return ok, nil
+}
 
 // localAdministrators lists the direct members of the local Administrators
 // group by SID. Nested groups are not expanded.
@@ -174,21 +257,53 @@ func localAdministrators(ba *windows.SID) (map[string]bool, error) {
 }
 
 // check refuses an untrusted owner and reports whether n's DACL differs from
-// want.
-func (t *trust) check(path string, n node, want *windows.SECURITY_DESCRIPTOR) (bool, error) {
+// want; with claim set, an entry this process's account owns is handed to
+// Administrators (n must be open with WRITE_OWNER).
+func (t *trust) check(path string, n node, want *windows.SECURITY_DESCRIPTOR) (differs, claimed bool, err error) {
 	sd, err := windows.GetSecurityInfo(n.h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return false, fmt.Errorf("dataacl: read the security of %s: %w", path, err)
+		return false, false, fmt.Errorf("dataacl: read the security of %s: %w", path, err)
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return false, fmt.Errorf("dataacl: read the owner of %s: %w", path, err)
+		return false, false, fmt.Errorf("dataacl: read the owner of %s: %w", path, err)
 	}
-	if o := owner.String(); !trustedOwner(o, t.tokenUser, t.admins) {
-		return false, fmt.Errorf("%w: %s is owned by %s", ErrUntrustedOwner, path, o)
+	o := owner.String()
+	ok, why := trustedOwner(o, t.tokenUser, t.admins, t.isIndirectAdministrator)
+	if !ok {
+		if why != nil {
+			return false, false, fmt.Errorf("%w: %s is owned by %s (%v)", ErrUntrustedOwner, path, o, why)
+		}
+		return false, false, fmt.Errorf("%w: %s is owned by %s", ErrUntrustedOwner, path, o)
 	}
-	return !sameDACL(sd.String(), want.String()), nil
+	if t.claim && o == t.tokenUser && o != SIDLocalSystem && o != SIDAdministrators {
+		if err := setOwner(n.h, t.baSID); err != nil {
+			return false, false, fmt.Errorf("dataacl: make Administrators the owner of %s: %w", path, err)
+		}
+		claimed = true
+	}
+	return !sameDACL(sd.String(), want.String()), claimed, nil
+}
+
+func setOwner(h windows.Handle, owner *windows.SID) error {
+	sd, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return err
+	}
+	if err := sd.SetOwner(owner, false); err != nil {
+		return err
+	}
+	return windows.SetKernelObjectSecurity(h, windows.OWNER_SECURITY_INFORMATION, sd)
+}
+
+// access is what the walk opens an entry with.
+func (t *trust) access() uint32 {
+	a := uint32(windows.READ_CONTROL | windows.WRITE_DAC)
+	if t.claim {
+		a |= windows.WRITE_OWNER
+	}
+	return a
 }
 
 // write sets want as n's DACL through its handle; no propagation.
@@ -218,10 +333,11 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	t.claim = opt.ClaimForAdministrators
 	w := &walker{t: t, opt: opt}
 	w.rep.AdminsErr = t.adminsErr
 
-	root, err := open(dir, windows.READ_CONTROL|windows.WRITE_DAC)
+	root, err := open(dir, t.access())
 	if err != nil {
 		return w.rep, err
 	}
@@ -232,9 +348,12 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 	if w.rootFinal, err = finalPath(root.h); err != nil {
 		return w.rep, err
 	}
-	differs, err := t.check(dir, root, t.root)
+	differs, claimed, err := t.check(dir, root, t.root)
 	if err != nil {
 		return w.rep, err
+	}
+	if claimed {
+		w.rep.Claimed++
 	}
 	if differs {
 		if err := write(dir, root, t.root, true); err != nil {
@@ -276,7 +395,7 @@ func (w *walker) entry(path, rel string) error {
 	if testHookBeforeEntry != nil {
 		testHookBeforeEntry(path)
 	}
-	n, err := open(path, windows.READ_CONTROL|windows.WRITE_DAC)
+	n, err := open(path, w.t.access())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil // removed meanwhile
 	}
@@ -296,9 +415,12 @@ func (w *walker) entry(path, rel string) error {
 	if n.dir() {
 		want = w.t.childDir
 	}
-	differs, err := w.t.check(path, n, want)
+	differs, claimed, err := w.t.check(path, n, want)
 	if err != nil {
 		return err
+	}
+	if claimed {
+		w.rep.Claimed++
 	}
 	if differs {
 		if err := write(path, n, want, false); err != nil {
@@ -364,7 +486,7 @@ func ProtectFile(path string) error {
 	if n.dir() {
 		return fmt.Errorf("dataacl: %s is a directory", path)
 	}
-	differs, err := t.check(path, n, t.childFile)
+	differs, _, err := t.check(path, n, t.childFile)
 	if err != nil || !differs {
 		return err
 	}
@@ -391,7 +513,7 @@ func FileTrusted(path string) (bool, error) {
 		return false, err
 	}
 	defer windows.CloseHandle(n.h)
-	differs, err := t.check(path, n, t.childFile)
+	differs, _, err := t.check(path, n, t.childFile)
 	if errors.Is(err, ErrUntrustedOwner) {
 		return false, nil
 	}
@@ -402,7 +524,7 @@ func FileTrusted(path string) (bool, error) {
 // point and never into a multiply-linked file: an append there would write,
 // as SYSTEM, into whatever the link points at.
 func OpenLog(path string) (*os.File, error) {
-	p, err := windows.UTF16PtrFromString(path)
+	p, err := windows.UTF16PtrFromString(longPath(path))
 	if err != nil {
 		return nil, err
 	}
@@ -425,4 +547,16 @@ func OpenLog(path string) (*os.File, error) {
 		return nil, fmt.Errorf("dataacl: %s is a directory", path)
 	}
 	return os.NewFile(uintptr(h), path), nil
+}
+
+// FileID identifies the file object at path (volume serial and file index),
+// by handle, never through a link: two IDs are equal only for the very same
+// object, whatever it is called. A missing path wraps os.ErrNotExist.
+func FileID(path string) (string, error) {
+	n, err := open(path, windows.READ_CONTROL)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(n.h)
+	return fmt.Sprintf("%08x-%08x%08x", n.info.VolumeSerialNumber, n.info.FileIndexHigh, n.info.FileIndexLow), nil
 }

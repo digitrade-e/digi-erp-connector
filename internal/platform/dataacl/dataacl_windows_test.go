@@ -605,3 +605,227 @@ func TestProtectTree_ThousandsOfFiles(t *testing.T) {
 		t.Errorf("ProtectTree took %v / %v on 3032 entries", first, steady)
 	}
 }
+
+func ownerOf(t *testing.T, path string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o.String()
+}
+
+func finalPathOf(t *testing.T, path string) string {
+	t.Helper()
+	n, err := open(path, windows.READ_CONTROL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(n.h)
+	f, err := finalPath(n.h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// R3-5: with ClaimForAdministrators (the elevated GUI) everything this
+// account owns is handed to BUILTIN\Administrators — an owner the daemon
+// always trusts.
+func TestProtectTree_ClaimsWhatThisAccountOwns(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	f := filepath.Join(dir, "secrets", "db_password_sap.bin")
+	mkfile(t, f)
+	me := currentUserSID(t)
+	for _, p := range []string{dir, filepath.Dir(f), f} {
+		if o := ownerOf(t, p); o != me && o != SIDAdministrators {
+			t.Skipf("%s is owned by %s, neither this account nor Administrators", p, o)
+		}
+	}
+	rep, err := ProtectTree(dir, TreeOptions{ClaimForAdministrators: true})
+	if err != nil {
+		t.Fatalf("ProtectTree: %v", err)
+	}
+	for _, p := range []string{dir, filepath.Dir(f), f} {
+		if o := ownerOf(t, p); o != SIDAdministrators {
+			t.Errorf("%s is owned by %s after the claim; want Administrators", p, o)
+		}
+	}
+	t.Logf("claimed %d entries", rep.Claimed)
+	// Without the option the owner is left alone.
+	g := filepath.Join(dir, "later.json")
+	mkfile(t, g)
+	before := ownerOf(t, g)
+	protectTree(t, dir)
+	if o := ownerOf(t, g); o != before {
+		t.Errorf("owner %s -> %s without the claim option", before, o)
+	}
+}
+
+// R3-6a: setOwnerSystem, called directly — it runs only as SYSTEM in
+// production.
+func TestSetOwnerSystem(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := setOwnerSystem(dir, `\\?\C:\somewhere\else`); !errors.Is(err, ErrOutsideTree) {
+		t.Errorf("a changed root = %v; want ErrOutsideTree", err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	mklinkJ(t, link, t.TempDir())
+	if _, err := setOwnerSystem(link, finalPathOf(t, dir)); !errors.Is(err, ErrReparsePoint) {
+		t.Errorf("a junction = %v; want ErrReparsePoint", err)
+	}
+	if !enablePrivilege(t, "SeRestorePrivilege") {
+		t.Skip("SeRestorePrivilege not held: SYSTEM cannot be assigned as owner here")
+	}
+	set, err := setOwnerSystem(dir, finalPathOf(t, dir))
+	if err != nil || !set {
+		t.Fatalf("setOwnerSystem = %v, %v; want set", set, err)
+	}
+	if o := ownerOf(t, dir); o != SIDLocalSystem {
+		t.Errorf("owner %s; want SYSTEM", o)
+	}
+	if set, err := setOwnerSystem(dir, finalPathOf(t, dir)); err != nil || set {
+		t.Errorf("second call = %v, %v; want nothing to do", set, err)
+	}
+}
+
+// R3-6b: an entry whose final path is not root + its relative path is
+// refused (here the walker is told a different root).
+func TestWalkerEntry_RefusesAMismatchedFinalPath(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "a.json")
+	mkfile(t, f)
+	tr, err := newTrust()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &walker{t: tr, rootFinal: `\\?\C:\not\the\root`}
+	if err := w.entry(f, "a.json"); !errors.Is(err, ErrOutsideTree) {
+		t.Fatalf("entry = %v; want ErrOutsideTree", err)
+	}
+	w.rootFinal = finalPathOf(t, dir)
+	if err := w.entry(f, "a.json"); err != nil {
+		t.Fatalf("entry with the right root = %v", err)
+	}
+}
+
+// R3-6c: while the walk works below a folder it holds that folder open
+// without FILE_SHARE_DELETE, so it cannot be renamed (or swapped for a link).
+func TestProtectTree_HoldsAncestorsOpen(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	deep := filepath.Join(dir, "history", "receipts", "1000", "KUPAIN_1000.doc")
+	mkfile(t, deep)
+	var renameErr error
+	tried := false
+	testHookBeforeEntry = func(p string) {
+		if p == deep {
+			tried = true
+			renameErr = os.Rename(filepath.Join(dir, "history"), filepath.Join(dir, "history.moved"))
+		}
+	}
+	t.Cleanup(func() { testHookBeforeEntry = nil })
+	protectTree(t, dir)
+	if !tried {
+		t.Fatal("the hook never reached the deep entry")
+	}
+	if renameErr == nil {
+		t.Error("an ancestor held by the walk was renamed")
+	}
+}
+
+// Entries deeper than MAX_PATH are walked like any other.
+func TestProtectTree_LongPaths(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	p := dir
+	for len(p) < 320 {
+		p = filepath.Join(p, strings.Repeat("d", 40))
+	}
+	f := filepath.Join(p, "KUPAIN_1.doc")
+	mkfile(t, f)
+	rep := protectTree(t, dir)
+	if rep.Entries < 8 {
+		t.Errorf("report %+v; want the deep tree walked", rep)
+	}
+	onlyInherited(t, `\\?\`+f)
+}
+
+// A sharing violation (another process holds the entry with DELETE access)
+// is retried; one that does not pass in time fails the walk.
+func TestProtectTree_RetriesASharingViolation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	f := filepath.Join(dir, "held.json")
+	mkfile(t, f)
+	hold := func() windows.Handle {
+		p, _ := windows.UTF16PtrFromString(f)
+		h, err := windows.CreateFile(p, windows.DELETE|windows.GENERIC_READ,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	h := hold()
+	go func() { time.Sleep(300 * time.Millisecond); windows.CloseHandle(h) }()
+	if _, err := ProtectTree(dir, TreeOptions{}); err != nil {
+		t.Fatalf("ProtectTree while the hold ends within the retries = %v; want success", err)
+	}
+
+	h = hold()
+	defer windows.CloseHandle(h)
+	start := time.Now()
+	_, err := ProtectTree(dir, TreeOptions{})
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("ProtectTree while held = %v; want a sharing violation", err)
+	}
+	if d := time.Since(start); d < time.Duration(shareRetries)*shareRetryDelay {
+		t.Errorf("gave up after %v; want %d retries %v apart", d, shareRetries, shareRetryDelay)
+	}
+}
+
+// FileID names the object, not the path.
+func TestFileID(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "server.log")
+	mkfile(t, f)
+	a, err := FileID(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := FileID(f); a != b {
+		t.Errorf("FileID changed between calls: %s / %s", a, b)
+	}
+	if _, err := MoveAside(f); err != nil {
+		t.Fatal(err)
+	}
+	mkfile(t, f)
+	if c, _ := FileID(f); c == a {
+		t.Error("a fresh file has the old file's ID")
+	}
+	if err := os.Link(f, filepath.Join(dir, "linked.log")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FileID(f); !errors.Is(err, ErrHardLink) {
+		t.Errorf("FileID on a multiply-linked file = %v; want ErrHardLink", err)
+	}
+}
+
+// The indirect-membership lookup, against the real API: this (admin) account
+// is a member, a group is not a user.
+func TestIsIndirectAdministrator(t *testing.T) {
+	tr, err := newTrust()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := tr.isIndirectAdministrator(currentUserSID(t))
+	if err != nil || !ok {
+		t.Errorf("isIndirectAdministrator(this admin) = %v, %v; want true", ok, err)
+	}
+	if ok, err := tr.isIndirectAdministrator("S-1-5-32-545"); err != nil || ok {
+		t.Errorf("isIndirectAdministrator(Users group) = %v, %v; want false", ok, err)
+	}
+}

@@ -81,6 +81,7 @@ type Report struct {
 	OwnerSet   bool     // the directory's owner was set to SYSTEM (only when running as SYSTEM)
 	OwnerErr   error    // setting the owner failed; not fatal
 	AdminsErr  error    // the Administrators members could not be listed; only the fixed owners were trusted
+	Claimed    int      // entries whose owner was set to Administrators (TreeOptions.ClaimForAdministrators)
 }
 
 // TreeOptions tunes ProtectTree.
@@ -88,6 +89,12 @@ type TreeOptions struct {
 	// Progress, if set, is called every progressEvery entries — the service
 	// reports SERVICE_START_PENDING with a new checkpoint from it.
 	Progress func()
+	// ClaimForAdministrators makes BUILTIN\Administrators the owner of every
+	// entry this process's own account owns (the elevated GUI, for what it
+	// created): an admin token may always assign that owner, and the daemon
+	// always trusts it — whether or not it can resolve how the operator is an
+	// administrator (R3-5).
+	ClaimForAdministrators bool
 }
 
 const progressEvery = 64
@@ -110,16 +117,66 @@ func accountFor(tokenUser string, tokenIsAdmin bool) string {
 }
 
 // trustedOwner reports whether an entry owned by owner may be protected:
-// SYSTEM, Administrators, TrustedInstaller, the process's own account, or a
-// direct member of the local Administrators group (an elevated admin may own
-// what it created, depending on the "default owner" policy). Anyone else
-// planted it.
-func trustedOwner(owner, tokenUser string, admins map[string]bool) bool {
+// SYSTEM, Administrators, TrustedInstaller, the process's own account, a
+// direct member of the local Administrators group, or — asked of indirect
+// (may be nil) — a member through a nested group (R3-5: a domain admin in
+// Administrators via Domain Admins, owning what it saved with UAC off). An
+// owner whose membership cannot be resolved is untrusted, with the reason:
+// fail closed. Anyone else planted it.
+func trustedOwner(owner, tokenUser string, admins map[string]bool, indirect func(sid string) (bool, error)) (bool, error) {
 	switch owner {
 	case SIDLocalSystem, SIDAdministrators, SIDTrustedInstaller, tokenUser:
-		return true
+		return true, nil
 	}
-	return admins[owner]
+	if admins[owner] {
+		return true, nil
+	}
+	if indirect == nil {
+		return false, nil
+	}
+	ok, err := indirect(owner)
+	if err != nil {
+		return false, fmt.Errorf("could not resolve whether %s is an administrator: %w", owner, err)
+	}
+	return ok, nil
+}
+
+// longPathFor gives a Windows absolute path its \\?\ form (\\?\UNC\ for a
+// share), with . and .. resolved (the prefix turns off the system's own
+// normalisation), so a raw CreateFile works past MAX_PATH. Anything else is
+// returned as is; win false returns p unchanged.
+func longPathFor(p string, win bool) string {
+	if !win {
+		return p
+	}
+	p = strings.ReplaceAll(p, "/", `\`)
+	if strings.HasPrefix(p, `\\?\`) {
+		return p
+	}
+	var prefix, rest string
+	keep := 1
+	switch {
+	case strings.HasPrefix(p, `\\`):
+		prefix, rest, keep = `\\?\UNC\`, p[2:], 2
+	case len(p) >= 3 && p[1] == ':' && p[2] == '\\':
+		prefix, rest = `\\?\`, p
+	default:
+		return p
+	}
+	var out []string
+	for _, seg := range strings.Split(rest, `\`) {
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			if len(out) > keep {
+				out = out[:len(out)-1]
+			}
+			continue
+		}
+		out = append(out, seg)
+	}
+	return prefix + strings.Join(out, `\`)
 }
 
 func aces(account, flags string) string {

@@ -1,6 +1,7 @@
 package dataacl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,17 +144,58 @@ func TestAccountFor(t *testing.T) {
 }
 
 // A planted entry is owned by its planter: only SYSTEM, Administrators,
-// TrustedInstaller, this process's account and direct Administrators members
-// are trusted owners.
+// TrustedInstaller, this process's account and members of Administrators —
+// direct, or (R3-5) through a nested group, as the resolver says — are trusted
+// owners. A membership that cannot be resolved fails closed.
 func TestTrustedOwner(t *testing.T) {
-	const me, admin, other = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-1002"
+	const me, admin, nested, other, unknown = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-500",
+		"S-1-5-21-9-9-9-1105", "S-1-5-21-1-2-3-1002", "S-1-5-21-9-9-9-1199"
 	admins := map[string]bool{admin: true}
+	var asked []string
+	resolve := func(sid string) (bool, error) {
+		asked = append(asked, sid)
+		switch sid {
+		case nested:
+			return true, nil
+		case unknown:
+			return false, errors.New("the domain controller is unreachable")
+		}
+		return false, nil
+	}
 	for owner, want := range map[string]bool{
 		SIDLocalSystem: true, SIDAdministrators: true, SIDTrustedInstaller: true, me: true, admin: true,
-		other: false, "S-1-5-32-545": false, "S-1-1-0": false, SIDOwnerRights: false,
+		nested: true, other: false, unknown: false, "S-1-5-32-545": false, "S-1-1-0": false, SIDOwnerRights: false,
 	} {
-		if got := trustedOwner(owner, me, admins); got != want {
-			t.Errorf("trustedOwner(%s) = %v; want %v", owner, got, want)
+		got, err := trustedOwner(owner, me, admins, resolve)
+		if got != want {
+			t.Errorf("trustedOwner(%s) = %v (%v); want %v", owner, got, err, want)
+		}
+		if owner == unknown && err == nil {
+			t.Error("an unresolvable owner gave no reason")
+		}
+	}
+	for _, sid := range asked {
+		if sid == SIDLocalSystem || sid == me || sid == admin {
+			t.Errorf("the resolver was asked about %s, which needs no lookup", sid)
+		}
+	}
+	if ok, err := trustedOwner(other, me, admins, nil); ok || err != nil {
+		t.Errorf("no resolver: %v, %v; want plainly untrusted", ok, err)
+	}
+}
+
+// Raw CreateFile calls get the \\?\ form, so an entry deeper than MAX_PATH is
+// opened like any other.
+func TestLongPath(t *testing.T) {
+	for in, want := range map[string]string{
+		`C:\ProgramData\x`:      `\\?\C:\ProgramData\x`,
+		`\\?\C:\ProgramData\x`:  `\\?\C:\ProgramData\x`,
+		`\\server\share\dir`:    `\\?\UNC\server\share\dir`,
+		`relative\x`:            `relative\x`,
+		`C:\ProgramData\a\..\x`: `\\?\C:\ProgramData\x`,
+	} {
+		if got := longPathFor(in, true); got != want {
+			t.Errorf("longPathFor(%q) = %q; want %q", in, got, want)
 		}
 	}
 }
