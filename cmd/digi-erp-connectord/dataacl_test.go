@@ -12,7 +12,10 @@ func stubProtect(t *testing.T, rep dataacl.Report, treeErr, fileErr error) (*[]s
 	t.Helper()
 	var trees, files []string
 	oldTree, oldFile := protectTreeFn, protectFileFn
-	protectTreeFn = func(p string) (dataacl.Report, error) { trees = append(trees, p); return rep, treeErr }
+	protectTreeFn = func(p string, _ dataacl.TreeOptions) (dataacl.Report, error) {
+		trees = append(trees, p)
+		return rep, treeErr
+	}
 	protectFileFn = func(p string) error { files = append(files, p); return fileErr }
 	t.Cleanup(func() { protectTreeFn, protectFileFn = oldTree, oldFile })
 	return &trees, &files

@@ -61,7 +61,7 @@ func dataDirMissing(dir string) bool {
 func protectSavedConfig(dataDir, configPath string, protectDir bool, log logger.LoggerService) string {
 	var problems []string
 	if protectDir {
-		if rep, err := guiProtectTreeFn(dataDir); err != nil {
+		if rep, err := guiProtectTreeFn(dataDir, dataacl.TreeOptions{}); err != nil {
 			log.Error(fmt.Sprintf("could not set the protected DACL on the data directory %s", dataDir), err)
 			problems = append(problems, "the data directory ("+err.Error()+")")
 		} else if rep.Reset > 0 {

@@ -45,7 +45,7 @@ func TestProtectSavedConfig(t *testing.T) {
 			t.Errorf("warning %q; want none", w)
 		}
 		if len(*dirs) != 0 || len(*files) != 1 || (*files)[0] != cfg {
-			t.Errorf("ProtectDir %v, ProtectFile %v; want only config.yaml", *dirs, *files)
+			t.Errorf("ProtectTree %v, ProtectFile %v; want only config.yaml", *dirs, *files)
 		}
 		if len(log.errors) != 0 {
 			t.Errorf("logged %v", log.errors)
@@ -58,7 +58,7 @@ func TestProtectSavedConfig(t *testing.T) {
 			t.Errorf("warning %q; want none", w)
 		}
 		if len(*dirs) != 1 || (*dirs)[0] != dir || len(*files) != 1 {
-			t.Errorf("ProtectDir %v, ProtectFile %v; want both", *dirs, *files)
+			t.Errorf("ProtectTree %v, ProtectFile %v; want both", *dirs, *files)
 		}
 	})
 
@@ -95,7 +95,10 @@ func stubGUIProtect(t *testing.T, dirErr, fileErr error) (*[]string, *[]string) 
 	t.Helper()
 	var dirs, files []string
 	oldDir, oldFile := guiProtectTreeFn, guiProtectFileFn
-	guiProtectTreeFn = func(p string) (dataacl.Report, error) { dirs = append(dirs, p); return dataacl.Report{}, dirErr }
+	guiProtectTreeFn = func(p string, _ dataacl.TreeOptions) (dataacl.Report, error) {
+		dirs = append(dirs, p)
+		return dataacl.Report{}, dirErr
+	}
 	guiProtectFileFn = func(p string) error { files = append(files, p); return fileErr }
 	t.Cleanup(func() { guiProtectTreeFn, guiProtectFileFn = oldDir, oldFile })
 	return &dirs, &files

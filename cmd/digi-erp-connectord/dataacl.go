@@ -24,7 +24,7 @@ var (
 // It fails closed: the receipt index and history beneath hold customers'
 // personal data. A failed owner change (running as SYSTEM) is only logged.
 func protectDataDir(dataDir string, log logger.LoggerService) error {
-	rep, err := protectTreeFn(dataDir)
+	rep, err := protectTreeFn(dataDir, dataacl.TreeOptions{})
 	if err != nil {
 		log.Error(fmt.Sprintf("could not set the protected DACL on the data directory %s; not starting", dataDir), err)
 		return err
