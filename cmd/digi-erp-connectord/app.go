@@ -64,6 +64,15 @@ func (a *serverApp) Start() error {
 	a.cfg = cfg
 	bootstrapLog.Info(fmt.Sprintf("config loaded: erp=%s apiListen=%s sendOrderDir=%q", cfg.ERP, cfg.APIListen, cfg.SendOrderDir))
 
+	// Lock the data directory down before anything else is written under it
+	// (Windows only; a no-op elsewhere). The config loaded, so both exist.
+	if cfgPath, pathErr := paths.ConfigFilePath(); pathErr != nil {
+		bootstrapLog.Error("config path", pathErr)
+		return pathErr
+	} else if err := protectDataDir(paths.DataDir(), cfgPath, bootstrapLog); err != nil {
+		return err
+	}
+
 	// Generate this installation's signing secret if it has none. Doing it here
 	// rather than shipping a default is the whole point: a constant compiled into
 	// the binary would let anyone with the source mint tokens accepted by every
