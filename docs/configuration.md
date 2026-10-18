@@ -196,8 +196,8 @@ file a previous start created fresh (its file ID is recorded in
 `.server-log-id`). So the first start after an upgrade from 1.0.17 renames it to
 `server.log.<UTC time>.old`, and a start that could not rename it tries again the
 next time. If it cannot be renamed (a program holds it open), the daemon logs to
-a new `server-<UTC time>.log` this time — the warning saying so is the first
-thing in that file — rather than refusing to start.
+a new `server-<UTC time>.log` this time — the warning saying so is near the
+top of that file, right after the start line — rather than refusing to start.
 The GUI does the same for `ui.log` and `server.log` before opening them (also
 after an upgrade), and reopens one fresh if a save's walk had to reset it. Logs
 are always opened without following a link.
