@@ -16,9 +16,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Every open: never follow a reparse point, open directories too, and share
-// read/write but not delete — so while a handle is held nobody can rename or
-// replace that entry (or, for a directory, any of the walk's ancestors).
+// Every open: never follow a reparse point, open directories too. The share
+// mode (read/write, not delete) matters only for opens that ask for data
+// access (listing a folder, appending to a log): handles opened for
+// READ_CONTROL|WRITE_DAC alone take no part in share checks, so they do not
+// stop anyone renaming the entry. The walk's safety comes from elsewhere:
+// each entry is inspected through its own handle (reparse attribute, link
+// count, final path under the root, owner) and its DACL written through that
+// same handle; a second handle (the claim) is checked to be the same object
+// (volume + file index); and a folder with open handles beneath it cannot be
+// renamed (pinned by TestProtectTree_HoldsAncestorsOpen).
 const (
 	openFlags = windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS
 	openShare = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
@@ -379,7 +386,9 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 		w.rep.RootSet = true
 	}
 	if claim {
-		w.claim(dir, root)
+		if err := w.claim(dir, root); err != nil {
+			return w.rep, err
+		}
 	}
 	if err := w.children(dir, ""); err != nil {
 		return w.rep, err
@@ -390,16 +399,24 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 	return w.rep, nil
 }
 
-// claim hands an entry to Administrators; a failure is recorded, not fatal —
-// the owner is trusted either way.
-func (w *walker) claim(path string, n node) {
+// claim hands an entry to Administrators. An entry that turned out to be
+// another object is a refusal (the walk stops); any other failure is
+// recorded, not fatal — the owner is trusted either way.
+func (w *walker) claim(path string, n node) error {
+	if testHookBeforeClaim != nil {
+		testHookBeforeClaim(path)
+	}
 	if err := w.t.claimOwner(path, n); err != nil {
+		if errors.Is(err, ErrOutsideTree) {
+			return err
+		}
 		if w.rep.ClaimErr == nil {
 			w.rep.ClaimErr = err
 		}
-		return
+		return nil
 	}
 	w.rep.Claimed++
+	return nil
 }
 
 // children walks the entries of the directory at path (whose handle the
@@ -459,7 +476,9 @@ func (w *walker) entry(path, rel string) error {
 		w.rep.ResetPaths = append(w.rep.ResetPaths, path)
 	}
 	if claim {
-		w.claim(path, n)
+		if err := w.claim(path, n); err != nil {
+			return err
+		}
 	}
 	w.rep.Entries++
 	if w.opt.Progress != nil && w.rep.Entries%progressEvery == 0 {

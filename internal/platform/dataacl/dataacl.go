@@ -104,6 +104,10 @@ const progressEvery = 64
 // opened (tests swap an entry for a junction there).
 var testHookBeforeEntry func(path string)
 
+// testHookBeforeClaim, if set, runs between an entry's check and the claim's
+// second handle (tests swap the entry there).
+var testHookBeforeClaim func(path string)
+
 // testIndirectOverride, if set, answers the nested-membership question in
 // place of the real lookup (tests stand in for a domain).
 var testIndirectOverride func(sid string) (bool, error)

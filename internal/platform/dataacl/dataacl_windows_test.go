@@ -911,3 +911,34 @@ func TestProtectTree_ClaimsAResolvedAdminOwner(t *testing.T) {
 		t.Errorf("an unresolvable owner = %v; want ErrUntrustedOwner with the reason", err)
 	}
 }
+
+// An entry swapped for another object between the walk's check and the
+// claim's second handle is refused (ErrOutsideTree) — the walk does not go
+// on with it, or into children by path.
+func TestProtectTree_RefusesAnEntrySwappedBeforeTheClaim(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	f := filepath.Join(dir, "config.yaml")
+	mkfile(t, f)
+	if o := ownerOf(t, f); o != currentUserSID(t) {
+		t.Skipf("%s is owned by %s, not this account: no claim to interrupt", f, o)
+	}
+	swapped := false
+	testHookBeforeClaim = func(p string) {
+		if p != f || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(f, f+".moved"); err != nil {
+			t.Errorf("swap: %v", err)
+		}
+		mkfile(t, f)
+	}
+	t.Cleanup(func() { testHookBeforeClaim = nil })
+	_, err := ProtectTree(dir, TreeOptions{ClaimForAdministrators: true})
+	if !swapped {
+		t.Fatal("the hook never ran")
+	}
+	if !errors.Is(err, ErrOutsideTree) {
+		t.Fatalf("ProtectTree = %v; want ErrOutsideTree", err)
+	}
+}
