@@ -23,6 +23,11 @@ func TestValidateReceiptConfig(t *testing.T) {
 		{"relative receipt folder", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: "herp"}, "absolute"},
 		{"separate folders", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: herp}, ""},
 		{"same folder", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: orders + "/"}, "sendReceiptDir"},
+		{"has.exe receipt import", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: herp,
+			HasExePath: filepath.Join(dir, "has.exe"), HasReceiptParamFile: filepath.Join(dir, "kupain_perm.bat")}, ""},
+		{"BAT and has.exe both set", config.Config{ERP: config.ERPHasavshevet, SendOrderDir: orders, SendReceiptDir: herp,
+			HasReceiptBatFile: filepath.Join(dir, "kupain.bat"),
+			HasExePath:        filepath.Join(dir, "has.exe"), HasReceiptParamFile: filepath.Join(dir, "kupain_perm.bat")}, "ambiguous"},
 		{"a card name that fits", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{
 			Issuer: map[string]string{"6": "מקס"}}}, ""},
 		{"a card name too wide for F17", config.Config{ReceiptCardNames: config.ReceiptCardNamesConfig{

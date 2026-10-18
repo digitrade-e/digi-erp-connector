@@ -281,8 +281,11 @@ func buildReceiptWriter(cfg config.Config, dataDir string, log logger.LoggerServ
 		log.Error("receipt recovery failed; sendReceipt answers an error until it succeeds", err)
 	}
 	model := "a (files only)"
-	if strings.TrimSpace(cfg.HasReceiptBatFile) != "" {
+	switch {
+	case strings.TrimSpace(cfg.HasReceiptBatFile) != "":
 		model = "b (runs hasReceiptBatFile)"
+	case strings.TrimSpace(cfg.HasReceiptParamFile) != "":
+		model = "b (runs hasExePath with hasReceiptParamFile)"
 	}
 	log.Info(fmt.Sprintf("receipts configured: sendReceiptDir=%q model %s", strings.TrimSpace(cfg.SendReceiptDir), model))
 	return w, nil

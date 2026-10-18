@@ -143,3 +143,62 @@ func TestValidateReceipts_RefusesARelativeFolder(t *testing.T) {
 		t.Errorf("an absolute folder with spaces around it was refused: %v", err)
 	}
 }
+
+// The receipt import runs one way: a Masofon BAT (hasReceiptBatFile) or
+// has.exe with a receipt parameter file (hasReceiptParamFile, the same has.exe
+// the orders use). Both set is ambiguous and refused; every path is absolute,
+// because the service's working directory is System32.
+func TestValidateReceipts_ImportKeys(t *testing.T) {
+	abs := func(p string) string { return filepath.Join(t.TempDir(), p) }
+	herp := abs("herp")
+	bat, prm, exe := abs("kupain.bat"), abs("kupain_perm.bat"), abs("has.exe")
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		wantErr string // "" = accepted; else a fragment of the error
+	}{
+		{"neither (files only)", Config{SendReceiptDir: herp}, ""},
+		{"BAT only", Config{SendReceiptDir: herp, HasReceiptBatFile: bat}, ""},
+		{"has.exe only", Config{SendReceiptDir: herp, HasExePath: exe, HasReceiptParamFile: prm}, ""},
+		{"has.exe with spaces around the keys", Config{SendReceiptDir: herp, HasExePath: " " + exe + " ", HasReceiptParamFile: "\t" + prm}, ""},
+		{"both set", Config{SendReceiptDir: herp, HasReceiptBatFile: bat, HasExePath: exe, HasReceiptParamFile: prm}, "ambiguous"},
+		{"both set, no hasExePath", Config{SendReceiptDir: herp, HasReceiptBatFile: bat, HasReceiptParamFile: prm}, "ambiguous"},
+		{"param file without hasExePath", Config{SendReceiptDir: herp, HasReceiptParamFile: prm}, "hasExePath"},
+		{"param file with a blank hasExePath", Config{SendReceiptDir: herp, HasExePath: "  ", HasReceiptParamFile: prm}, "hasExePath"},
+		{"relative param file", Config{SendReceiptDir: herp, HasExePath: exe, HasReceiptParamFile: "kupain_perm.bat"}, "hasReceiptParamFile"},
+		{"relative hasExePath", Config{SendReceiptDir: herp, HasExePath: "has.exe", HasReceiptParamFile: prm}, "hasExePath"},
+		{"relative BAT", Config{SendReceiptDir: herp, HasReceiptBatFile: `.\kupain.bat`}, "hasReceiptBatFile"},
+		// Orders alone may keep a relative has.exe: only the receipt import is checked.
+		{"relative hasExePath, receipts not importing", Config{SendReceiptDir: herp, HasExePath: "has.exe"}, ""},
+		{"v1.0.17 config", Config{HasExePath: "has.exe", HasParamFile: "digi_perm.bat"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.ValidateReceipts()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("ValidateReceipts = %v; want nil", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("ValidateReceipts = nil; want an error naming %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Errorf("error %q should name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestReceiptParamFileRoundTripsAndIsOmittedWhenUnset(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte("hasReceiptParamFile: C:\\Hash7\\kupain_perm.bat\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HasReceiptParamFile != `C:\Hash7\kupain_perm.bat` {
+		t.Errorf("hasReceiptParamFile = %q", cfg.HasReceiptParamFile)
+	}
+	out, err := yaml.Marshal(Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "hasReceiptParamFile") {
+		t.Errorf("an unconfigured config writes hasReceiptParamFile:\n%s", out)
+	}
+}

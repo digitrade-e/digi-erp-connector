@@ -167,8 +167,15 @@ type Config struct {
 	SendReceiptDir string `yaml:"sendReceiptDir,omitempty"`
 	// HasReceiptBatFile switches receipts to model (b): this BAT is run (via
 	// cmd.exe /C, from its own folder, 90 s cap) once after each receipt file
-	// is written. Empty is model (a): files only, imported by hand.
+	// is written. Empty (and no HasReceiptParamFile) is model (a): files only,
+	// imported by hand. Absolute.
 	HasReceiptBatFile string `yaml:"hasReceiptBatFile,omitempty"`
+	// HasReceiptParamFile is model (b) the has.exe way, the mirror of
+	// sendOrder's HasExePath + HasParamFile: the orders' has.exe (HasExePath)
+	// is run with this parameter file, from SendReceiptDir, 90 s cap, once
+	// after each receipt file is written. Absolute; needs an absolute
+	// HasExePath; refused together with HasReceiptBatFile (ambiguous).
+	HasReceiptParamFile string `yaml:"hasReceiptParamFile,omitempty"`
 	// ReceiptCardNames overrides the built-in card-name table used for the
 	// receipt's card name (KUPAIN F17), keyed by the raw HYP code.
 	ReceiptCardNames ReceiptCardNamesConfig `yaml:"receiptCardNames,omitempty"`
@@ -196,7 +203,8 @@ func (c Config) ReceiptsConfigured() bool {
 	return c.ERP == ERPHasavshevet && strings.TrimSpace(c.SendReceiptDir) != ""
 }
 
-// ValidateReceipts refuses a relative sendReceiptDir, and one that is the
+// ValidateReceipts refuses an ambiguous or relative receipt import
+// (validateReceiptImport), a relative sendReceiptDir, and one that is the
 // sendOrderDir. Both importers write fixed-name files into their folder and run
 // from it, and the receipt folder sits under a web root on a real install;
 // sharing one would mix the two imports. The comparison is after Clean and symlink resolution,
@@ -206,6 +214,9 @@ func (c Config) ReceiptsConfigured() bool {
 // The daemon (api.NewServer) and the GUI save path both call it, through
 // hasavshevet.ValidateReceiptConfig.
 func (c Config) ValidateReceipts() error {
+	if err := c.validateReceiptImport(); err != nil {
+		return err
+	}
 	order, receipt := strings.TrimSpace(c.SendOrderDir), strings.TrimSpace(c.SendReceiptDir)
 	if receipt == "" {
 		return nil
@@ -221,6 +232,35 @@ func (c Config) ValidateReceipts() error {
 	}
 	if sameDir(order, receipt, runtime.GOOS == "windows") {
 		return fmt.Errorf("sendReceiptDir %q is the sendOrderDir: receipts need a folder of their own", receipt)
+	}
+	return nil
+}
+
+// validateReceiptImport checks the model-(b) keys: at most one runner, and
+// every path it runs absolute (a relative one would resolve against the
+// service's working directory, System32). hasExePath is checked only when the
+// receipt import uses it: the order importer has never required it absolute.
+func (c Config) validateReceiptImport() error {
+	bat := strings.TrimSpace(c.HasReceiptBatFile)
+	prm := strings.TrimSpace(c.HasReceiptParamFile)
+	exe := strings.TrimSpace(c.HasExePath)
+	if bat != "" && prm != "" {
+		return errors.New("hasReceiptBatFile and hasReceiptParamFile are both set: the receipt import is ambiguous — keep one")
+	}
+	if bat != "" && !filepath.IsAbs(bat) {
+		return fmt.Errorf("hasReceiptBatFile %q must be an absolute path", bat)
+	}
+	if prm == "" {
+		return nil
+	}
+	if !filepath.IsAbs(prm) {
+		return fmt.Errorf("hasReceiptParamFile %q must be an absolute path", prm)
+	}
+	if exe == "" {
+		return errors.New("hasReceiptParamFile is set but hasExePath is not: the receipt import runs the orders' has.exe")
+	}
+	if !filepath.IsAbs(exe) {
+		return fmt.Errorf("hasExePath %q must be an absolute path when hasReceiptParamFile is set", exe)
 	}
 	return nil
 }

@@ -25,10 +25,12 @@ func ValidateReceiptConfig(cfg config.Config) error {
 // trimmed folder, so that is the one the writer must use.
 func ReceiptWriterConfigFrom(cfg config.Config, dataDir string) ReceiptWriterConfig {
 	return ReceiptWriterConfig{
-		SendReceiptDir:    strings.TrimSpace(cfg.SendReceiptDir),
-		DataDir:           dataDir,
-		HasReceiptBatFile: strings.TrimSpace(cfg.HasReceiptBatFile),
-		CardNames:         cardNamesFrom(cfg.ReceiptCardNames),
+		SendReceiptDir:      strings.TrimSpace(cfg.SendReceiptDir),
+		DataDir:             dataDir,
+		HasReceiptBatFile:   strings.TrimSpace(cfg.HasReceiptBatFile),
+		HasExePath:          strings.TrimSpace(cfg.HasExePath),
+		HasReceiptParamFile: strings.TrimSpace(cfg.HasReceiptParamFile),
+		CardNames:           cardNamesFrom(cfg.ReceiptCardNames),
 	}
 }
 

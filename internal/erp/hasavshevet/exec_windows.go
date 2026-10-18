@@ -32,3 +32,11 @@ func runBatFile(ctx context.Context, batPath string) (int, string, error) {
 func runReceiptBatFile(ctx context.Context, batPath string) (int, string, error) {
 	return runCommand(ctx, receiptBatWaitDelay, filepath.Dir(batPath), "cmd.exe", "/C", batPath)
 }
+
+// runReceiptImporter is runImporter for receipts (has.exe with the receipt
+// parameter file, run from sendReceiptDir), with the receipt BAT's wait delay:
+// the 90 s cap must hold even if has.exe leaves a child holding the output
+// pipe (exec_cmd.go).
+func runReceiptImporter(ctx context.Context, hasExePath, paramFile, workDir string) (int, string, error) {
+	return runCommand(ctx, receiptBatWaitDelay, workDir, hasExePath, paramFile)
+}

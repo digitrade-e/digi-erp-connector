@@ -22,8 +22,8 @@ import (
 // KUPAIN_{n}.doc files.
 const KUPAINPRMName = "KUPAIN.prm"
 
-// receiptBatTimeout bounds one run of the receipt BAT (model (b)). It sits
-// inside the route's 120 s write deadline.
+// receiptBatTimeout bounds one run of the receipt import (model (b): the BAT
+// or has.exe). It sits inside the route's 120 s write deadline.
 const receiptBatTimeout = 90 * time.Second
 
 // maxImportDetail caps the BAT output kept in the index entry.
@@ -39,6 +39,9 @@ const (
 // recoveredWithoutBatWarning is stored on a model-(b) receipt that Recover
 // finished: its BAT was never run and never will be.
 const recoveredWithoutBatWarning = "this receipt was completed by recovery after an interrupted write; the receipt BAT was not run for it — import it by hand"
+
+// recoveredWithoutHasExeWarning is the same for the has.exe runner.
+const recoveredWithoutHasExeWarning = "this receipt was completed by recovery after an interrupted write; the receipt has.exe was not run for it — import it by hand"
 
 // ErrStoredReceiptUnbuildable means a receipt request already stored in the
 // index — being finished by Recover or by a repeat — no longer builds. It is
@@ -74,8 +77,16 @@ type ReceiptWriterConfig struct {
 	// in SendReceiptDir, which on a real install sits under a web root.
 	DataDir string
 	// HasReceiptBatFile switches on model (b): when set, the BAT is run once
-	// after each receipt is written. Empty is model (a): files only.
+	// after each receipt is written. Empty (and no HasReceiptParamFile) is
+	// model (a): files only.
 	HasReceiptBatFile string
+	// HasExePath and HasReceiptParamFile are model (b) the has.exe way (the
+	// mirror of sendOrder's has.exe fallback): when HasReceiptParamFile is
+	// set, HasExePath is run with it from SendReceiptDir once after each
+	// receipt is written. Never together with HasReceiptBatFile. HasExePath
+	// alone (the orders' importer) imports no receipt.
+	HasExePath          string
+	HasReceiptParamFile string
 	// CardNames overrides the built-in card-name table for F17.
 	CardNames ReceiptCardNames
 }
@@ -114,8 +125,9 @@ type ReceiptResult struct {
 //     last KUPAIN_{n}.doc — each by atomic rename, so a poller sees a whole
 //     file or none, and the .doc appears only when everything else is ready;
 //  5. persist state written;
-//  6. model (b) only: persist import started, run the BAT, persist ok/failed.
-//     A key whose import has started never runs the BAT again.
+//  6. model (b) only: persist import started, run the import (the receipt BAT,
+//     or has.exe with the receipt parameter file), persist ok/failed. A key
+//     whose import has started never runs it again.
 //
 // Recover, run at startup (and by the first Write if it has not succeeded),
 // finishes every reserved entry with steps 4–5 and moves the store past every
@@ -138,6 +150,7 @@ type ReceiptWriter struct {
 	// Test seams.
 	crashPoint func(point string)
 	runBat     func(ctx context.Context, batPath string) (int, string, error)
+	runHasExe  func(ctx context.Context, hasExePath, paramFile, workDir string) (int, string, error)
 	batTimeout time.Duration
 }
 
@@ -150,6 +163,14 @@ func NewReceiptWriter(cfg ReceiptWriterConfig, log logger.LoggerService) (*Recei
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return nil, errors.New("receipt writer: data directory is not set")
 	}
+	if prm := strings.TrimSpace(cfg.HasReceiptParamFile); prm != "" {
+		if strings.TrimSpace(cfg.HasReceiptBatFile) != "" {
+			return nil, errors.New("receipt writer: both a receipt BAT and a receipt has.exe parameter file are set")
+		}
+		if strings.TrimSpace(cfg.HasExePath) == "" {
+			return nil, errors.New("receipt writer: a receipt has.exe parameter file is set but hasExePath is not")
+		}
+	}
 	return &ReceiptWriter{
 		cfg:        cfg,
 		store:      NewReceiptNumberStore(ReceiptNumberStorePath(cfg.DataDir)),
@@ -157,6 +178,7 @@ func NewReceiptWriter(cfg ReceiptWriterConfig, log logger.LoggerService) (*Recei
 		historyDir: filepath.Join(cfg.DataDir, "history", "receipts"),
 		log:        log,
 		runBat:     runReceiptBatFile,
+		runHasExe:  runReceiptImporter,
 		batTimeout: receiptBatTimeout,
 	}, nil
 }
@@ -212,15 +234,18 @@ func (w *ReceiptWriter) recoverLocked() error {
 		// ordinary model-(a) answer. The note is saved with state written, so
 		// every replay of the key returns it.
 		var notes []string
-		if w.batConfigured() {
+		switch w.importer() {
+		case importerBat:
 			notes = append(notes, recoveredWithoutBatWarning)
+		case importerHasExe:
+			notes = append(notes, recoveredWithoutHasExeWarning)
 		}
 		if err := w.complete(e, notes...); err != nil {
 			return fmt.Errorf("recover receipt %d (key %s): %w", e.Number, e.Key, err)
 		}
 		msg := fmt.Sprintf("recovered receipt %d key=%s: file written after an interrupted write", e.Number, e.Key)
-		if w.batConfigured() {
-			msg += "; the receipt BAT was NOT run for it — import it by hand"
+		if imp := w.importer(); imp != importerNone {
+			msg += fmt.Sprintf("; the %s was NOT run for it — import it by hand", imp)
 		}
 		w.log.Warn(msg)
 	}
@@ -418,16 +443,17 @@ func (w *ReceiptWriter) complete(e *receiptIndexEntry, notes ...string) error {
 
 // runImport is step 6 (model (b) only). It returns notes for the caller.
 func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []string {
-	if !w.batConfigured() || e.Import != ImportNotRun {
+	imp := w.importer()
+	if imp == importerNone || e.Import != ImportNotRun {
 		return nil
 	}
 	e.Import = ImportStarted
 	w.crash(crashBeforeImportStarted)
 	if err := w.index.save(e); err != nil {
-		// Unrecorded, a crash during the BAT would let a repeat run it again.
+		// Unrecorded, a crash during the import would let a repeat run it again.
 		e.Import = ImportNotRun
-		w.log.Error(fmt.Sprintf("receipt %d: BAT not run, could not record that the import started", e.Number), err)
-		return []string{"the receipt BAT was not run: the connector could not record that the import started"}
+		w.log.Error(fmt.Sprintf("receipt %d: %s not run, could not record that the import started", e.Number, imp), err)
+		return []string{fmt.Sprintf("the %s was not run: the connector could not record that the import started", imp)}
 	}
 
 	// The import outlives the HTTP request: a caller that hangs up must not
@@ -435,9 +461,19 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 	batCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.batTimeout)
 	defer cancel()
 	start := time.Now()
-	exitCode, output, execErr := w.runBat(batCtx, w.cfg.HasReceiptBatFile)
-	w.log.Info(fmt.Sprintf("receipt BAT exit=%d durationMs=%d output=%q receiptNumber=%d",
-		exitCode, time.Since(start).Milliseconds(), output, e.Number))
+	var (
+		exitCode int
+		output   string
+		execErr  error
+	)
+	if imp == importerHasExe {
+		exitCode, output, execErr = w.runHasExe(batCtx,
+			strings.TrimSpace(w.cfg.HasExePath), strings.TrimSpace(w.cfg.HasReceiptParamFile), w.cfg.SendReceiptDir)
+	} else {
+		exitCode, output, execErr = w.runBat(batCtx, w.cfg.HasReceiptBatFile)
+	}
+	w.log.Info(fmt.Sprintf("%s exit=%d durationMs=%d output=%q receiptNumber=%d",
+		imp, exitCode, time.Since(start).Milliseconds(), output, e.Number))
 
 	if execErr != nil || exitCode != 0 {
 		e.Import = ImportFailed
@@ -452,7 +488,7 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 			detail = detail[:maxImportDetail]
 		}
 		e.ImportDetail = detail
-		w.log.Error(fmt.Sprintf("receipt BAT failed receiptNumber=%d exit=%d", e.Number, exitCode), execErr)
+		w.log.Error(fmt.Sprintf("%s failed receiptNumber=%d exit=%d", imp, e.Number, exitCode), execErr)
 	} else {
 		e.Import = ImportOK
 	}
@@ -468,8 +504,27 @@ func (w *ReceiptWriter) historyPath(n int64) string {
 	return filepath.Join(w.historyDir, strconv.FormatInt(n, 10))
 }
 
-func (w *ReceiptWriter) batConfigured() bool {
-	return strings.TrimSpace(w.cfg.HasReceiptBatFile) != ""
+// receiptImporter names the model-(b) runner; its value is how logs and
+// warnings refer to it.
+type receiptImporter string
+
+const (
+	importerNone   receiptImporter = ""
+	importerBat    receiptImporter = "receipt BAT"
+	importerHasExe receiptImporter = "receipt has.exe"
+)
+
+// importer is the configured model-(b) runner. NewReceiptWriter refused both
+// at once, and a parameter file without has.exe.
+func (w *ReceiptWriter) importer() receiptImporter {
+	switch {
+	case strings.TrimSpace(w.cfg.HasReceiptBatFile) != "":
+		return importerBat
+	case strings.TrimSpace(w.cfg.HasReceiptParamFile) != "" && strings.TrimSpace(w.cfg.HasExePath) != "":
+		return importerHasExe
+	default:
+		return importerNone
+	}
 }
 
 func (w *ReceiptWriter) result(e *receiptIndexEntry, replayed bool, notes []string) *ReceiptResult {
