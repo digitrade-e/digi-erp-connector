@@ -204,7 +204,8 @@ func (c Config) ReceiptsConfigured() bool {
 }
 
 // ValidateReceipts refuses an ambiguous or relative receipt import
-// (validateReceiptImport), a relative sendReceiptDir, and one that is the
+// (validateReceiptImport, only when receipts are configured), a relative
+// sendReceiptDir, and one that is the
 // sendOrderDir. Both importers write fixed-name files into their folder and run
 // from it, and the receipt folder sits under a web root on a real install;
 // sharing one would mix the two imports. The comparison is after Clean and symlink resolution,
@@ -214,8 +215,13 @@ func (c Config) ReceiptsConfigured() bool {
 // The daemon (api.NewServer) and the GUI save path both call it, through
 // hasavshevet.ValidateReceiptConfig.
 func (c Config) ValidateReceipts() error {
-	if err := c.validateReceiptImport(); err != nil {
-		return err
+	// The import keys are checked only where they are used: a stray line on a
+	// connector that writes no receipts (no sendReceiptDir, or erp: sap) must
+	// never stop it serving orders.
+	if c.ReceiptsConfigured() {
+		if err := c.validateReceiptImport(); err != nil {
+			return err
+		}
 	}
 	order, receipt := strings.TrimSpace(c.SendOrderDir), strings.TrimSpace(c.SendReceiptDir)
 	if receipt == "" {

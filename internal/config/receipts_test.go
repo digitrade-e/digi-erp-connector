@@ -157,20 +157,24 @@ func TestValidateReceipts_ImportKeys(t *testing.T) {
 		cfg     Config
 		wantErr string // "" = accepted; else a fragment of the error
 	}{
-		{"neither (files only)", Config{SendReceiptDir: herp}, ""},
-		{"BAT only", Config{SendReceiptDir: herp, HasReceiptBatFile: bat}, ""},
-		{"has.exe only", Config{SendReceiptDir: herp, HasExePath: exe, HasReceiptParamFile: prm}, ""},
-		{"has.exe with spaces around the keys", Config{SendReceiptDir: herp, HasExePath: " " + exe + " ", HasReceiptParamFile: "\t" + prm}, ""},
-		{"both set", Config{SendReceiptDir: herp, HasReceiptBatFile: bat, HasExePath: exe, HasReceiptParamFile: prm}, "ambiguous"},
-		{"both set, no hasExePath", Config{SendReceiptDir: herp, HasReceiptBatFile: bat, HasReceiptParamFile: prm}, "ambiguous"},
-		{"param file without hasExePath", Config{SendReceiptDir: herp, HasReceiptParamFile: prm}, "hasExePath"},
-		{"param file with a blank hasExePath", Config{SendReceiptDir: herp, HasExePath: "  ", HasReceiptParamFile: prm}, "hasExePath"},
-		{"relative param file", Config{SendReceiptDir: herp, HasExePath: exe, HasReceiptParamFile: "kupain_perm.bat"}, "hasReceiptParamFile"},
-		{"relative hasExePath", Config{SendReceiptDir: herp, HasExePath: "has.exe", HasReceiptParamFile: prm}, "hasExePath"},
-		{"relative BAT", Config{SendReceiptDir: herp, HasReceiptBatFile: `.\kupain.bat`}, "hasReceiptBatFile"},
+		{"neither (files only)", Config{ERP: ERPHasavshevet, SendReceiptDir: herp}, ""},
+		{"BAT only", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasReceiptBatFile: bat}, ""},
+		{"has.exe only", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasExePath: exe, HasReceiptParamFile: prm}, ""},
+		{"has.exe with spaces around the keys", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasExePath: " " + exe + " ", HasReceiptParamFile: "\t" + prm}, ""},
+		{"both set", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasReceiptBatFile: bat, HasExePath: exe, HasReceiptParamFile: prm}, "ambiguous"},
+		{"both set, no hasExePath", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasReceiptBatFile: bat, HasReceiptParamFile: prm}, "ambiguous"},
+		{"param file without hasExePath", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasReceiptParamFile: prm}, "hasExePath"},
+		{"param file with a blank hasExePath", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasExePath: "  ", HasReceiptParamFile: prm}, "hasExePath"},
+		{"relative param file", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasExePath: exe, HasReceiptParamFile: "kupain_perm.bat"}, "hasReceiptParamFile"},
+		{"relative hasExePath", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasExePath: "has.exe", HasReceiptParamFile: prm}, "hasExePath"},
+		{"relative BAT", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasReceiptBatFile: `.\kupain.bat`}, "hasReceiptBatFile"},
 		// Orders alone may keep a relative has.exe: only the receipt import is checked.
-		{"relative hasExePath, receipts not importing", Config{SendReceiptDir: herp, HasExePath: "has.exe"}, ""},
+		{"relative hasExePath, receipts not importing", Config{ERP: ERPHasavshevet, SendReceiptDir: herp, HasExePath: "has.exe"}, ""},
 		{"v1.0.17 config", Config{HasExePath: "has.exe", HasParamFile: "digi_perm.bat"}, ""},
+		// Dormant keys never stop a connector that writes no receipts: orders
+		// must not go down over a stray line.
+		{"stray keys, no sendReceiptDir", Config{ERP: ERPHasavshevet, HasReceiptBatFile: "kupain.bat", HasReceiptParamFile: "k.prm"}, ""},
+		{"stray keys, erp: sap", Config{ERP: ERPSAP, SendReceiptDir: herp, HasReceiptBatFile: bat, HasReceiptParamFile: "k.prm"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.cfg.ValidateReceipts()
