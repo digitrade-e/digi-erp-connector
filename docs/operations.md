@@ -190,7 +190,9 @@ Neither ever contains the API password, the DB password or the signing secret.
 to it — if the GUI or a tool seems to log nothing, that is usually why. Since the service gives the data
 directory a protected DACL (SYSTEM + Administrators only, see
 [configuration.md](configuration.md#data-directory-permissions-windows)), **reading** the logs or any other
-file there also needs an elevated prompt or editor.
+file there also needs an elevated prompt or editor. The first start after an upgrade from 1.0.17 rewrites the permissions of
+everything in the data directory and moves `server.log` aside (`server.log.<UTC time>.old`); close any program
+tailing it before the upgrade, or the service will not start until it is closed.
 
 Useful check — is anything failing to authenticate, and with which username?
 

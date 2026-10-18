@@ -301,10 +301,11 @@ daemon still starts, as it does for any failed recovery. On Windows a held
 
 The receipt data is personal data. On Windows the whole data directory gets a
 **protected DACL** at every daemon start (SYSTEM, Administrators and the service
-account; OWNER RIGHTS read-only, so the owner cannot rewrite it; set before the
-config loads, with anything under it that carries its own ACL reset and any
-symlink or junction refusing startup; the daemon does not start if it cannot be
-set; the elevated GUI applies it on save too) — see
+account only when it is not an admin; OWNER RIGHTS read-only, so the owner
+cannot rewrite it; set by handle before server.log is opened and before the
+config loads, with every entry that carries its own ACL rewritten and any link,
+hard link or untrusted owner refusing startup; the elevated GUI applies it
+before its first save writes anything) — see
 [configuration.md](configuration.md#data-directory-permissions-windows). On Linux
 the receipt directories are 0700 and their files 0600.
 

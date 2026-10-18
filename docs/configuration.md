@@ -126,39 +126,65 @@ connector; stop the other process.
 
 The data directory gets a **protected DACL** — nothing inherited from
 `%ProgramData%`, whose default ACL lets every local user read — granting Full
-Control to exactly `SYSTEM`, `BUILTIN\Administrators` and the account of the
-process that sets it (the service: LocalSystem, so in practice the first two),
-plus **OWNER RIGHTS with READ_CONTROL only**. Everything under it inherits that:
-`config.yaml`, `secrets\`, `queries.json`, the logs and the receipt data.
+Control to exactly `SYSTEM` and `BUILTIN\Administrators`, plus **OWNER RIGHTS
+with READ_CONTROL only**. (A service run under a dedicated *non-admin* account
+also gets an ACE for that account; LocalSystem and the elevated GUI add none, so
+both write the same DACL.) Every file and folder beneath carries the same ACEs,
+as inherited ones: `config.yaml`, `secrets\`, `queries.json`, the logs and the
+receipt data.
 
 **What is protected, when:**
 
 | When | By | What |
 |---|---|---|
-| Every service start, **before the config is read** — so also the installer's first `sc start`, which has no config yet | the daemon | the data directory and everything under it (below). If this fails the daemon **does not start**. |
-| Every service start, right after `config.yaml` loads | the daemon | `config.yaml` itself (the same DACL, set explicitly). A failure is logged; the daemon starts — the file inherits the directory's DACL anyway. |
-| Every save in the elevated GUI | the GUI | `config.yaml`. |
-| The GUI save that creates `config.yaml`, or the first save after a GUI launch that found no data directory | the GUI | the data directory and everything under it, as the daemon does. |
+| Every service start, **before `server.log` is opened and before the config is read** — so also the installer's first `sc start`, which has no config yet (the service creates the directory then, and owns it) | the daemon | the directory and everything under it (below). If this fails the daemon **does not start**. |
+| Every service start, right after `config.yaml` loads | the daemon | `config.yaml` once more (a config written between the walk and the load). A failure is logged; the daemon starts. |
+| The GUI save that creates `config.yaml`, or the first save after a GUI launch that found no data directory — **before** that save writes the secret or `config.yaml` | the elevated GUI | the directory and everything under it, as the daemon does. |
+| Every GUI save, after `config.yaml` is written | the elevated GUI | `config.yaml`. |
 
-A GUI failure is a "Saved, but…" warning in the status bar and a line in the
-log, not a refused save: the file is saved, and the service sets the DACL again
-when it starts. Nothing to configure; nothing happens on Linux.
+A GUI failure is a note in the status bar ("Saved, but…") and a line in the log,
+not a refused save: the service sets the DACL again when it starts. Nothing to
+configure; nothing happens on Linux.
 
-**Everything under the directory is reset.** After protecting the directory, the
-daemon walks it (without following links) and resets every file and folder that
-carries a DACL of its own — protected, NULL, or with explicit ACEs — to the
-inherited DACL alone. A folder planted before the first protected start (a
-`receipts\` created by a standard user with its own ACL, say) therefore does not
-survive, and neither do explicit ACEs an operator added under the data directory
-by hand: they are dropped at the next start. Entries that already only inherit
-are just read, so a normal start rewrites nothing.
+**How the walk works.** The daemon opens the directory, then every entry under
+it — parents before children — **by handle, never following a link**, and keeps
+every ancestor folder open so none can be renamed or replaced meanwhile. It
+reads each entry's security through that handle and writes it only if it
+differs from the template, without any propagation (the walk writes each
+child's inherited ACEs itself). So:
 
-**Symlinks and junctions refuse startup.** If the data directory itself, or
-anything under it, is a symlink, a junction or another reparse point that
-redirects a path, the daemon changes nothing and does not start (logged:
-`a symlink or junction is in the data directory`): receipt data written through
-it would land outside the protected tree. Remove the link. (Data Deduplication
-files count as regular files.)
+- A file or folder that carries an ACL of its own — protected, NULL, explicit
+  ACEs, or the old `%ProgramData%` ACEs — gets the inherited DACL. A folder
+  planted before the first protected start does not survive, and **explicit
+  ACEs an operator added under the data directory are dropped at the next
+  start**.
+- A start where everything already matches **only reads** (measured on the
+  Windows CI: 3,032 entries in 0.4–0.6 s; the first, full rewrite 2.2 s). While
+  it runs the service reports start progress to the service manager, so a large
+  directory never looks hung.
+
+**What stops the start** (the daemon changes nothing further and logs the
+path):
+
+- the directory, or anything under it, is a **symlink, junction or other
+  reparse point** — data written through it would land outside the protected
+  tree (Data Deduplication files count as regular files only to Go; a
+  deduplicated file under the data directory is refused too);
+- a file under it has **more than one hard link** — its permissions are shared
+  with the other name, which may be anywhere on the volume;
+- an entry is **owned by someone untrusted** — anyone but SYSTEM,
+  Administrators (the group, or a direct member of it), TrustedInstaller and the
+  service's account. A planted entry is owned by its planter, who may still hold
+  it open. Members through a nested (e.g. domain) group are not recognised: take
+  ownership (see troubleshooting).
+
+**Logs.** If the walk had to rewrite `server.log`'s permissions (always on the
+first start after an upgrade from 1.0.17), the daemon renames it to
+`server.log.<UTC time>.old` and starts a fresh file, so nothing new is appended
+to a file someone may have opened earlier; if it cannot rename it, it does not
+start. The GUI does the same for `ui.log` and `server.log` before opening them
+(it then simply does not log into one it cannot move). Logs are always opened
+without following a link.
 
 **Owner.** When the daemon runs as SYSTEM it also makes SYSTEM the directory's
 owner (a failure is logged, not fatal). Under any other account the owner is left
@@ -175,6 +201,9 @@ Administrator or the service account.
 Consequence: anything that reads the data directory must run **elevated** or as
 SYSTEM — the GUI does (desktop shortcut), and so must `cutover-seed`, Notepad on
 `server.log`, or a backup job.
+
+Follow-up (not in this release): `history\receipts\` and the moved-aside
+`*.old` logs grow without limit; a retention policy is owed.
 
 ## `db`
 

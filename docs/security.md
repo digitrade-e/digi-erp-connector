@@ -111,22 +111,24 @@ password and no explanation.
 **The data directory's DACL (Windows).** `%ProgramData%`'s default ACL lets
 every local user read what is under it — `config.yaml`, and with receipts on the
 receipt index and history (names, phones, emails, card last 4, confirmation
-codes). At every start the daemon replaces the data directory's DACL with a
-protected one granting Full Control to SYSTEM (`S-1-5-18`),
-BUILTIN\Administrators (`S-1-5-32-544`) and the service's own account, plus
-OWNER RIGHTS (`S-1-3-4`) with READ_CONTROL only, inherited by everything
-beneath, and sets the same on `config.yaml` (`internal/platform/dataacl`). It does this
-before reading the config (so also on a first install's start without one),
-resets everything beneath that carries an ACL of its own to the inherited one
-(nothing planted before the first protected start survives), refuses to start
-if the directory or anything in it is a symlink or junction, and makes SYSTEM
-the owner when it runs as SYSTEM.
-Failing on the directory stops the daemon (fail closed); failing on
-`config.yaml` alone is logged. The OWNER RIGHTS ACE removes the owner's implicit
-WRITE_DAC: whoever created the directory (possibly a non-admin user) cannot
-grant itself access back. The elevated GUI applies the same DACL to
-`config.yaml` on every save, and to the directory when it created it; there a
-failure is only a warning, because the daemon re-applies it at start.
+codes). At every start, before it opens `server.log` or reads the config, the
+daemon gives the data directory a protected DACL — Full Control for SYSTEM
+(`S-1-5-18`) and BUILTIN\Administrators (`S-1-5-32-544`), READ_CONTROL only for
+OWNER RIGHTS (`S-1-3-4`), so an owner cannot rewrite it — and every entry beneath
+the same ACEs as inherited ones (`internal/platform/dataacl`). Because it runs as
+SYSTEM, it does this **by handle, never by path**: each entry is opened without
+following a reparse point and with its ancestors held open, refused if it is a
+reparse point, a multiply-linked file, resolves elsewhere, or has an untrusted
+owner, and its security is read and written through that handle with no
+propagation — so no link can point a SYSTEM write at a file outside the
+directory. Any failure but the owner change stops the daemon (fail closed). The
+elevated GUI applies the same before its first save writes anything. Logs whose
+permissions had to be reset are moved aside and restarted. See
+[configuration.md](configuration.md#data-directory-permissions-windows).
+
+The link refusals are **Windows-only**. On Linux nothing here runs: the data
+directory is root's `/etc/digi-erp-connector`, files are written 0600, and paths
+are followed as usual (only root can plant a link there).
 
 None of these values is ever logged. Log lines about the DB password mention only
 its length; the line recording first-run secret generation says that it happened
