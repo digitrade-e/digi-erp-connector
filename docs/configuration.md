@@ -160,8 +160,8 @@ itself). So:
   ACEs an operator added under the data directory are dropped at the next
   start**.
 - A start where everything already matches **only reads** (measured on the
-  Windows CI, 3,032 entries: steady state 0.15–0.6 s, the first full rewrite
-  1.15–2.2 s). While it runs the service reports start progress to the service
+  Windows CI, 3,032 entries: steady state 0.27–0.60 s, the first full rewrite
+  1.40–2.31 s). While it runs the service reports start progress to the service
   manager, and the GUI waits as long as progress keeps coming.
 
 **What stops the start** (nothing further is changed; the path is named):
@@ -176,15 +176,18 @@ itself). So:
   group such as Domain Admins — looked up with the domain), TrustedInstaller and
   the service's account. A planted entry is owned by its planter, who may still
   hold it open. If membership cannot be resolved (e.g. the domain controller is
-  unreachable), the entry is refused;
+  unreachable), the entry is refused — and an owner whose SID resolves to no
+  account at all (a deleted user) is refused for good, until the file is
+  replaced (troubleshooting). An owner trusted through membership is handed to
+  `BUILTIN\Administrators` once resolved, so the domain is needed at most once;
 - an entry's final path is not where the walk expects it, or the walk cannot
   open or read an entry at all (access denied).
 
 A refused start opens **no file** in the data directory: the reason goes to the
 **Windows Event Log** (Application, source `digi-erp-connectord`), the service
 stops with service exit code **2** (`sc query digi-erp-connectord` shows it), the
-service manager restarts it after 1 min and 5 min (then not again until a day
-without failures), and the GUI says the service refused to start and where to
+service manager restarts it after 1 min, 5 min and then every 30 min (the count
+resets after a day without failures), and the GUI says the service refused to start and where to
 look. See [troubleshooting.md](troubleshooting.md#the-service-will-not-start-or-starts-and-stops).
 
 **Logs.** `server.log` gets a fresh file object at a start unless it is provably
@@ -193,7 +196,8 @@ file a previous start created fresh (its file ID is recorded in
 `.server-log-id`). So the first start after an upgrade from 1.0.17 renames it to
 `server.log.<UTC time>.old`, and a start that could not rename it tries again the
 next time. If it cannot be renamed (a program holds it open), the daemon logs to
-a new `server-<UTC time>.log` this time and warns, rather than refusing to start.
+a new `server-<UTC time>.log` this time — the warning saying so is the first
+thing in that file — rather than refusing to start.
 The GUI does the same for `ui.log` and `server.log` before opening them (also
 after an upgrade), and reopens one fresh if a save's walk had to reset it. Logs
 are always opened without following a link.
@@ -220,7 +224,9 @@ SYSTEM — the GUI does (desktop shortcut), and so must `cutover-seed`, Notepad 
 **Probe** (elevated PowerShell, when a start is refused for an owner):
 
 ```powershell
-Get-ChildItem C:\ProgramData\digi-erp-connector -Recurse -Force | % { (Get-Acl $_.FullName).Owner + '  ' + $_.FullName }
+Get-Item "$env:ProgramData\digi-erp-connector" | % { (Get-Acl $_.FullName).Owner + '  ' + $_.FullName }   # the directory itself
+Get-ChildItem "$env:ProgramData\digi-erp-connector" -Recurse -Force | % { (Get-Acl $_.FullName).Owner + '  ' + $_.FullName }
+sc.exe qfailure digi-erp-connectord   # restart / 60000, restart / 300000, restart / 1800000
 (Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).EnableLUA   # 0 = UAC off
 whoami /groups
 ```

@@ -124,8 +124,10 @@ propagation — so no link can point a SYSTEM write at a file outside the
 directory. Every refusal and every failure of the walk stops the daemon (fail
 closed) without opening a file there — the reason goes to the Windows Event
 Log; what is only logged: the SYSTEM owner change, the extra `config.yaml` check
-after the config loads, and a failed listing of the Administrators group (then
-only the built-in owners are trusted). The elevated GUI walks the same way at
+after the config loads, a failed listing of the Administrators group (each
+owner's membership is then resolved on its own, direct members included), and a
+failed hand-over of an admin-owned entry to Administrators (the owner stays
+trusted). The elevated GUI walks the same way at
 launch, before it opens a log, and before every save — refusing the save, with
 nothing written, when the walk fails — and makes Administrators the owner of
 what it created. Logs that are not provably the daemon's own file are moved
