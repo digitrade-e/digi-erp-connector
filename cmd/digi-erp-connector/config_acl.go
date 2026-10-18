@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync/atomic"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
@@ -19,6 +18,8 @@ import (
 var (
 	guiProtectTreeFn = dataacl.ProtectTree
 	guiProtectFileFn = dataacl.ProtectFile
+	guiFileTrustedFn = dataacl.FileTrusted
+	guiMoveAsideFn   = dataacl.MoveAside
 )
 
 // dataDirMissingAtLaunch is set at the top of main, before ui.log is opened
@@ -47,34 +48,56 @@ func dataDirMissing(dir string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// protectSavedConfig gives a freshly saved config.yaml — and the data
-// directory, when saveProtectsTheDirectory said so (dataacl.ProtectTree) — the
-// protected DACL the daemon sets at start (SYSTEM, Administrators, this
-// process's account, OWNER RIGHTS read only). Without it a first GUI save leaves config.yaml under %ProgramData%'s
-// default ACL, readable by every local user, until the service first starts.
+// protectDirBeforeSave protects the data directory (dataacl.ProtectTree)
+// before a save that creates config.yaml writes anything — so secrets\*.bin
+// (DPAPI machine scope: any local user who can read them can decrypt them)
+// and atomicfile's temps are created inside the protected tree, never
+// Users-readable. The elevated GUI writes the very DACL the daemon does: no
+// ACE of its own, Administrators covers it.
 //
-// Failures are logged and returned as a warning, never as an error: by now
-// config.yaml is saved, refusing the save would hide that, and the daemon
-// applies the DACL again at its next start — failing closed on the directory.
-// A directory that already existed is left to the daemon: re-applying it from
-// the GUI would add the operator's own account to it until the next start.
-func protectSavedConfig(dataDir, configPath string, protectDir bool, log logger.LoggerService) string {
-	var problems []string
-	if protectDir {
-		if rep, err := guiProtectTreeFn(dataDir, dataacl.TreeOptions{}); err != nil {
-			log.Error(fmt.Sprintf("could not set the protected DACL on the data directory %s", dataDir), err)
-			problems = append(problems, "the data directory ("+err.Error()+")")
-		} else if rep.Reset > 0 {
+// A failure is logged and returned as a warning, never as an error: the save
+// goes on, and the daemon applies the DACL again at its next start — failing
+// closed on the directory.
+func protectDirBeforeSave(dataDir string, log logger.LoggerService) string {
+	err := os.MkdirAll(dataDir, 0o700)
+	if err == nil {
+		var rep dataacl.Report
+		rep, err = guiProtectTreeFn(dataDir, dataacl.TreeOptions{})
+		if err == nil && rep.Reset > 0 {
 			log.Warn(fmt.Sprintf("data directory: %d entries carried an ACL of their own; reset to the inherited DACL", rep.Reset))
 		}
 	}
+	if err != nil {
+		log.Error(fmt.Sprintf("could not set the protected DACL on the data directory %s", dataDir), err)
+		return "Note: could not restrict access to the data directory (" + err.Error() + "); the service sets it when it starts."
+	}
+	return ""
+}
+
+// protectFileAfterSave gives the saved config.yaml the inherited DACL every
+// entry of the data directory carries, by handle. A failure is a warning.
+func protectFileAfterSave(configPath string, log logger.LoggerService) string {
 	if err := guiProtectFileFn(configPath); err != nil {
 		log.Error(fmt.Sprintf("could not set the protected DACL on %s", configPath), err)
-		problems = append(problems, "config.yaml ("+err.Error()+")")
+		return "Saved, but could not restrict access to config.yaml (" + err.Error() +
+			"). The service sets it again when it starts; until then other local users may be able to read it."
 	}
-	if len(problems) == 0 {
-		return ""
+	return ""
+}
+
+// prepareLog decides whether the GUI may append to one of its log files
+// (ui.log, server.log): a file that is not exactly ours — another ACL, an
+// untrusted owner, a link — is moved aside first, so the GUI never appends to
+// a file object someone else may hold; if it cannot be moved, the GUI does not
+// log into it. A file that cannot even be checked (the GUI not elevated) is
+// left to the open, which then fails the same way.
+func prepareLog(path string) bool {
+	ok, err := guiFileTrustedFn(path)
+	if err != nil || ok {
+		return true
 	}
-	return "Saved, but could not restrict access to " + strings.Join(problems, " and ") +
-		". The service sets it again when it starts; until then other local users may be able to read it."
+	if _, err := guiMoveAsideFn(path); err != nil {
+		return false
+	}
+	return true
 }

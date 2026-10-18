@@ -148,13 +148,21 @@ func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bo
 // impossible to configure at all.
 func persistConfig(cfg config.Config, password string, logSvc logger.LoggerService) (warning string, err error) {
 	// Decided per save, before anything is written: does this save also
-	// protect the data directory (config_acl.go)?
+	// protect the data directory (config_acl.go)? If so it does it first, so
+	// everything below is written into the protected tree (R2-2).
 	dataDir := paths.DataDir()
 	cfgPath, cfgPathErr := paths.ConfigFilePath()
-	protectDir := cfgPathErr == nil && saveProtectsTheDirectory(cfgPath)
+	var notes []string
+	if cfgPathErr == nil && saveProtectsTheDirectory(cfgPath) {
+		if w := protectDirBeforeSave(dataDir, logSvc); w != "" {
+			notes = append(notes, w)
+		}
+	}
 
 	if cfg.ERP == config.ERPHasavshevet {
-		warning = ensureProceduresBestEffort(cfg, password, logSvc)
+		if w := ensureProceduresBestEffort(cfg, password, logSvc); w != "" {
+			notes = append([]string{w}, notes...)
+		}
 	}
 
 	// An empty field means "keep the stored password", so only overwrite when
@@ -169,13 +177,13 @@ func persistConfig(cfg config.Config, password string, logSvc logger.LoggerServi
 		return "", fmt.Errorf("error saving config: %w", err)
 	}
 
-	// The daemon's protected DACL, now rather than at the service's next start.
+	// The daemon's DACL on config.yaml, now rather than at its next start.
 	if cfgPathErr == nil {
-		if w := protectSavedConfig(dataDir, cfgPath, protectDir, logSvc); w != "" {
-			warning = strings.TrimSpace(warning + " " + w)
+		if w := protectFileAfterSave(cfgPath, logSvc); w != "" {
+			notes = append(notes, w)
 		}
 	}
-	return warning, nil
+	return strings.Join(notes, " "), nil
 }
 
 // ensureProceduresBestEffort tries to install the Hasavshevet stored procedures

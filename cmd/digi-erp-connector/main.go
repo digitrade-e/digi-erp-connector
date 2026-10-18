@@ -27,10 +27,22 @@ func main() {
 	runtime.LockOSThread()
 
 	// Before ui.log creates it: a launch that finds no data directory has its
-	// first save protect it (config_acl.go).
-	dataDirMissingAtLaunch.Store(dataDirMissing(paths.DataDir()))
+	// first save protect it (config_acl.go). One that finds it checks its own
+	// log files first: one that is not exactly ours is moved aside before it is
+	// opened, so the GUI never appends to a file object someone else may hold.
+	missing := dataDirMissing(paths.DataDir())
+	dataDirMissingAtLaunch.Store(missing)
+	uiLogOK, serverLogOK := true, true
+	if !missing {
+		if p, err := paths.UILogFilePath(); err == nil {
+			uiLogOK = prepareLog(p)
+		}
+		if p, err := paths.LoggerFilePath(); err == nil {
+			serverLogOK = prepareLog(p)
+		}
+	}
 
-	uiLog := newUILogger()
+	uiLog := newUILogger(uiLogOK)
 	defer uiLog.Close()
 
 	// The GUI has no console when launched from the shortcut, so a panic would
@@ -75,7 +87,12 @@ func main() {
 		uiLog.Printf("config loaded")
 	}
 
-	logSvc, logErr := logger.New(cfg)
+	logSvc, logErr := logger.LoggerService(nil), error(nil)
+	if serverLogOK {
+		logSvc, logErr = logger.New(cfg)
+	} else {
+		logErr = fmt.Errorf("server.log is not ours and could not be moved aside")
+	}
 	if logErr != nil {
 		logSvc = logger.NewStderr()
 		logSvc.Warn("logger init failed; using stderr")

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
@@ -14,9 +15,12 @@ type uiLogger struct {
 	file   *os.File
 }
 
-func newUILogger() *uiLogger {
+// newUILogger opens ui.log for appending (dataacl.OpenLog: never through a
+// reparse point, never into a hard link), or logs nowhere when usable is false
+// (prepareLog could not move a foreign ui.log aside) or the open fails.
+func newUILogger(usable bool) *uiLogger {
 	logPath, err := paths.UILogFilePath()
-	if err != nil || logPath == "" {
+	if !usable || err != nil || logPath == "" {
 		return &uiLogger{logger: log.New(io.Discard, "", 0)}
 	}
 
@@ -24,7 +28,7 @@ func newUILogger() *uiLogger {
 		return &uiLogger{logger: log.New(io.Discard, "", 0)}
 	}
 
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := dataacl.OpenLog(logPath)
 	if err != nil {
 		return &uiLogger{logger: log.New(io.Discard, "", 0)}
 	}

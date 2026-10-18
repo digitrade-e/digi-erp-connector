@@ -27,67 +27,81 @@ func (*recLogger) Warn(string)    {}
 func (*recLogger) Success(string) {}
 func (*recLogger) Close() error   { return nil }
 
-// The elevated GUI gives what it saves the daemon's protected DACL: always
-// config.yaml, and the data directory too when this save created it. A
-// failure is logged and surfaced as a warning — config.yaml is saved by then,
-// and the daemon re-applies the DACL at its next start, failing closed on the
-// directory.
-func TestProtectSavedConfig(t *testing.T) {
-	const dir, cfg = `C:\ProgramData\digi-erp-connector`, `C:\ProgramData\digi-erp-connector\config.yaml`
-	stub := func(t *testing.T, dirErr, fileErr error) (*[]string, *[]string) {
-		return stubGUIProtect(t, dirErr, fileErr)
-	}
+// Before a save that creates config.yaml, the data directory is protected
+// (R2-2: so secrets\*.bin and the atomic-write temps are created inside the
+// protected tree); after every save config.yaml gets the inherited DACL. A
+// failure is logged and becomes a "Saved, but…" warning — the daemon re-applies
+// the DACL at its next start, failing closed on the directory.
+func TestProtectBeforeAndAfterSave(t *testing.T) {
+	dir := t.TempDir()
+	const cfg = `C:\ProgramData\digi-erp-connector\config.yaml`
 
-	t.Run("existing directory: config.yaml only", func(t *testing.T) {
-		dirs, files := stub(t, nil, nil)
+	t.Run("ok", func(t *testing.T) {
+		dirs, files := stubGUIProtect(t, nil, nil)
 		log := &recLogger{}
-		if w := protectSavedConfig(dir, cfg, false, log); w != "" {
-			t.Errorf("warning %q; want none", w)
+		if w := protectDirBeforeSave(dir, log); w != "" {
+			t.Errorf("before-save warning %q", w)
 		}
-		if len(*dirs) != 0 || len(*files) != 1 || (*files)[0] != cfg {
-			t.Errorf("ProtectTree %v, ProtectFile %v; want only config.yaml", *dirs, *files)
+		if w := protectFileAfterSave(cfg, log); w != "" {
+			t.Errorf("after-save warning %q", w)
+		}
+		if len(*dirs) != 1 || (*dirs)[0] != dir || len(*files) != 1 || (*files)[0] != cfg {
+			t.Errorf("ProtectTree %v, ProtectFile %v", *dirs, *files)
 		}
 		if len(log.errors) != 0 {
 			t.Errorf("logged %v", log.errors)
 		}
 	})
-
-	t.Run("directory created by this save: both", func(t *testing.T) {
-		dirs, files := stub(t, nil, nil)
-		if w := protectSavedConfig(dir, cfg, true, &recLogger{}); w != "" {
-			t.Errorf("warning %q; want none", w)
+	t.Run("the directory fails", func(t *testing.T) {
+		stubGUIProtect(t, errors.New("access denied"), nil)
+		log := &recLogger{}
+		w := protectDirBeforeSave(dir, log)
+		if !strings.Contains(w, "data directory") || !strings.Contains(w, "access denied") {
+			t.Errorf("warning %q; want one naming the data directory and the error", w)
 		}
-		if len(*dirs) != 1 || (*dirs)[0] != dir || len(*files) != 1 {
-			t.Errorf("ProtectTree %v, ProtectFile %v; want both", *dirs, *files)
+		if len(log.errors) != 1 {
+			t.Errorf("logged %v", log.errors)
 		}
 	})
-
-	t.Run("directory fails: logged, warned, config.yaml still protected", func(t *testing.T) {
-		_, files := stub(t, errors.New("access denied"), nil)
+	t.Run("config.yaml fails", func(t *testing.T) {
+		stubGUIProtect(t, nil, errors.New("not the owner"))
 		log := &recLogger{}
-		w := protectSavedConfig(dir, cfg, true, log)
-		if !strings.Contains(w, "Saved") || !strings.Contains(w, "data directory") {
-			t.Errorf("warning %q; want a saved-but warning naming the data directory", w)
-		}
-		if len(log.errors) != 1 || !strings.Contains(log.errors[0], "access denied") {
-			t.Errorf("logged %v; want the directory's error", log.errors)
-		}
-		if len(*files) != 1 {
-			t.Errorf("config.yaml was not protected after the directory failed: %v", *files)
-		}
-	})
-
-	t.Run("config.yaml fails: logged and warned", func(t *testing.T) {
-		stub(t, nil, errors.New("not the owner"))
-		log := &recLogger{}
-		w := protectSavedConfig(dir, cfg, false, log)
-		if !strings.Contains(w, "config.yaml") {
-			t.Errorf("warning %q; want one naming config.yaml", w)
+		w := protectFileAfterSave(cfg, log)
+		if !strings.HasPrefix(w, "Saved, but") || !strings.Contains(w, "config.yaml") {
+			t.Errorf("warning %q; want a Saved-but warning naming config.yaml", w)
 		}
 		if len(log.errors) != 1 || !strings.Contains(log.errors[0], "not the owner") {
 			t.Errorf("logged %v", log.errors)
 		}
 	})
+}
+
+// R2-3 for the GUI's own log files: one that is not exactly ours (wrong ACL,
+// untrusted owner, a link) is moved aside before it is opened; if it cannot
+// be moved, the GUI does not log into it.
+func TestPrepareLog(t *testing.T) {
+	stub := func(t *testing.T, trusted bool, trustErr, moveErr error) *[]string {
+		var moved []string
+		oldT, oldM := guiFileTrustedFn, guiMoveAsideFn
+		guiFileTrustedFn = func(string) (bool, error) { return trusted, trustErr }
+		guiMoveAsideFn = func(p string) (string, error) { moved = append(moved, p); return p + ".old", moveErr }
+		t.Cleanup(func() { guiFileTrustedFn, guiMoveAsideFn = oldT, oldM })
+		return &moved
+	}
+	const p = `C:\ProgramData\digi-erp-connector\ui.log`
+	if moved := stub(t, true, nil, nil); !prepareLog(p) || len(*moved) != 0 {
+		t.Errorf("a trusted log: usable=%v moved=%v; want usable, not moved", prepareLog(p), *moved)
+	}
+	if moved := stub(t, false, nil, nil); !prepareLog(p) || len(*moved) != 1 {
+		t.Errorf("an untrusted log: moved=%v; want moved aside, then usable", *moved)
+	}
+	if stub(t, false, nil, errors.New("in use")); prepareLog(p) {
+		t.Error("an untrusted log that could not be moved is still used")
+	}
+	// Cannot even be checked (not elevated): the open decides, and fails.
+	if moved := stub(t, false, errors.New("access denied"), nil); !prepareLog(p) || len(*moved) != 0 {
+		t.Errorf("an uncheckable log: moved=%v; want left to the open", *moved)
+	}
 }
 
 // stubGUIProtect replaces the GUI's dataacl calls and records their paths.
@@ -139,6 +153,11 @@ func TestSaveProtectsTheDirectory(t *testing.T) {
 		dataDirMissingAtLaunch.Store(tc.launch)
 		if got := saveProtectsTheDirectory(tc.cfg); got != tc.want {
 			t.Errorf("launch=%v cfg exists=%v: %v; want %v", tc.launch, tc.cfg == present, got, tc.want)
+		}
+		// Taken by every save, whatever else decided: a later save never
+		// re-applies the directory's DACL on the launch's account.
+		if dataDirMissingAtLaunch.Load() {
+			t.Errorf("launch=%v cfg exists=%v: the one-shot was not consumed", tc.launch, tc.cfg == present)
 		}
 	}
 	dataDirMissingAtLaunch.Store(false)
