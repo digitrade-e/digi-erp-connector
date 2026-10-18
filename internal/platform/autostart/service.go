@@ -29,6 +29,27 @@ func serviceStateTimeout(want, current uint32) error {
 	return fmt.Errorf("%w to reach state %d (current %d)", ErrServiceStateTimeout, want, current)
 }
 
+// startWaitHint is how long the SCM is told to wait for the next start
+// checkpoint. Each walk progress call (every 64 data-directory entries) sends
+// one, so even a large data directory never looks hung.
+const startWaitHint = 30 * time.Second
+
+// StartProgressSetter is implemented by an app whose Start can take a while
+// (the daemon walks its data directory). The service handler hands it a
+// callback that reports the next SERVICE_START_PENDING checkpoint.
+type StartProgressSetter interface {
+	SetStartProgress(func())
+}
+
+// newStartCheckpoints returns a callback that sends checkpoint 1, 2, 3, …
+func newStartCheckpoints(send func(checkpoint uint32)) func() {
+	var cp uint32
+	return func() {
+		cp++
+		send(cp)
+	}
+}
+
 type ServiceApp interface {
 	Start() error
 	Stop(ctx context.Context)

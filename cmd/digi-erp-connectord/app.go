@@ -19,6 +19,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 	"github.com/digitrade-e/digi-erp-connector/internal/secrets"
@@ -43,19 +44,62 @@ type serverApp struct {
 	// receiptWriter is nil when receipts are not configured. Stop closes it,
 	// releasing the receipt data-directory lock for the next process.
 	receiptWriter *hasavshevet.ReceiptWriter
+	// startProgress, set by the service handler, reports a start checkpoint
+	// (SERVICE_START_PENDING) while the data directory is walked.
+	startProgress func()
+}
+
+// SetStartProgress is how the Windows service handler hands Start its
+// checkpoint callback (autostart.StartProgressSetter).
+func (a *serverApp) SetStartProgress(f func()) { a.startProgress = f }
+
+// freshLogIfReset moves server.log aside when the walk had to rewrite its
+// DACL (logNeedsFreshFile), so the bootstrap logger starts a new file object.
+// If it cannot be moved — someone holds it open without FILE_SHARE_DELETE —
+// the daemon does not start rather than keep writing into it.
+func freshLogIfReset(rep dataacl.Report, log logger.LoggerService) error {
+	logPath, err := paths.LoggerFilePath()
+	if err != nil || !logNeedsFreshFile(logPath, rep) {
+		return nil
+	}
+	to, err := moveAsideFn(logPath)
+	if err != nil {
+		log.Error("server.log's permissions had to be reset, and it could not be moved aside to start a fresh one (close any program holding it open); not starting", err)
+		return err
+	}
+	log.Warn(fmt.Sprintf("server.log's permissions had to be reset; the old file was moved to %s and a fresh one started", to))
+	return nil
 }
 
 func (a *serverApp) Start() error {
+	// Until the data directory is protected nothing in it is opened — not even
+	// server.log: Start logs into a buffer and replays it into server.log once
+	// that is safe (earlylog.go).
+	early := newEarlyLog()
+	early.Info(fmt.Sprintf("daemon Start() called: pid=%d goos=%s", os.Getpid(), runtime.GOOS))
+
+	// Lock the data directory down first — before server.log is opened and
+	// before the config is read, so also on a first install's start, which has
+	// no config yet (Windows only; a no-op elsewhere). Fails closed.
+	dataDir := paths.DataDir()
+	rep, err := dataacl.Report{}, ensureDataDir(dataDir)
+	if err == nil {
+		rep, err = protectDataDir(dataDir, a.startProgress, early)
+	} else {
+		early.Error(fmt.Sprintf("could not create the data directory %s; not starting", dataDir), err)
+	}
+	if err == nil {
+		err = freshLogIfReset(rep, early)
+	}
+
 	// Bootstrap logger writes directly to server.log so we capture pre-config
 	// failures (config.Load errors, permissions, missing dirs) even when
-	// running as a Windows service where stderr is unavailable.
+	// running as a Windows service where stderr is unavailable. Its open
+	// refuses a reparse point or a hard link (dataacl.OpenLog).
 	bootstrapLog := newBootstrapLog()
-	bootstrapLog.Info(fmt.Sprintf("daemon Start() called: pid=%d goos=%s", os.Getpid(), runtime.GOOS))
-
-	// Lock the data directory down first — before the config is read, so also
-	// on a first install's start, which has no config yet (Windows only; a
-	// no-op elsewhere). Fails closed.
-	if err := protectDataDir(paths.DataDir(), bootstrapLog); err != nil {
+	early.replayInto(bootstrapLog)
+	if err != nil {
+		_ = bootstrapLog.Close()
 		return err
 	}
 
@@ -63,9 +107,10 @@ func (a *serverApp) Start() error {
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
 			bootstrapLog.Error("config not found; run digi-erp-connector UI to create it", nil)
-			return err
+		} else {
+			bootstrapLog.Error("failed to load config", err)
 		}
-		bootstrapLog.Error("failed to load config", err)
+		_ = bootstrapLog.Close()
 		return err
 	}
 	a.cfg = cfg

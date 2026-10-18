@@ -12,7 +12,10 @@ func stubProtect(t *testing.T, rep dataacl.Report, treeErr, fileErr error) (*[]s
 	t.Helper()
 	var trees, files []string
 	oldTree, oldFile := protectTreeFn, protectFileFn
-	protectTreeFn = func(p string, _ dataacl.TreeOptions) (dataacl.Report, error) {
+	protectTreeFn = func(p string, opt dataacl.TreeOptions) (dataacl.Report, error) {
+		if opt.Progress != nil {
+			opt.Progress()
+		}
 		trees = append(trees, p)
 		return rep, treeErr
 	}
@@ -29,7 +32,8 @@ func TestProtectDataDir(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		trees, _ := stubProtect(t, dataacl.Report{Entries: 3}, nil, nil)
 		log := &quietLogger{}
-		if err := protectDataDir(`C:\ProgramData\digi-erp-connector`, log); err != nil {
+		var ticks int
+		if _, err := protectDataDir(`C:\ProgramData\digi-erp-connector`, func() { ticks++ }, log); err != nil {
 			t.Fatalf("protectDataDir = %v", err)
 		}
 		if len(*trees) != 1 || (*trees)[0] != `C:\ProgramData\digi-erp-connector` {
@@ -38,11 +42,14 @@ func TestProtectDataDir(t *testing.T) {
 		if len(log.errors) != 0 {
 			t.Errorf("logged %v", log.errors)
 		}
+		if ticks != 1 {
+			t.Errorf("the start progress was called %d times; want the walk's progress forwarded", ticks)
+		}
 	})
 	t.Run("the tree fails: fail closed", func(t *testing.T) {
 		stubProtect(t, dataacl.Report{}, dataacl.ErrReparsePoint, nil)
 		log := &quietLogger{}
-		err := protectDataDir("/data", log)
+		_, err := protectDataDir("/data", nil, log)
 		if !errors.Is(err, dataacl.ErrReparsePoint) {
 			t.Fatalf("protectDataDir = %v; want the tree's error", err)
 		}
@@ -53,7 +60,7 @@ func TestProtectDataDir(t *testing.T) {
 	t.Run("the owner change fails: logged, start continues", func(t *testing.T) {
 		stubProtect(t, dataacl.Report{OwnerErr: errors.New("no WRITE_OWNER")}, nil, nil)
 		log := &quietLogger{}
-		if err := protectDataDir("/data", log); err != nil {
+		if _, err := protectDataDir("/data", nil, log); err != nil {
 			t.Fatalf("protectDataDir = %v; want nil", err)
 		}
 		if len(log.errors) != 1 || !strings.Contains(log.errors[0], "owner") {

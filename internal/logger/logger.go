@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
@@ -34,7 +35,7 @@ func New(cfg config.Config) (LoggerService, error) {
 		return nil, err
 	}
 
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := dataacl.OpenLog(logPath)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +93,7 @@ func NewBootstrap() LoggerService {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return NewStderr()
 	}
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := dataacl.OpenLog(logPath)
 	if err != nil {
 		return NewStderr()
 	}

@@ -24,7 +24,13 @@ type serviceHandler struct {
 
 func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	const accepts = svc.AcceptStop | svc.AcceptShutdown
-	status <- svc.Status{State: svc.StartPending}
+	hint := uint32(startWaitHint.Milliseconds())
+	status <- svc.Status{State: svc.StartPending, WaitHint: hint}
+	if p, ok := h.app.(StartProgressSetter); ok {
+		p.SetStartProgress(newStartCheckpoints(func(cp uint32) {
+			status <- svc.Status{State: svc.StartPending, WaitHint: hint, CheckPoint: cp}
+		}))
+	}
 
 	if err := h.app.Start(); err != nil {
 		status <- svc.Status{State: svc.Stopped}
