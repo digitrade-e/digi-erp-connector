@@ -68,3 +68,93 @@ func TestServiceStoppedError(t *testing.T) {
 		t.Errorf("ServiceStoppedError = %v", err)
 	}
 }
+
+// fakeStart is a starting service as waitForStartWith sees it, on a fake clock.
+type fakeStart struct {
+	now      time.Time
+	statuses []startStatus // one per poll; the last repeats
+	polls    int
+}
+
+func (f *fakeStart) query() (startStatus, error) {
+	i := f.polls
+	if i >= len(f.statuses) {
+		i = len(f.statuses) - 1
+	}
+	f.polls++
+	return f.statuses[i], nil
+}
+func (f *fakeStart) clock() time.Time      { return f.now }
+func (f *fakeStart) sleep(d time.Duration) { f.now = f.now.Add(d) }
+
+func pending(cp uint32, hint time.Duration) startStatus {
+	return startStatus{state: startPending, checkpoint: cp, waitHint: hint}
+}
+
+// The wait follows checkpoints: a service that keeps reporting progress is
+// waited for past the 30 s floor, one that stops reporting times out 30 s
+// (or its wait hint) after its last checkpoint, one that stops ends the wait
+// with its exit codes, and nothing waits past startWaitCap.
+func TestWaitForStartWith(t *testing.T) {
+	t.Run("running after a long, progressing start", func(t *testing.T) {
+		var ss []startStatus
+		for cp := uint32(0); cp < 300; cp++ { // 300 polls × 300 ms = 90 s
+			ss = append(ss, pending(cp, 30*time.Second))
+		}
+		ss = append(ss, startStatus{state: startRunning})
+		f := &fakeStart{now: time.Unix(0, 0), statuses: ss}
+		if err := waitForStartWith(f.query, f.clock, f.sleep); err != nil {
+			t.Fatalf("waitForStartWith = %v; want running", err)
+		}
+	})
+	t.Run("no progress times out after the floor", func(t *testing.T) {
+		f := &fakeStart{now: time.Unix(0, 0), statuses: []startStatus{pending(1, time.Second)}}
+		start := f.now
+		err := waitForStartWith(f.query, f.clock, f.sleep)
+		if !errors.Is(err, ErrServiceStateTimeout) {
+			t.Fatalf("waitForStartWith = %v; want a timeout", err)
+		}
+		if d := f.now.Sub(start); d < startWaitFloor || d > startWaitFloor+time.Second {
+			t.Errorf("timed out after %v; want about %v", d, startWaitFloor)
+		}
+	})
+	t.Run("stopped carries the exit codes", func(t *testing.T) {
+		f := &fakeStart{now: time.Unix(0, 0), statuses: []startStatus{pending(1, time.Second),
+			{state: startStopped, win32: 1066, specific: ExitDataDirRefused}}}
+		var s *ServiceStoppedError
+		if err := waitForStartWith(f.query, f.clock, f.sleep); !errors.As(err, &s) || s.ServiceSpecificExitCode != ExitDataDirRefused {
+			t.Fatalf("waitForStartWith = %v; want ServiceStoppedError with code %d", err, ExitDataDirRefused)
+		}
+	})
+	t.Run("the cap holds whatever the checkpoints say", func(t *testing.T) {
+		f := &fakeStart{now: time.Unix(0, 0)}
+		for cp := uint32(0); cp < 5000; cp++ {
+			f.statuses = append(f.statuses, pending(cp, time.Hour))
+		}
+		start := f.now
+		if err := waitForStartWith(f.query, f.clock, f.sleep); !errors.Is(err, ErrServiceStateTimeout) {
+			t.Fatalf("waitForStartWith = %v; want a timeout at the cap", err)
+		}
+		if d := f.now.Sub(start); d < startWaitCap || d > startWaitCap+time.Second {
+			t.Errorf("gave up after %v; want about %v", d, startWaitCap)
+		}
+	})
+}
+
+// R4-2b: the service manager keeps restarting the daemon (1 min, 5 min, then
+// every 30 min) — a refusal that clears (a domain controller back) is picked
+// up without anyone noticing it gave up.
+func TestRecoveryPlan(t *testing.T) {
+	want := []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute}
+	if len(recoveryDelays) != len(want) {
+		t.Fatalf("recovery delays %v; want %v", recoveryDelays, want)
+	}
+	for i := range want {
+		if recoveryDelays[i] != want[i] {
+			t.Errorf("recovery delay %d = %v; want %v", i, recoveryDelays[i], want[i])
+		}
+	}
+	if recoveryResetPeriod != 24*time.Hour {
+		t.Errorf("reset period %v", recoveryResetPeriod)
+	}
+}

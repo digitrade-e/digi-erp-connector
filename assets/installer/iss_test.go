@@ -85,3 +85,34 @@ func TestInstallerScriptStructure(t *testing.T) {
 		t.Error("[UninstallRun] is back; stop/wait/delete belongs to CurUninstallStepChanged")
 	}
 }
+
+// R4-2b: `sc failure` restarts the service after every failure — 1 min,
+// 5 min, then every 30 min — and failureflag makes a non-zero exit (the data
+// directory refused) count as one. An empty or "none" action would leave the
+// node down after the second failure.
+func TestInstallerSetsRestartOnFailure(t *testing.T) {
+	var failure, flag string
+	for _, l := range issLines(t) {
+		if strings.Contains(l, "sc.exe failure ") {
+			failure = l
+		}
+		if strings.Contains(l, "sc.exe failureflag ") {
+			flag = l
+		}
+	}
+	m := regexp.MustCompile(`reset= (\d+) actions= (\S+?) >nul`).FindStringSubmatch(failure)
+	if m == nil {
+		t.Fatalf("no parseable sc failure line: %q", failure)
+	}
+	if m[1] != "86400" {
+		t.Errorf("reset= %s; want 86400", m[1])
+	}
+	parts := strings.Split(m[2], "/")
+	want := []string{"restart", "60000", "restart", "300000", "restart", "1800000"}
+	if strings.Join(parts, "/") != strings.Join(want, "/") {
+		t.Errorf("actions= %s; want %s", m[2], strings.Join(want, "/"))
+	}
+	if !strings.Contains(flag, "failureflag {#ServiceName} 1 ") {
+		t.Errorf("failureflag line %q; want the flag set to 1", flag)
+	}
+}

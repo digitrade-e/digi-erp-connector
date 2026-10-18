@@ -13,8 +13,6 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const servicePollInterval = 300 * time.Millisecond
-
 func EnsureWindowsServiceAutoStart(name, exePath string) (bool, error) {
 	if name == "" {
 		return false, errors.New("service name is required")
@@ -78,16 +76,15 @@ func EnsureWindowsServiceAutoStart(name, exePath string) (bool, error) {
 	return false, nil
 }
 
-// setRecovery makes the service manager restart the daemon after a failure —
-// a crash or a non-zero exit (e.g. the data directory refused): after 1 min,
-// then 5 min, then not again until a day without failures. Best effort: the
-// service works without it.
+// setRecovery makes the service manager restart the daemon after a failure
+// (recoveryDelays), also on a non-crash failure (a non-zero exit). Best
+// effort: the service works without it.
 func setRecovery(s *mgr.Service) {
-	_ = s.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: time.Minute},
-		{Type: mgr.ServiceRestart, Delay: 5 * time.Minute},
-		{Type: mgr.NoAction},
-	}, uint32((24 * time.Hour).Seconds()))
+	actions := make([]mgr.RecoveryAction, 0, len(recoveryDelays))
+	for _, d := range recoveryDelays {
+		actions = append(actions, mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: d})
+	}
+	_ = s.SetRecoveryActions(actions, uint32(recoveryResetPeriod.Seconds()))
 	_ = s.SetRecoveryActionsOnNonCrashFailures(true)
 }
 
@@ -124,35 +121,27 @@ func StartWindowsService(name string) error {
 	return waitForStart(s)
 }
 
-// waitForStart waits for RUNNING, following the service's START_PENDING
-// checkpoints (each moves the deadline by its wait hint, at least 30 s; 10 min
-// in all), and ends with a ServiceStoppedError — carrying the exit codes — when
-// the service stops instead.
+// waitForStart is waitForStartWith on the real service.
 func waitForStart(s *mgr.Service) error {
-	start := time.Now()
-	deadline := start.Add(startWaitFloor)
-	var last uint32
-	for {
-		status, err := s.Query()
+	return waitForStartWith(func() (startStatus, error) {
+		st, err := s.Query()
 		if err != nil {
-			return err
+			return startStatus{}, err
 		}
-		switch status.State {
+		out := startStatus{
+			checkpoint: st.CheckPoint, waitHint: time.Duration(st.WaitHint) * time.Millisecond,
+			win32: st.Win32ExitCode, specific: st.ServiceSpecificExitCode,
+		}
+		switch st.State {
 		case svc.Running:
-			return nil
+			out.state = startRunning
 		case svc.Stopped:
-			return &ServiceStoppedError{Win32ExitCode: status.Win32ExitCode, ServiceSpecificExitCode: status.ServiceSpecificExitCode}
+			out.state = startStopped
+		default:
+			out.state = startPending
 		}
-		now := time.Now()
-		deadline = nextStartDeadline(deadline, last, startSnapshot{
-			checkpoint: status.CheckPoint, waitHint: time.Duration(status.WaitHint) * time.Millisecond,
-		}, now)
-		last = status.CheckPoint
-		if now.After(deadline) || now.Sub(start) > startWaitCap {
-			return serviceStateTimeout(uint32(svc.Running), uint32(status.State))
-		}
-		time.Sleep(servicePollInterval)
-	}
+		return out, nil
+	}, time.Now, time.Sleep)
 }
 
 func StopWindowsService(name string, timeout time.Duration) error {

@@ -33,7 +33,9 @@ func (h *serviceHandler) Execute(_ []string, r <-chan svc.ChangeRequest, status 
 	}
 
 	if err := h.app.Start(); err != nil {
-		status <- svc.Status{State: svc.Stopped}
+		// No STOPPED of our own here: the framework's final update, from the
+		// values returned, is the one that carries the exit code — the SCM's
+		// failure actions and the GUI must see that one, not a STOPPED with 0.
 		var ec ExitCoder
 		if errors.As(err, &ec) {
 			return true, ec.ExitCode() // service-specific: `sc query` shows it

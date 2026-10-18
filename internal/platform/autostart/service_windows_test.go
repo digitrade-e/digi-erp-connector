@@ -35,16 +35,15 @@ func TestExecute_ReportsStartCheckpoints(t *testing.T) {
 	for s := range status {
 		got = append(got, s)
 	}
-	if len(got) != 4 {
-		t.Fatalf("statuses %+v; want StartPending ×3 then Stopped", got)
+	// R4-1: no STOPPED of its own — the framework's final update carries the
+	// exit code; an early STOPPED with 0 would be the one the SCM and the GUI see.
+	if len(got) != 3 {
+		t.Fatalf("statuses %+v; want StartPending ×3 and nothing else", got)
 	}
-	for i, s := range got[:3] {
+	for i, s := range got {
 		if s.State != svc.StartPending || s.WaitHint == 0 || s.CheckPoint != uint32(i) {
 			t.Errorf("status %d = %+v; want StartPending, a wait hint, checkpoint %d", i, s, i)
 		}
-	}
-	if got[3].State != svc.Stopped {
-		t.Errorf("last status %+v; want Stopped", got[3])
 	}
 }
 
@@ -65,5 +64,11 @@ func TestExecute_ReportsAServiceSpecificExitCode(t *testing.T) {
 	specific, code := h.Execute(nil, make(chan svc.ChangeRequest), status)
 	if !specific || code != ExitDataDirRefused {
 		t.Errorf("Execute = %v, %d; want a service-specific %d", specific, code, ExitDataDirRefused)
+	}
+	close(status)
+	for s := range status {
+		if s.State == svc.Stopped {
+			t.Errorf("Execute sent %+v itself; the final STOPPED, with the exit code, is the framework's", s)
+		}
 	}
 }

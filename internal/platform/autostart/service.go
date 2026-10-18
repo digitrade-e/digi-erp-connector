@@ -96,6 +96,64 @@ func nextStartDeadline(deadline time.Time, prevCheckpoint uint32, cur startSnaps
 	return now.Add(hint)
 }
 
+// servicePollInterval is how often a wait for a service state polls it.
+const servicePollInterval = 300 * time.Millisecond
+
+// startStatus is what waitForStartWith needs of a service's status.
+type startStatus struct {
+	state      startState
+	checkpoint uint32
+	waitHint   time.Duration
+	win32      uint32
+	specific   uint32
+}
+
+type startState int
+
+const (
+	startPending startState = iota
+	startRunning
+	startStopped
+)
+
+// waitForStartWith waits for a starting service to run, following its
+// START_PENDING checkpoints: each new checkpoint moves the deadline to its
+// wait hint from now (at least startWaitFloor), and nothing waits past
+// startWaitCap. A service that stops instead ends the wait with a
+// ServiceStoppedError carrying its exit codes.
+func waitForStartWith(query func() (startStatus, error), now func() time.Time, sleep func(time.Duration)) error {
+	start := now()
+	deadline := start.Add(startWaitFloor)
+	var last uint32
+	for {
+		st, err := query()
+		if err != nil {
+			return err
+		}
+		switch st.state {
+		case startRunning:
+			return nil
+		case startStopped:
+			return &ServiceStoppedError{Win32ExitCode: st.win32, ServiceSpecificExitCode: st.specific}
+		}
+		t := now()
+		deadline = nextStartDeadline(deadline, last, startSnapshot{checkpoint: st.checkpoint, waitHint: st.waitHint}, t)
+		last = st.checkpoint
+		if t.After(deadline) || t.Sub(start) >= startWaitCap {
+			return serviceStateTimeout(4 /* SERVICE_RUNNING */, 2 /* SERVICE_START_PENDING */)
+		}
+		sleep(servicePollInterval)
+	}
+}
+
+// The service manager's restarts after a failure — a crash or a non-zero
+// exit such as a refused data directory: 1 min, 5 min, then every 30 min, the
+// count reset after a day without failures. Never "no action": a refusal that
+// clears by itself (a domain controller back) must be picked up.
+var recoveryDelays = []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute}
+
+const recoveryResetPeriod = 24 * time.Hour
+
 type ServiceApp interface {
 	Start() error
 	Stop(ctx context.Context)

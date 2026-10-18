@@ -50,8 +50,8 @@ Filename: "{cmd}"; Parameters: "/C sc.exe create {#ServiceName} binPath= ""{app}
 Filename: "{cmd}"; Parameters: "/C sc.exe description {#ServiceName} ""Digi ERP Connector API Service"" >nul 2>&1 & exit /b 0"; Flags: runhidden
 ; Restart after a failure - a crash or a non-zero exit, e.g. a data directory
 ; the daemon refused to start on (exit code 2, reason in the Event Log): after
-; 1 min, then 5 min, then not again until a day without failures.
-Filename: "{cmd}"; Parameters: "/C sc.exe failure {#ServiceName} reset= 86400 actions= restart/60000/restart/300000// >nul 2>&1 & exit /b 0"; Flags: runhidden
+; 1 min, then 5 min, then every 30 min (the count resets after a day).
+Filename: "{cmd}"; Parameters: "/C sc.exe failure {#ServiceName} reset= 86400 actions= restart/60000/restart/300000/restart/1800000 >nul 2>&1 & exit /b 0"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/C sc.exe failureflag {#ServiceName} 1 >nul 2>&1 & exit /b 0"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/C sc.exe start {#ServiceName} >nul 2>&1 & exit /b 0"; Flags: runhidden
 
