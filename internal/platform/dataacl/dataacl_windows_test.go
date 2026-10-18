@@ -539,13 +539,25 @@ func TestOwnerRights_RemovesTheOwnersImplicitWriteDAC(t *testing.T) {
 	if err := set(with, "D:P(A;;FA;;;"+stranger+")(A;;RC;;;"+SIDOwnerRights+")"); err != nil {
 		t.Fatalf("first set: %v", err)
 	}
-	err := set(with, "D:P(A;;FA;;;"+stranger+")")
-	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		t.Fatalf("with OWNER RIGHTS = READ_CONTROL the owner rewrote the DACL (err %v); want ERROR_ACCESS_DENIED", err)
+	// The decisive step, without MARTA in between: opening the file for
+	// WRITE_DAC (no backup semantics, so no privilege can grant it) is refused,
+	// opening it for READ_CONTROL is not.
+	openFor := func(access uint32) error {
+		p, _ := windows.UTF16PtrFromString(with)
+		h, err := windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, 0, 0)
+		if err == nil {
+			windows.CloseHandle(h)
+		}
+		return err
 	}
-	// READ_CONTROL is still there: the owner can read the DACL.
-	if _, err := windows.GetNamedSecurityInfo(with, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION); err != nil {
-		t.Errorf("the owner can no longer read the DACL: %v", err)
+	if err := openFor(windows.WRITE_DAC); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Errorf("with OWNER RIGHTS = READ_CONTROL the owner opened it for WRITE_DAC (err %v); want ERROR_ACCESS_DENIED — %s", err, fullSD(t, with))
+	}
+	if err := openFor(windows.READ_CONTROL); err != nil {
+		t.Errorf("the owner can no longer read the DACL: %v — %s", err, fullSD(t, with))
+	}
+	if err := set(with, "D:P(A;;FA;;;"+stranger+")"); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Errorf("with OWNER RIGHTS = READ_CONTROL SetNamedSecurityInfo rewrote the DACL (err %v); want ERROR_ACCESS_DENIED — %s", err, fullSD(t, with))
 	}
 }
 
