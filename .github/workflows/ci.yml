@@ -51,6 +51,16 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # -count=1 so a warm build cache can never mask a failure.
+      # -count=1 so a warm build cache can never mask a failure. -v so the log
+      # shows which tests ran and which skipped (a PR can cite them); the next
+      # step repeats just the failures, so they stay readable.
       - name: Test
-        run: go test -count=1 ./...
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v ./... 2>&1 | tee test.log
+
+      - name: Test failures
+        if: failure()
+        shell: bash
+        run: grep -E -B2 -A25 -- '^\s*--- FAIL' test.log || true
