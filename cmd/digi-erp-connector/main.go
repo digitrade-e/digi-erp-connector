@@ -26,9 +26,9 @@ func main() {
 	// walk requires all UI work on one OS thread.
 	runtime.LockOSThread()
 
-	// Before ui.log creates it: whether this GUI made the data directory, so
-	// its first save gives it the protected DACL (config_acl.go).
-	guiCreatedDataDir = dataDirMissing(paths.DataDir())
+	// Before ui.log creates it: a launch that finds no data directory has its
+	// first save protect it (config_acl.go).
+	dataDirMissingAtLaunch.Store(dataDirMissing(paths.DataDir()))
 
 	uiLog := newUILogger()
 	defer uiLog.Close()

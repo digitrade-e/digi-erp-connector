@@ -279,7 +279,9 @@ func TestProtectTree_ResetsPlantedACLs(t *testing.T) {
 func mklinkJ(t *testing.T, link, target string) {
 	t.Helper()
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
-		t.Skipf("mklink /J: %v %s", err, out)
+		// Fatal, not Skip: on the Windows CI a junction needs no privilege, and a
+		// skipped test here would prove nothing.
+		t.Fatalf("mklink /J: %v %s", err, out)
 	}
 }
 

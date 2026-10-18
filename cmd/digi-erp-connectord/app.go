@@ -49,8 +49,15 @@ func (a *serverApp) Start() error {
 	// Bootstrap logger writes directly to server.log so we capture pre-config
 	// failures (config.Load errors, permissions, missing dirs) even when
 	// running as a Windows service where stderr is unavailable.
-	bootstrapLog := logger.NewBootstrap()
+	bootstrapLog := newBootstrapLog()
 	bootstrapLog.Info(fmt.Sprintf("daemon Start() called: pid=%d goos=%s", os.Getpid(), runtime.GOOS))
+
+	// Lock the data directory down first — before the config is read, so also
+	// on a first install's start, which has no config yet (Windows only; a
+	// no-op elsewhere). Fails closed.
+	if err := protectDataDir(paths.DataDir(), bootstrapLog); err != nil {
+		return err
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -64,13 +71,9 @@ func (a *serverApp) Start() error {
 	a.cfg = cfg
 	bootstrapLog.Info(fmt.Sprintf("config loaded: erp=%s apiListen=%s sendOrderDir=%q", cfg.ERP, cfg.APIListen, cfg.SendOrderDir))
 
-	// Lock the data directory down before anything else is written under it
-	// (Windows only; a no-op elsewhere). The config loaded, so both exist.
-	if cfgPath, pathErr := paths.ConfigFilePath(); pathErr != nil {
-		bootstrapLog.Error("config path", pathErr)
-		return pathErr
-	} else if err := protectDataDir(paths.DataDir(), cfgPath, bootstrapLog); err != nil {
-		return err
+	// config.yaml exists now: protect it too (logged only on failure).
+	if cfgPath, pathErr := paths.ConfigFilePath(); pathErr == nil {
+		protectConfigFile(cfgPath, bootstrapLog)
 	}
 
 	// Generate this installation's signing secret if it has none. Doing it here
