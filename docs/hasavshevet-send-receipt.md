@@ -188,6 +188,12 @@ The backend records `written` regardless of `import`, and logs at error for
   hanging up, plus a 5 s `WaitDelay` so a killed process whose child still holds
   the output pipe cannot stretch the deadline. `import` becomes `started` before
   it runs, then `ok` or `failed`; a key whose import started never runs it again.
+  A `has.exe` that runs past 90 s is killed (with the BAT, `cmd.exe` is killed,
+  and the importer it started may keep running) and the receipt is recorded
+  `failed`, never re-run — but the import may already have happened: **check
+  Hashavshevet for the receipt before importing it by hand**, or it is imported
+  twice. Off Windows nothing can run either importer: the receipt is written and
+  recorded `failed` ("the receipt import runs only on Windows; not run").
   Which runner a write node uses follows how its `sendOrder` runs (read its
   `config.yaml` at install: `hasBatFile` → a receipt BAT, `hasExePath` → a
   receipt parameter file).
@@ -295,8 +301,10 @@ daemon still starts, as it does for any failed recovery. On Windows a held
 
 The receipt data is personal data. On Windows the whole data directory gets a
 **protected DACL** at every daemon start (SYSTEM, Administrators and the service
-account; OWNER RIGHTS read-only, so the owner cannot rewrite it; the daemon does
-not start if it cannot be set; the elevated GUI applies it on save too) — see
+account; OWNER RIGHTS read-only, so the owner cannot rewrite it; set before the
+config loads, with anything under it that carries its own ACL reset and any
+symlink or junction refusing startup; the daemon does not start if it cannot be
+set; the elevated GUI applies it on save too) — see
 [configuration.md](configuration.md#data-directory-permissions-windows). On Linux
 the receipt directories are 0700 and their files 0600.
 

@@ -17,6 +17,7 @@ Check `server.log` — the daemon logs its whole startup sequence.
 | `failed to load db password` | No stored secret, or it was written under a different `erp` value. | Re-enter the password in the GUI and save. The secret key is per-ERP. |
 | `db connection failed` | See the next section. | |
 | `could not set the protected DACL on the data directory …; not starting` | Windows: the service account cannot change the data directory's permissions (it lacks `WRITE_DAC`, e.g. someone removed SYSTEM's access by hand). | From an elevated prompt, `icacls "%ProgramData%\digi-erp-connector" /grant SYSTEM:(OI)(CI)F`, then start the service; it sets the rest itself. |
+| `… a symlink or junction is in the data directory: <path>` | Windows: the data directory, or something under it, is a symlink or junction. Receipt data written through it would leave the protected tree, so the daemon changes nothing and stops. | Remove the link (`rmdir <path>` removes a junction, not its target), then start the service. |
 | `receipt configuration: … ambiguous` / `hasReceiptParamFile …` | Both `hasReceiptBatFile` and `hasReceiptParamFile` set, a relative path, or `hasReceiptParamFile` without `hasExePath`. | Keep one receipt importer; absolute paths. See [configuration.md](configuration.md#hasavshevet-receipts). |
 
 **An unreachable database no longer stops the daemon.** It starts, logs
@@ -133,7 +134,7 @@ still matches the configured folder.
 | Buttons do nothing / service control fails | It is not elevated. Use the shortcut, which goes through `launch-admin.vbs`. |
 | "Error loading config: …" in the status bar | `config.yaml` is corrupt. The window still opens so you can fix the values. |
 | Nothing in `ui.log` | The log file was created by an elevated process and the current one cannot append. Harmless. |
-| "Saved, but could not restrict access to …" | The elevated GUI could not set the protected DACL on `config.yaml` (or a data directory it created). The save itself succeeded. | Start the service: it sets the DACL at start, and refuses to start if it cannot set it on the directory (see above). |
+| "Saved, but could not restrict access to …" | The elevated GUI could not set the protected DACL on `config.yaml` (or on the data directory, on a first save). The save itself succeeded. Fix: start the service — it sets the DACL at start, and refuses to start if it cannot set it on the directory (see above). |
 | "Error loading config: … Access is denied" | Not elevated: since the service locks the data directory down (SYSTEM + Administrators only), a non-elevated process cannot read `config.yaml`. Use the shortcut. |
 | Saved settings seem to have reverted | Check you clicked Save; the GUI preserves keys it does not display, so `queries` and `tls` are not the cause. |
 

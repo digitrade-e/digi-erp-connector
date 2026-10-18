@@ -124,14 +124,45 @@ connector; stop the other process.
 
 ## Data directory permissions (Windows)
 
-At every start, right after `config.yaml` loads, the daemon gives the data
-directory a **protected DACL** — nothing inherited from `%ProgramData%`, whose
-default ACL lets every local user read — granting Full Control to exactly
-`SYSTEM`, `BUILTIN\Administrators` and the account the service runs as
-(LocalSystem, so in practice the first two), plus **OWNER RIGHTS with
-READ_CONTROL only**. Everything under it inherits that: `config.yaml`,
-`secrets\`, `queries.json`, the logs and the receipt data. It then sets the same
-on `config.yaml` itself.
+The data directory gets a **protected DACL** — nothing inherited from
+`%ProgramData%`, whose default ACL lets every local user read — granting Full
+Control to exactly `SYSTEM`, `BUILTIN\Administrators` and the account of the
+process that sets it (the service: LocalSystem, so in practice the first two),
+plus **OWNER RIGHTS with READ_CONTROL only**. Everything under it inherits that:
+`config.yaml`, `secrets\`, `queries.json`, the logs and the receipt data.
+
+**What is protected, when:**
+
+| When | By | What |
+|---|---|---|
+| Every service start, **before the config is read** — so also the installer's first `sc start`, which has no config yet | the daemon | the data directory and everything under it (below). If this fails the daemon **does not start**. |
+| Every service start, right after `config.yaml` loads | the daemon | `config.yaml` itself (the same DACL, set explicitly). A failure is logged; the daemon starts — the file inherits the directory's DACL anyway. |
+| Every save in the elevated GUI | the GUI | `config.yaml`. |
+| The GUI save that creates `config.yaml`, or the first save after a GUI launch that found no data directory | the GUI | the data directory and everything under it, as the daemon does. |
+
+A GUI failure is a "Saved, but…" warning in the status bar and a line in the
+log, not a refused save: the file is saved, and the service sets the DACL again
+when it starts. Nothing to configure; nothing happens on Linux.
+
+**Everything under the directory is reset.** After protecting the directory, the
+daemon walks it (without following links) and resets every file and folder that
+carries a DACL of its own — protected, NULL, or with explicit ACEs — to the
+inherited DACL alone. A folder planted before the first protected start (a
+`receipts\` created by a standard user with its own ACL, say) therefore does not
+survive, and neither do explicit ACEs an operator added under the data directory
+by hand: they are dropped at the next start. Entries that already only inherit
+are just read, so a normal start rewrites nothing.
+
+**Symlinks and junctions refuse startup.** If the data directory itself, or
+anything under it, is a symlink, a junction or another reparse point that
+redirects a path, the daemon changes nothing and does not start (logged:
+`a symlink or junction is in the data directory`): receipt data written through
+it would land outside the protected tree. Remove the link. (Data Deduplication
+files count as regular files.)
+
+**Owner.** When the daemon runs as SYSTEM it also makes SYSTEM the directory's
+owner (a failure is logged, not fatal). Under any other account the owner is left
+as it is.
 
 Why OWNER RIGHTS: without it, whoever *owns* the directory or a file in it keeps
 an implicit right to read and rewrite its DACL, whatever the DACL says — and
@@ -139,26 +170,11 @@ the owner can be a plain user, since Users may create folders in
 `%ProgramData%`. The OWNER RIGHTS ACE replaces those implicit rights with what it
 grants: the owner can still see who has access (READ_CONTROL, which `icacls`
 and Explorer need), but cannot change it or read data unless it is SYSTEM, an
-Administrator or the service account. The owner itself is not changed.
-
-The elevated GUI applies the same DACL to `config.yaml` after every save, and to
-the data directory when the GUI created it (a first install), so the credentials
-are protected before the service's first start. A failure there is a "Saved,
-but…" warning in the status bar and a line in the log, not a refused save: the
-file is saved, and the service sets the DACL again when it starts.
-
-- If the directory's DACL cannot be set, the daemon **does not start** (logged:
-  `could not set the protected DACL on the data directory`).
-- If only `config.yaml`'s cannot, it logs an error and starts: the file already
-  inherits the directory's DACL (every save is a temp file created in the
-  directory and renamed over it).
-- Nothing to configure, and nothing happens on Linux.
+Administrator or the service account.
 
 Consequence: anything that reads the data directory must run **elevated** or as
 SYSTEM — the GUI does (desktop shortcut), and so must `cutover-seed`, Notepad on
-`server.log`, or a backup job. Explicit ACEs an operator added to a file inside
-the directory are kept; extra grants on the directory itself are removed at the
-next start.
+`server.log`, or a backup job.
 
 ## `db`
 

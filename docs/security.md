@@ -115,7 +115,12 @@ codes). At every start the daemon replaces the data directory's DACL with a
 protected one granting Full Control to SYSTEM (`S-1-5-18`),
 BUILTIN\Administrators (`S-1-5-32-544`) and the service's own account, plus
 OWNER RIGHTS (`S-1-3-4`) with READ_CONTROL only, inherited by everything
-beneath, and sets the same on `config.yaml` (`internal/platform/dataacl`).
+beneath, and sets the same on `config.yaml` (`internal/platform/dataacl`). It does this
+before reading the config (so also on a first install's start without one),
+resets everything beneath that carries an ACL of its own to the inherited one
+(nothing planted before the first protected start survives), refuses to start
+if the directory or anything in it is a symlink or junction, and makes SYSTEM
+the owner when it runs as SYSTEM.
 Failing on the directory stops the daemon (fail closed); failing on
 `config.yaml` alone is logged. The OWNER RIGHTS ACE removes the owner's implicit
 WRITE_DAC: whoever created the directory (possibly a non-admin user) cannot
