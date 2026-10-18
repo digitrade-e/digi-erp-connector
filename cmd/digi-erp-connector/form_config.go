@@ -150,10 +150,12 @@ func persistConfig(cfg config.Config, password string, logSvc logger.LoggerServi
 	// Every save protects the data directory first, and writes nothing if
 	// that fails (config_acl.go): everything below lands in a tree the walk
 	// accepted.
-	cfgPath, cfgPathErr := paths.ConfigFilePath()
-	if err := protectDirBeforeSave(paths.DataDir(), logSvc); err != nil {
+	dataDir := paths.DataDir()
+	rep, err := protectDirBeforeSave(dataDir, logSvc)
+	if err != nil {
 		return "", err
 	}
+	reopenHeldLogs(rep) // a log the walk had to reset is reopened fresh
 	var notes []string
 
 	if cfg.ERP == config.ERPHasavshevet {
@@ -174,11 +176,10 @@ func persistConfig(cfg config.Config, password string, logSvc logger.LoggerServi
 		return "", fmt.Errorf("error saving config: %w", err)
 	}
 
-	// The daemon's DACL on config.yaml, now rather than at its next start.
-	if cfgPathErr == nil {
-		if w := protectFileAfterSave(cfgPath, logSvc); w != "" {
-			notes = append(notes, w)
-		}
+	// What the save wrote gets the daemon's DACL and Administrators as owner,
+	// now rather than at the service's next start.
+	if w := protectAfterSave(dataDir, logSvc); w != "" {
+		notes = append(notes, w)
 	}
 	return strings.Join(notes, " "), nil
 }

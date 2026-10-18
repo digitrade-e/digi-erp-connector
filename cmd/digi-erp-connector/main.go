@@ -26,23 +26,22 @@ func main() {
 	// walk requires all UI work on one OS thread.
 	runtime.LockOSThread()
 
-	// Before ui.log creates it: a launch that finds no data directory has its
-	// first save protect it (config_acl.go). One that finds it checks its own
-	// log files first: one that is not exactly ours is moved aside before it is
-	// opened, so the GUI never appends to a file object someone else may hold.
-	missing := dataDirMissing(paths.DataDir())
-	uiLogOK, serverLogOK := true, true
-	if !missing {
-		if p, err := paths.UILogFilePath(); err == nil {
-			uiLogOK = prepareLog(p)
-		}
-		if p, err := paths.LoggerFilePath(); err == nil {
-			serverLogOK = prepareLog(p)
-		}
-	}
+	// Before any log is opened in it, the data directory is created and walked
+	// (gui_logs.go): a log the walk had to reset, or one not exactly ours, is
+	// moved aside so a fresh file is opened; a directory the walk refuses gets
+	// no log, and saving is refused until it is fixed.
+	uiPath, _ := paths.UILogFilePath()
+	serverPath, _ := paths.LoggerFilePath()
+	early := &lineLogger{}
+	logsOK, protectErr := prepareGUIDataDir(paths.DataDir(), []string{uiPath, serverPath}, early)
+	uiLogOK, serverLogOK := logsOK[uiPath], logsOK[serverPath]
 
 	uiLog := newUILogger(uiLogOK)
 	defer uiLog.Close()
+	heldLogs[uiPath] = uiLog.reopenFresh
+	for _, line := range early.lines {
+		uiLog.Printf("%s", line)
+	}
 
 	// The GUI has no console when launched from the shortcut, so a panic would
 	// otherwise vanish. Log it and tell the operator where to look.
@@ -54,7 +53,7 @@ func main() {
 	}()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetOutput(uiLog.Writer())
+	log.SetOutput(uiLog.Writer()) // the uiLogger itself, so a reopen redirects it
 
 	uiLog.Printf("startup begin")
 	if session := os.Getenv("SESSIONNAME"); session != "" {
@@ -86,16 +85,19 @@ func main() {
 		uiLog.Printf("config loaded")
 	}
 
-	logSvc, logErr := logger.LoggerService(nil), error(nil)
+	openServerLog := func() (logger.LoggerService, error) { return logger.New(cfg) }
+	inner, logErr := logger.LoggerService(nil), error(nil)
 	if serverLogOK {
-		logSvc, logErr = logger.New(cfg)
+		inner, logErr = openServerLog()
 	} else {
-		logErr = fmt.Errorf("server.log is not ours and could not be moved aside")
+		logErr = fmt.Errorf("server.log could not be prepared (see ui.log)")
 	}
 	if logErr != nil {
-		logSvc = logger.NewStderr()
-		logSvc.Warn("logger init failed; using stderr")
+		inner = logger.NewStderr()
+		inner.Warn("logger init failed; using stderr")
 	}
+	logSvc := &swapLogger{inner: inner, path: serverPath, open: openServerLog}
+	heldLogs[serverPath] = logSvc.reopenFresh
 	defer logSvc.Close()
 
 	uiLog.Printf("building window")
@@ -110,6 +112,9 @@ func main() {
 	// error, so a corrupt config.yaml was never reported in the UI.
 	if cfgErr != nil {
 		form.setStatus("Error loading config: " + cfgErr.Error())
+	}
+	if protectErr != nil {
+		form.setStatus("The data directory could not be protected, so saving is refused until it is fixed: " + protectErr.Error())
 	}
 
 	uiLog.Printf("run loop")

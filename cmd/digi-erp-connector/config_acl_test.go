@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,19 +32,18 @@ func (*recLogger) Close() error   { return nil }
 // the DACL at its next start, failing closed on the directory.
 func TestProtectBeforeAndAfterSave(t *testing.T) {
 	dir := t.TempDir()
-	const cfg = `C:\ProgramData\digi-erp-connector\config.yaml`
 
 	t.Run("ok", func(t *testing.T) {
-		dirs, files := stubGUIProtect(t, nil, nil)
+		dirs := stubGUIProtect(t, nil)
 		log := &recLogger{}
-		if err := protectDirBeforeSave(dir, log); err != nil {
+		if _, err := protectDirBeforeSave(dir, log); err != nil {
 			t.Errorf("protectDirBeforeSave = %v", err)
 		}
-		if w := protectFileAfterSave(cfg, log); w != "" {
+		if w := protectAfterSave(dir, log); w != "" {
 			t.Errorf("after-save warning %q", w)
 		}
-		if len(*dirs) != 1 || (*dirs)[0] != dir || len(*files) != 1 || (*files)[0] != cfg {
-			t.Errorf("ProtectTree %v, ProtectFile %v", *dirs, *files)
+		if len(*dirs) != 2 || (*dirs)[0] != dir || (*dirs)[1] != dir {
+			t.Errorf("ProtectTree %v; want the directory before and after", *dirs)
 		}
 	})
 	// R3-2: the save fails closed. Whatever the walk refused — a link, an
@@ -55,9 +53,9 @@ func TestProtectBeforeAndAfterSave(t *testing.T) {
 		"a hard link": dataacl.ErrHardLink, "any other error": errors.New("access denied"),
 	} {
 		t.Run("refused: "+name, func(t *testing.T) {
-			stubGUIProtect(t, walkErr, nil)
+			stubGUIProtect(t, walkErr)
 			log := &recLogger{}
-			err := protectDirBeforeSave(dir, log)
+			_, err := protectDirBeforeSave(dir, log)
 			if !errors.Is(err, walkErr) || !strings.Contains(err.Error(), "Not saved") || !strings.Contains(err.Error(), "nothing was written") {
 				t.Errorf("protectDirBeforeSave = %v; want a refusal wrapping %v that says nothing was written", err, walkErr)
 			}
@@ -66,63 +64,28 @@ func TestProtectBeforeAndAfterSave(t *testing.T) {
 			}
 		})
 	}
-	t.Run("config.yaml fails", func(t *testing.T) {
-		stubGUIProtect(t, nil, errors.New("not the owner"))
+	t.Run("after the save fails", func(t *testing.T) {
+		stubGUIProtect(t, errors.New("not the owner"))
 		log := &recLogger{}
-		w := protectFileAfterSave(cfg, log)
-		if !strings.HasPrefix(w, "Saved, but") || !strings.Contains(w, "config.yaml") {
-			t.Errorf("warning %q; want a Saved-but warning naming config.yaml", w)
+		if w := protectAfterSave(dir, log); !strings.HasPrefix(w, "Saved, but") || !strings.Contains(w, "not the owner") {
+			t.Errorf("warning %q; want a Saved-but warning with the reason", w)
 		}
 	})
 }
 
-// R2-3 for the GUI's own log files: one that is not exactly ours (wrong ACL,
-// untrusted owner, a link) is moved aside before it is opened; if it cannot
-// be moved, the GUI does not log into it.
-func TestPrepareLog(t *testing.T) {
-	stub := func(t *testing.T, trusted bool, trustErr, moveErr error) *[]string {
-		var moved []string
-		oldT, oldM := guiFileTrustedFn, guiMoveAsideFn
-		guiFileTrustedFn = func(string) (bool, error) { return trusted, trustErr }
-		guiMoveAsideFn = func(p string) (string, error) { moved = append(moved, p); return p + ".old", moveErr }
-		t.Cleanup(func() { guiFileTrustedFn, guiMoveAsideFn = oldT, oldM })
-		return &moved
-	}
-	const p = `C:\ProgramData\digi-erp-connector\ui.log`
-	if moved := stub(t, true, nil, nil); !prepareLog(p) || len(*moved) != 0 {
-		t.Errorf("a trusted log: usable=%v moved=%v; want usable, not moved", prepareLog(p), *moved)
-	}
-	if moved := stub(t, false, nil, nil); !prepareLog(p) || len(*moved) != 1 {
-		t.Errorf("an untrusted log: moved=%v; want moved aside, then usable", *moved)
-	}
-	if stub(t, false, nil, errors.New("in use")); prepareLog(p) {
-		t.Error("an untrusted log that could not be moved is still used")
-	}
-	// Cannot even be checked (not elevated): the open decides, and fails.
-	if moved := stub(t, false, errors.New("access denied"), nil); !prepareLog(p) || len(*moved) != 0 {
-		t.Errorf("an uncheckable log: moved=%v; want left to the open", *moved)
-	}
-}
-
-// stubGUIProtect replaces the GUI's dataacl calls and records their paths.
-func stubGUIProtect(t *testing.T, dirErr, fileErr error) (*[]string, *[]string) {
+// stubGUIProtect replaces the GUI's walk and records its paths; it also checks
+// the GUI always hands what it created to Administrators.
+func stubGUIProtect(t *testing.T, walkErr error) *[]string {
 	t.Helper()
-	var dirs, files []string
-	oldDir, oldFile := guiProtectTreeFn, guiProtectFileFn
-	guiProtectTreeFn = func(p string, _ dataacl.TreeOptions) (dataacl.Report, error) {
+	var dirs []string
+	old := guiProtectTreeFn
+	guiProtectTreeFn = func(p string, opt dataacl.TreeOptions) (dataacl.Report, error) {
+		if !opt.ClaimForAdministrators {
+			t.Error("the GUI's walk does not hand what it created to Administrators")
+		}
 		dirs = append(dirs, p)
-		return dataacl.Report{}, dirErr
+		return dataacl.Report{}, walkErr
 	}
-	guiProtectFileFn = func(p string) error { files = append(files, p); return fileErr }
-	t.Cleanup(func() { guiProtectTreeFn, guiProtectFileFn = oldDir, oldFile })
-	return &dirs, &files
-}
-
-func TestDataDirMissing(t *testing.T) {
-	if dataDirMissing(t.TempDir()) {
-		t.Error("an existing directory reported missing")
-	}
-	if !dataDirMissing(filepath.Join(t.TempDir(), "nope")) {
-		t.Error("a missing directory reported present")
-	}
+	t.Cleanup(func() { guiProtectTreeFn = old })
+	return &dirs
 }
