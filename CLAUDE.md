@@ -74,7 +74,7 @@ internal/
   secrets/              ← Windows DPAPI (machine scope)
 ```
 
-Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/, receipts/, history/receipts/). Linux: `/etc/digi-erp-connector/`. On Windows the daemon gives it a **protected DACL** at every start (SYSTEM + Administrators + the service account, inherited beneath; `cmd/digi-erp-connectord/dataacl.go`): failing on the directory stops the daemon, failing on config.yaml alone is logged. Never widen it back — it holds credentials and receipt PII.
+Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/, receipts/, history/receipts/). Linux: `/etc/digi-erp-connector/`. On Windows the daemon gives it a **protected DACL** at every start (SYSTEM + Administrators + the service account Full Control, OWNER RIGHTS READ_CONTROL only so the owner cannot rewrite it, inherited beneath; `cmd/digi-erp-connectord/dataacl.go`): failing on the directory stops the daemon, failing on config.yaml alone is logged. The elevated GUI applies the same on every save (`cmd/digi-erp-connector/config_acl.go`: config.yaml always, DataDir when the GUI created it; failures are a "Saved, but…" warning). Never widen it back — it holds credentials and receipt PII.
 
 ## API endpoints (all `/api/*` require `Authorization: Bearer <token from /auth/token>`; all rate-limited)
 

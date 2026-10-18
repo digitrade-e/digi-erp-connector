@@ -113,12 +113,15 @@ every local user read what is under it — `config.yaml`, and with receipts on t
 receipt index and history (names, phones, emails, card last 4, confirmation
 codes). At every start the daemon replaces the data directory's DACL with a
 protected one granting Full Control to SYSTEM (`S-1-5-18`),
-BUILTIN\Administrators (`S-1-5-32-544`) and the service's own account, inherited
-by everything beneath, and sets the same on `config.yaml`
-(`internal/platform/dataacl`). Failing on the directory stops the daemon (fail
-closed); failing on `config.yaml` alone is logged. The owner of the directory
-keeps its implicit right to change the DACL — whoever created it, normally an
-administrator or the installer.
+BUILTIN\Administrators (`S-1-5-32-544`) and the service's own account, plus
+OWNER RIGHTS (`S-1-3-4`) with READ_CONTROL only, inherited by everything
+beneath, and sets the same on `config.yaml` (`internal/platform/dataacl`).
+Failing on the directory stops the daemon (fail closed); failing on
+`config.yaml` alone is logged. The OWNER RIGHTS ACE removes the owner's implicit
+WRITE_DAC: whoever created the directory (possibly a non-admin user) cannot
+grant itself access back. The elevated GUI applies the same DACL to
+`config.yaml` on every save, and to the directory when it created it; there a
+failure is only a warning, because the daemon re-applies it at start.
 
 None of these values is ever logged. Log lines about the DB password mention only
 its length; the line recording first-run secret generation says that it happened

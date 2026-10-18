@@ -295,7 +295,8 @@ daemon still starts, as it does for any failed recovery. On Windows a held
 
 The receipt data is personal data. On Windows the whole data directory gets a
 **protected DACL** at every daemon start (SYSTEM, Administrators and the service
-account only; the daemon does not start if it cannot be set) — see
+account; OWNER RIGHTS read-only, so the owner cannot rewrite it; the daemon does
+not start if it cannot be set; the elevated GUI applies it on save too) — see
 [configuration.md](configuration.md#data-directory-permissions-windows). On Linux
 the receipt directories are 0700 and their files 0600.
 

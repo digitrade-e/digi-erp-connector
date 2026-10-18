@@ -128,9 +128,24 @@ At every start, right after `config.yaml` loads, the daemon gives the data
 directory a **protected DACL** — nothing inherited from `%ProgramData%`, whose
 default ACL lets every local user read — granting Full Control to exactly
 `SYSTEM`, `BUILTIN\Administrators` and the account the service runs as
-(LocalSystem, so in practice the first two). Everything under it inherits that:
-`config.yaml`, `secrets\`, `queries.json`, the logs and the receipt data. It
-then sets the same on `config.yaml` itself.
+(LocalSystem, so in practice the first two), plus **OWNER RIGHTS with
+READ_CONTROL only**. Everything under it inherits that: `config.yaml`,
+`secrets\`, `queries.json`, the logs and the receipt data. It then sets the same
+on `config.yaml` itself.
+
+Why OWNER RIGHTS: without it, whoever *owns* the directory or a file in it keeps
+an implicit right to read and rewrite its DACL, whatever the DACL says — and
+the owner can be a plain user, since Users may create folders in
+`%ProgramData%`. The OWNER RIGHTS ACE replaces those implicit rights with what it
+grants: the owner can still see who has access (READ_CONTROL, which `icacls`
+and Explorer need), but cannot change it or read data unless it is SYSTEM, an
+Administrator or the service account. The owner itself is not changed.
+
+The elevated GUI applies the same DACL to `config.yaml` after every save, and to
+the data directory when the GUI created it (a first install), so the credentials
+are protected before the service's first start. A failure there is a "Saved,
+but…" warning in the status bar and a line in the log, not a refused save: the
+file is saved, and the service sets the DACL again when it starts.
 
 - If the directory's DACL cannot be set, the daemon **does not start** (logged:
   `could not set the protected DACL on the data directory`).

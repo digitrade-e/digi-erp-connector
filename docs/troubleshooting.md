@@ -133,6 +133,7 @@ still matches the configured folder.
 | Buttons do nothing / service control fails | It is not elevated. Use the shortcut, which goes through `launch-admin.vbs`. |
 | "Error loading config: …" in the status bar | `config.yaml` is corrupt. The window still opens so you can fix the values. |
 | Nothing in `ui.log` | The log file was created by an elevated process and the current one cannot append. Harmless. |
+| "Saved, but could not restrict access to …" | The elevated GUI could not set the protected DACL on `config.yaml` (or a data directory it created). The save itself succeeded. | Start the service: it sets the DACL at start, and refuses to start if it cannot set it on the directory (see above). |
 | "Error loading config: … Access is denied" | Not elevated: since the service locks the data directory down (SYSTEM + Administrators only), a non-elevated process cannot read `config.yaml`. Use the shortcut. |
 | Saved settings seem to have reverted | Check you clicked Save; the GUI preserves keys it does not display, so `queries` and `tls` are not the cause. |
 
