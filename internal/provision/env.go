@@ -204,6 +204,17 @@ type Env struct {
 	ProofTimeout time.Duration
 }
 
+// staleGrace: the daemon writes config.yaml itself just after its first start
+// (it generates the signing secret), so a config.yaml written within this of
+// the process's start is the one it runs.
+const staleGrace = 2 * time.Minute
+
+// configStale reports a config.yaml written after the running process
+// started (beyond staleGrace): the service runs an older config.
+func configStale(modified, processStart time.Time) bool {
+	return !processStart.IsZero() && !modified.IsZero() && modified.After(processStart.Add(staleGrace))
+}
+
 // DefaultProofTimeout is how long a restarted connector has to listen and
 // answer /api/ping before Apply rolls back.
 const DefaultProofTimeout = 30 * time.Second

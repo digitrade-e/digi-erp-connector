@@ -206,3 +206,25 @@ func TestLocalAddr(t *testing.T) {
 		}
 	}
 }
+
+// The daemon writes config.yaml itself just after its first start (it
+// generates the signing secret): that is the config it runs, not a stale one.
+func TestConfigStale(t *testing.T) {
+	start := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		modified time.Time
+		want     bool
+	}{
+		{start.Add(5 * time.Second), false},    // the daemon's own write
+		{start.Add(-time.Hour), false},         // older than the process
+		{start.Add(13 * 24 * time.Hour), true}, // the pilot box: saved 13 days later
+		{time.Time{}, false},                   // no file
+	} {
+		if got := configStale(tc.modified, start); got != tc.want {
+			t.Errorf("configStale(%v) = %v, want %v", tc.modified, got, tc.want)
+		}
+	}
+	if configStale(start.Add(time.Hour), time.Time{}) {
+		t.Error("a service that is not running cannot run a stale config")
+	}
+}

@@ -19,8 +19,9 @@ import (
 type VerifyInput struct {
 	// ExpectVersion, when set, is the version /api/ping must report.
 	ExpectVersion string `json:"expectVersion,omitempty"`
-	// FirewallRule is the rule that must allow apiListen's port
-	// (DefaultFirewallRule when empty).
+	// FirewallRule names the rule that must allow apiListen's port. Empty:
+	// DefaultFirewallRule is checked if it exists, and its absence is no
+	// failure (the spec may not have asked for one).
 	FirewallRule string `json:"firewallRule,omitempty"`
 }
 
@@ -108,7 +109,7 @@ func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error)
 	case err != nil:
 		add("firewall", false, "%v", err)
 	case rule == nil:
-		add("firewall", false, "no rule named %q", name)
+		add("firewall", in.FirewallRule == "", "no rule named %q", name)
 	default:
 		port := listenPort(cfg.APIListen)
 		add("firewall", rule.Enabled && rule.Port == port,

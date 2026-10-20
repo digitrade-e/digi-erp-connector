@@ -294,10 +294,10 @@ func (s Spec) validateOrders() *Refusal {
 		if r := abs("hasExePath", imp.HasExePath); r != nil {
 			return r
 		}
-		if imp.HasParamFile != "" {
-			if r := abs("hasParamFile", imp.HasParamFile); r != nil {
-				return r
-			}
+		// hasParamFile goes to has.exe as given, run from sendOrderDir: a
+		// bare name like digi_perm.bat is legitimate.
+		if hasControl(imp.HasParamFile) {
+			return refuse(CodeSpecInvalid, "use a file name or an absolute path", "importer.hasParamFile is not a path")
 		}
 	case "bat":
 		if imp.HasExePath != "" || imp.HasParamFile != "" {

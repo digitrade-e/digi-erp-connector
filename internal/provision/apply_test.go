@@ -368,3 +368,46 @@ func countCalls(calls []string, name string) int {
 	}
 	return n
 }
+
+// has.exe gets its parameter file as written and runs from sendOrderDir: a
+// bare name is checked there.
+func TestApply_ARelativeParameterFileIsFoundInTheOrderFolder(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	exe := filepath.Join(t.TempDir(), "has.exe")
+	if err := os.WriteFile(exe, []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec := handInstallSpec(orders)
+	spec.Importer = &ImporterSpec{Mode: "hasExe", HasExePath: exe, HasParamFile: "digi_perm.bat"}
+
+	_, err := Apply(context.Background(), testEnv(sys, fdb), spec)
+	wantRefusal(t, err, CodeImporterMissing)
+
+	if err := os.WriteFile(filepath.Join(orders, "digi_perm.bat"), []byte("@echo off"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(context.Background(), testEnv(sys, fdb), spec); err != nil {
+		t.Fatalf("with the file in the order folder: %v", err)
+	}
+	if cfg, _ := readConfig(t, sys.dir); cfg.HasParamFile != "digi_perm.bat" || cfg.HasExePath != exe {
+		t.Errorf("importer = %q %q", cfg.HasExePath, cfg.HasParamFile)
+	}
+}
+
+// A spec without a firewall rule leaves verify's firewall check passing; a
+// rule the caller names must exist.
+func TestVerify_TheFirewallRuleOnlyWhenAskedFor(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	env := testEnv(sys, fdb)
+	spec := handInstallSpec(orders)
+	spec.Firewall = nil
+	if _, err := Apply(context.Background(), env, spec); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if res, _ := Verify(context.Background(), env, VerifyInput{}); !res.OK {
+		t.Errorf("checks: %+v", res.Checks)
+	}
+	if res, _ := Verify(context.Background(), env, VerifyInput{FirewallRule: DefaultFirewallRule}); res.OK {
+		t.Error("a rule that was asked for and is missing passed")
+	}
+}
