@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,6 +92,7 @@ type fakeSys struct {
 	instances  []SQLInstance
 	host       HostInfo
 	candidates []string
+	writers    map[string][]string // who besides the administrators can change a file
 	daemon     *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
@@ -99,11 +101,13 @@ type fakeSys struct {
 
 func newFakeSys(t *testing.T, d *fakeDaemon) *fakeSys {
 	return &fakeSys{
-		dir:    t.TempDir(),
-		svc:    autostart.ServiceInfo{Installed: true, State: "running", StartType: "auto", Account: "LocalSystem", ProcessStart: time.Now().Add(-time.Hour), ProcessID: 4242},
-		rules:  map[string]FirewallRule{},
-		host:   HostInfo{Name: "ERP01", Domain: "example.local", PartOfDomain: true, DomainRole: 3, Elevated: true},
-		daemon: d,
+		dir:   t.TempDir(),
+		svc:   autostart.ServiceInfo{Installed: true, State: "running", StartType: "auto", Account: "LocalSystem", ProcessStart: time.Now().Add(-time.Hour), ProcessID: 4242},
+		rules: map[string]FirewallRule{},
+		// The pilot's Browser runs; its start type is the healthy one.
+		sqlBrowser: autostart.ServiceInfo{Installed: true, State: "running", StartType: "auto"},
+		host:       HostInfo{Name: "ERP01", Domain: "example.local", PartOfDomain: true, DomainRole: 3, Elevated: true},
+		daemon:     d,
 	}
 }
 
@@ -215,6 +219,13 @@ func (s *fakeSys) RemoveFirewallRule(name string) error {
 func (s *fakeSys) Listeners() ([]Listener, error)       { return s.listeners, nil }
 func (s *fakeSys) SQLInstances() ([]SQLInstance, error) { return s.instances, nil }
 func (s *fakeSys) Host() (HostInfo, error)              { return s.host, nil }
+func (s *fakeSys) Writers(path string) ([]string, error) {
+	if w := s.writers[path]; w != nil {
+		return w, nil
+	}
+	return []string{}, nil
+}
+
 func (s *fakeSys) ImporterCandidates() ([]string, error) {
 	return s.candidates, nil
 }
@@ -222,14 +233,33 @@ func (s *fakeSys) ImporterCandidates() ([]string, error) {
 // fakeDB records what provisioning asked SQL Server to do. A login opens
 // only with the password it was last given (sa's is saPass).
 type fakeDB struct {
-	mu          sync.Mutex
-	saPass      string
-	loginPass   string // erp_connector_read's, once created
-	loginExists bool   // the login is on the server already (the hand script made it)
-	procsMade   bool
-	opened      []string // user names
-	loginCalls  int
-	databases   []DatabaseFact
+	mu         sync.Mutex
+	saPass     string
+	logins     map[string]string // least-privilege login → its password on the server
+	procsMade  bool
+	opened     []string // user names
+	loginCalls int
+	databases  []DatabaseFact
+}
+
+// login is the server's password for a least-privilege login, and whether
+// the login exists.
+func (f *fakeDB) login(name string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pw, ok := f.logins[name]
+	return pw, ok
+}
+
+// setLogin puts a login on the server with password, as the hand script,
+// another connector or a DBA would.
+func (f *fakeDB) setLogin(name, password string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.logins == nil {
+		f.logins = map[string]string{}
+	}
+	f.logins[name] = password
 }
 
 type fakeConn struct{ db *fakeDB }
@@ -240,7 +270,7 @@ func (f *fakeDB) open(cfg config.Config, password string) (Database, error) {
 	f.opened = append(f.opened, cfg.DB.User)
 	switch {
 	case strings.EqualFold(cfg.DB.User, "sa") && password == f.saPass:
-	case cfg.DB.User == LeastPrivilegeLogin && f.loginPass != "" && password == f.loginPass:
+	case f.logins[cfg.DB.User] != "" && password == f.logins[cfg.DB.User]:
 	default:
 		// As a driver would: the DSN, password included, in the error.
 		return nil, errors.New("login failed for sqlserver://" + cfg.DB.User + ":" + password + "@" + cfg.DB.Host)
@@ -257,19 +287,18 @@ func (c fakeConn) EnsureProcedures(context.Context) ([]hasavshevet.ProcedureResu
 	c.db.procsMade = true
 	return []hasavshevet.ProcedureResult{{Name: "GPRICE_Bulk", Created: made}, {Name: "GetOnHandStockForSkus", Created: made}}, nil
 }
-func (c fakeConn) LoginExists(context.Context) (bool, error) {
-	c.db.mu.Lock()
-	defer c.db.mu.Unlock()
-	return c.db.loginExists || c.db.loginPass != "", nil
+func (c fakeConn) LoginExists(_ context.Context, login string) (bool, error) {
+	_, ok := c.db.login(login)
+	return ok, nil
 }
-func (c fakeConn) EnsureLeastPrivilegeLogin(_ context.Context, database, password string) error {
-	c.db.mu.Lock()
-	defer c.db.mu.Unlock()
-	if _, err := leastPrivilegeBatches(database, password); err != nil {
+func (c fakeConn) EnsureLeastPrivilegeLogin(_ context.Context, login, database, password string) error {
+	if _, err := leastPrivilegeBatches(login, database, password); err != nil {
 		return err
 	}
-	c.db.loginPass = password
+	c.db.setLogin(login, password)
+	c.db.mu.Lock()
 	c.db.loginCalls++
+	c.db.mu.Unlock()
 	return nil
 }
 func (c fakeConn) Databases(context.Context) ([]DatabaseFact, error) { return c.db.databases, nil }
@@ -297,6 +326,15 @@ func testEnv(sys *fakeSys, fdb *fakeDB) Env {
 			now = now.Add(d)
 		},
 		ProofTimeout: 5 * time.Second,
+		LookupIP: func(_ context.Context, host string) ([]net.IP, error) {
+			switch host {
+			case "erp01.example.local":
+				return []net.IP{net.ParseIP("10.0.0.5")}, nil
+			case "sql.example.com":
+				return []net.IP{net.ParseIP("10.0.0.6"), net.ParseIP("203.0.113.7")}, nil
+			}
+			return nil, errors.New("no such host")
+		},
 	}
 }
 

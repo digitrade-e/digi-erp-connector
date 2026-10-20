@@ -44,16 +44,22 @@ type Facts struct {
 	Databases          []DatabaseFact `json:"databases,omitempty"`
 	DatabaseError      string         `json:"databaseError,omitempty"`
 	ImporterCandidates []string       `json:"importerCandidates,omitempty"`
-	Defects            []Finding      `json:"defects"`
-	Notes              []Finding      `json:"notes"`
-	Suggested          Suggestion     `json:"suggested"`
-	Errors             []string       `json:"errors,omitempty"`
+	// ImporterWriters names, per candidate or configured importer, who
+	// besides the administrators can change it; absent when nobody can.
+	ImporterWriters map[string][]string `json:"importerWriters,omitempty"`
+	Defects         []Finding           `json:"defects"`
+	Notes           []Finding           `json:"notes"`
+	Suggested       Suggestion          `json:"suggested"`
+	Errors          []string            `json:"errors,omitempty"`
 }
 
 // SQLFacts are the SQL Server instances on this machine.
 type SQLFacts struct {
 	Instances      []SQLInstance `json:"instances"`
 	BrowserRunning bool          `json:"browserRunning"`
+	// BrowserStartType: a named instance reached without a port needs the
+	// Browser after every reboot, so "auto".
+	BrowserStartType string `json:"browserStartType,omitempty"`
 }
 
 // ConnectorFacts is the connector as installed and configured.
@@ -167,6 +173,7 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 	}
 	if browser, err := sys.Service("SQLBrowser"); err == nil {
 		f.SQL.BrowserRunning = browser.State == "running"
+		f.SQL.BrowserStartType = browser.StartType
 	}
 	for i := range f.SQL.Instances {
 		in := &f.SQL.Instances[i]
@@ -231,6 +238,29 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 	if f.ImporterCandidates, err = sys.ImporterCandidates(); err != nil {
 		failed("importer candidates", err)
 	}
+	importers := slices.Clone(f.ImporterCandidates)
+	if cfg != nil {
+		importers = append(importers, cfg.HasExePath, cfg.HasBatFile)
+	}
+	for _, p := range importers {
+		if p == "" || f.ImporterWriters[p] != nil {
+			continue
+		}
+		who, err := sys.Writers(p)
+		switch {
+		case err != nil:
+			failed("who can change "+p, err)
+		case len(who) > 0:
+			if f.ImporterWriters == nil {
+				f.ImporterWriters = map[string][]string{}
+			}
+			f.ImporterWriters[p] = who
+		}
+	}
+	if f.Host.WinRMAnalytic {
+		note("winrm_analytic_on", "turn the Microsoft-Windows-WinRM/Analytic log off before an apply over WinRM",
+			"the WinRM Analytic log is on: it records what crosses WinRM, a spec's secrets included")
+	}
 
 	// The databases, only with a credential.
 	if in.DB != nil {
@@ -255,13 +285,24 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 				"db.port %d is %s's dynamic port: it moves when SQL Server restarts", cfg.DB.Port, inst.Name)
 		}
 		if strings.EqualFold(strings.TrimSpace(cfg.DB.User), "sa") {
-			defect(DefectSaLogin, "move to "+LeastPrivilegeLogin+" (leastPrivilege)",
+			defect(DefectSaLogin, "move to a least-privilege login (leastPrivilege)",
 				"the connector logs in as sa: every saved query runs as the server's administrator")
 		}
 		if cfg.ERP == config.ERPHasavshevet && strings.TrimSpace(cfg.SendOrderDir) != "" &&
 			strings.TrimSpace(cfg.HasExePath) == "" && strings.TrimSpace(cfg.HasBatFile) == "" {
 			defect(DefectNoImporter, "name has.exe and its parameter file, or the BAT (importerCandidates)",
 				"orders are written to %s but nothing imports them into Hasavshevet", cfg.SendOrderDir)
+		}
+		for _, p := range []string{cfg.HasExePath, cfg.HasBatFile} {
+			if who := f.ImporterWriters[p]; len(who) > 0 {
+				note("importer_writable", "let only the administrators change it and its folder",
+					"the importer %s can be changed by %s, and the connector runs it as LocalSystem", p, strings.Join(who, ", "))
+			}
+		}
+		if server, instance := db.SplitInstance(cfg.DB.Host); isLocalHost(server) && instance != "" && cfg.DB.Port == 0 &&
+			f.SQL.BrowserStartType != "" && f.SQL.BrowserStartType != "auto" {
+			note("browser_not_automatic", "set the SQL Server Browser service to start automatically",
+				"the connector reaches %s through the SQL Server Browser, which starts %s: after a reboot it would not connect", cfg.DB.Host, f.SQL.BrowserStartType)
 		}
 		if c.DBSecret == "missing" && db.IsConfigured(*cfg) {
 			note("db_secret_missing", "apply stores it", "a database is configured but its password is not stored")
@@ -398,6 +439,9 @@ func fingerprint(env Env, cfg *config.Config, cred DiscoverDB) ([]DatabaseFact, 
 	}
 	c.DB.Database = "master"
 	c.DB.User = cred.User
+	if r := checkDBHost(context.Background(), env, c.DB.Host); r != nil {
+		return nil, r.Error() // the credential goes nowhere a refusal names
+	}
 	dbc, err := env.OpenDB(c, cred.Password)
 	if err != nil {
 		return nil, err.Error()

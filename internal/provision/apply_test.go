@@ -53,8 +53,8 @@ func TestApply_FixesAHandInstall(t *testing.T) {
 	if cfg.DB.Host != `127.0.0.1\WIZSOFT` || cfg.DB.Port != 0 {
 		t.Errorf("db = %q:%d, want the instance through the Browser", cfg.DB.Host, cfg.DB.Port)
 	}
-	if cfg.DB.User != LeastPrivilegeLogin {
-		t.Errorf("db.user = %q, want %s", cfg.DB.User, LeastPrivilegeLogin)
+	if cfg.DB.User != DefaultLogin {
+		t.Errorf("db.user = %q, want %s", cfg.DB.User, DefaultLogin)
 	}
 	if cfg.Auth.Username != "digi-hub" || cfg.Auth.Password != testAuthPass {
 		t.Errorf("auth = %q / (password set: %v)", cfg.Auth.Username, cfg.Auth.Password == testAuthPass)
@@ -63,7 +63,7 @@ func TestApply_FixesAHandInstall(t *testing.T) {
 		t.Error("the signing secret changed: every issued token would be invalid")
 	}
 	stored, _ := sys.SecretGet(config.DBPasswordKey(cfg.ERP))
-	if string(stored) == testSaPass || string(stored) != fdb.loginPass || fdb.loginCalls != 1 {
+	if pw, _ := fdb.login(DefaultLogin); string(stored) == testSaPass || string(stored) != pw || fdb.loginCalls != 1 {
 		t.Errorf("the stored DB password is not the new login's (login calls %d)", fdb.loginCalls)
 	}
 	if !fdb.procsMade {
@@ -134,7 +134,8 @@ func TestRun_NoSecretInTheOutput(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	for _, s := range []string{testSaPass, testAuthPass, fdb.loginPass} {
+	loginPass, _ := fdb.login(DefaultLogin)
+	for _, s := range []string{testSaPass, testAuthPass, loginPass} {
 		if bytes.Contains(out, []byte(s)) {
 			t.Fatalf("the output carries a secret: %s", out)
 		}

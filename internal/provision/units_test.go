@@ -24,7 +24,10 @@ func TestSpecValidate_Refusals(t *testing.T) {
 		{"loopback listen", func(s *Spec) { s.APIListen = "127.0.0.1:8082" }, CodeLoopbackListen},
 		{"a name as listen host", func(s *Spec) { s.APIListen = "erp01:8082" }, CodeSpecInvalid},
 		{"sa kept without allowSa", func(s *Spec) { s.DB.LeastPrivilege = false }, CodeSaLogin},
-		{"the login creating itself", func(s *Spec) { s.DB.User = LeastPrivilegeLogin }, CodeSpecInvalid},
+		{"the login creating itself", func(s *Spec) { s.DB.User = DefaultLogin }, CodeSpecInvalid},
+		{"a login name that is not ours", func(s *Spec) { s.DB.Login = "dbo" }, CodeSpecInvalid},
+		{"a login name in capitals", func(s *Spec) { s.DB.Login = "erp_connector_B" }, CodeSpecInvalid},
+		{"a login name without least privilege", func(s *Spec) { s.DB.Login, s.DB.LeastPrivilege, s.DB.AllowSa = "erp_connector_b", false, true }, CodeSpecInvalid},
 		{"no port and no instance", func(s *Spec) { s.DB.Host = "127.0.0.1" }, CodeSpecInvalid},
 		{"an instance name with a quote", func(s *Spec) { s.DB.Host = `127.0.0.1\WIZ'SOFT` }, CodeSpecInvalid},
 		{"a database name with a bracket", func(s *Spec) { s.DB.Database = "erp]db" }, CodeSpecInvalid},
@@ -99,7 +102,7 @@ func TestNewSQLPassword(t *testing.T) {
 
 func TestLeastPrivilegeBatches(t *testing.T) {
 	pw, _ := NewSQLPassword()
-	batches, err := leastPrivilegeBatches("erp_db", pw)
+	batches, err := leastPrivilegeBatches(DefaultLogin, "erp_db", pw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,11 +131,18 @@ func TestLeastPrivilegeBatches(t *testing.T) {
 		}
 	}
 
-	if _, err := leastPrivilegeBatches("erp]; DROP DATABASE x; --", pw); err == nil {
+	if _, err := leastPrivilegeBatches(DefaultLogin, "erp]; DROP DATABASE x; --", pw); err == nil {
 		t.Error("an unsafe database name was written into SQL")
 	}
-	if _, err := leastPrivilegeBatches("erp_db", "abc'; DROP LOGIN sa; --"); err == nil {
+	if _, err := leastPrivilegeBatches(DefaultLogin, "erp_db", "abc'; DROP LOGIN sa; --"); err == nil {
 		t.Error("a password outside the alphabet was written into SQL")
+	}
+	if _, err := leastPrivilegeBatches("erp_connector_x]; DROP LOGIN sa; --", "erp_db", pw); err == nil {
+		t.Error("an unsafe login name was written into SQL")
+	}
+	named, err := leastPrivilegeBatches("erp_connector_node2", "erp_db", pw)
+	if err != nil || !strings.Contains(strings.Join(named, "\n"), "CREATE USER [erp_connector_node2] FOR LOGIN [erp_connector_node2]") {
+		t.Errorf("a named login is not the one created: %v", err)
 	}
 }
 

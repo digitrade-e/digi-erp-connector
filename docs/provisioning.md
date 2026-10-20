@@ -38,17 +38,19 @@ UTF-8 as mojibake; every JSON reader decodes it back. Exit codes: 0 done, 1 refu
   "apiListen": "0.0.0.0:8082",            // an IP literal, never loopback
   "tls": { "mode": "self-signed", "hosts": ["203.0.113.58"] },   // optional; or {"mode":"off"}
   "db": {
-    "host": "127.0.0.1\\WIZSOFT",         // host, or host\instance (port 0 = ask the SQL Server Browser)
+    "host": "127.0.0.1\\WIZSOFT",         // this machine or its LAN; host, or host\instance (port 0 = ask the SQL Server Browser)
     "port": 0,
     "database": "erp_db",
     "user": "sa", "password": "…",        // the credential the client gave
-    "leastPrivilege": true,               // create erp_connector_read; sa is used once and not stored
-    "rotateLogin": false,                 // give an existing erp_connector_read a new password (see below)
+    "leastPrivilege": true,               // create a least-privilege login; sa is used once and not stored
+    "login": "erp_connector_node2",       // optional: its name, erp_connector_…; default erp_connector_read
+    "rotateLogin": false,                 // give an existing login this box does not know a new password (see below)
     "allowSa": false,                     // keep sa as the connector's login (refused otherwise)
     "encrypt": true, "trustServerCertificate": true   // optional: left out keeps the box's
   },
   "sendOrderDir": "C:\\digiorders",      // left out keeps the box's; "" turns orders off
   "importer": { "mode": "none" },         // or {"mode":"hasExe","hasExePath","hasParamFile"} or {"mode":"bat","hasBatFile"}; left out keeps the box's
+                                          // "allowWritable": true accepts an importer others can change (see below)
   "auth": { "username": "digi-hub", "password": "…" },     // the one credential; at least 16 characters
   "firewall": { "allowFrom": ["198.51.100.241"] },          // optional; ruleName defaults to digi-erp-connector
   "service": { "dependOn": ["MSSQL$WIZSOFT"] },             // optional
@@ -61,6 +63,19 @@ UTF-8 as mojibake; every JSON reader decodes it back. Exit codes: 0 done, 1 refu
 so a bare name such as `digi_perm.bat` is looked up there. `apply` refuses a file
 that is not on the machine (`importer_missing`).
 
+**The importer runs as LocalSystem**, once per order. So `apply` refuses has.exe or a
+BAT that anyone besides SYSTEM and the Administrators can change — the file itself,
+or its folder, where a new file would be found first by a BAT's bare command names
+(`importer_writable`, naming who). On a domain controller that would be the whole
+domain's SYSTEM. `importer.allowWritable` accepts it as a warning, once a human has
+accepted the risk. `discover` lists who can change each candidate
+(`importerWriters`).
+
+**`db.host` must be this machine or its LAN.** `apply` and `discover` log in there
+with the client's administrator credential, and the machine reaches the internet. A
+name is resolved on the machine, and an address that is not loopback, private or
+link-local is refused before any login (`db_host_public`).
+
 A field that is left out keeps what the machine has: a missing `tls`, `firewall`,
 `service`, `sendOrderDir`, `importer`, `encrypt` or `trustServerCertificate` means
 "leave it alone", not "remove it" or "false". Everything else not in the spec —
@@ -69,12 +84,16 @@ secret — stays as it was. Orders with no importer must still say `{"mode":"non
 `apply` refuses to leave it unstated (`importer_required`).
 
 **The least-privilege login is given a password only when that is safe.** It is
-created when it does not exist. A login that already works with the stored password
-is kept. It gets a new password only with `rotateLogin`, in two cases: it exists and
-this connector does not use it (another connector, or the hand script, may), or its
-stored password no longer logs in. A password set in SQL Server cannot be taken back,
-so after a rotation a rollback or a `restore` keeps the new password whenever the
-config they put back logs in as that login.
+created when it does not exist, and its password is kept in its own DPAPI entry
+(`secrets\login_<name>.bin`), which no pre-image holds. A login that works with a
+password this box knows is kept — also after a `restore` to a config without it, so
+the next `apply` needs no rotation. It gets a new password only with `rotateLogin`,
+in two cases: it exists and this box knows no password for it (another connector,
+the hand script or a person may use it), or the one it knows no longer logs in. Two
+connectors on one SQL Server name two logins (`db.login`): rotating a shared login
+locks the other connector out. A password set in SQL Server cannot be taken back, so
+a rollback or a `restore` keeps the current password whenever the config they put
+back logs in as that login.
 
 ## What `apply` does, in order
 
@@ -107,13 +126,14 @@ Then:
      restore point out. The last five are kept. They hold `config.yaml`, credential
      in clear, under the data directory's DACL.
 6. Hasavshevet: `GPRICE_Bulk` and `GetOnHandStockForSkus` are created where missing.
-7. `leastPrivilege`: `erp_connector_read` is created or given a new password (born
-   here, kept only in DPAPI and SQL Server), with the grants of
+7. `leastPrivilege`: the login (`db.login`, default `erp_connector_read`) is created or
+   given a new password (born here, kept only in DPAPI and SQL Server), with the grants of
    `scripts/sql/least-privilege-read-node.sql`, and logged in once to prove it. A
    login that already works with the stored password is kept.
-8. TLS: a self-signed pair (ECDSA P-256, 10 years) whose SANs are `tls.hosts`.
-   erp-manager checks the host name, so the address in its `baseUrl` must be one of
-   them. A pair that already covers the hosts and has more than a year left is kept.
+8. TLS: a self-signed pair (ECDSA P-256, 10 years) whose SANs are `tls.hosts`. A pair
+   that already covers the hosts and has more than a year left is kept. Neither PHP
+   client verifies it — erp-manager and the B2B backend set `verify_peer` and
+   `verify_host` false — so it stops a passive listener, not an active one.
 9. The DB secret through DPAPI, read back. Then `config.yaml`.
 10. The firewall rule: inbound TCP on `apiListen`'s port, from `allowFrom` only,
     tagged with the group `digi-erp-connector`. A rule of that name without the group
@@ -127,7 +147,9 @@ Then:
     `sendOrderDir`**: `lastOrderNumber.json` is copied to the new folder while the
     service is stopped. A folder without it would start again at 1 and hand
     Hasavshevet numbers it already has. If both folders hold different counters,
-    `apply` refuses (`order_number_conflict`).
+    `apply` refuses (`order_number_conflict`). A rollback or a `restore` that returns to
+    the older folder carries the higher counter back into it the same way: the copy
+    left there is stale.
 13. **Port proof**: within 30 s the connector must log in with the new credential and
     answer `/api/ping`. `/api/health` is reported. If the proof fails, this run's
     pre-image is put back, and the service ends as it was before the run: running on
@@ -143,6 +165,8 @@ A second identical `apply` changes nothing: no write, no new password, no restar
 | `loopback_listen` | `apiListen` is loopback: the Hub cannot reach it |
 | `sa_login` | the connector would keep `sa`: set `leastPrivilege` or `allowSa` |
 | `importer_required` / `importer_missing` | orders are configured but no importer is named / the named file is not on the machine |
+| `importer_writable` | someone besides the administrators can change the importer or its folder |
+| `db_host_public` | `db.host` is not this machine or its LAN |
 | `send_order_dir_missing` | the order folder does not exist |
 | `auth_password_weak` | the credential is shorter than 16 characters or not plain text |
 | `firewall_any` | `allowFrom` opens the port to more than a /16 |
@@ -160,12 +184,13 @@ A second identical `apply` changes nothing: no write, no new password, no restar
 | `port_proof_failed` | the restarted connector did not answer; the pre-image was put back |
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
 | `unsupported_os` | not Windows |
+| `internal_error` | the tool itself failed; run `verify` to see the box's state |
 
 ## What it does not do
 
-- **No SQL from the input.** The only values written into SQL are a database name
-  that passed `hasavshevet.IsSafeDBName` and a generated password from a quote-free
-  alphabet.
+- **No SQL from the input.** The only values written into SQL are a login name of the
+  form `erp_connector_…`, a database name that passed `hasavshevet.IsSafeDBName` and a
+  generated password from a quote-free alphabet.
 - **It never removes a SQL login.** `restore` puts the old config back, and the login
   stays. A credential only moves forward: when the config put back still uses the
   login, its current password is kept.
@@ -176,7 +201,15 @@ A second identical `apply` changes nothing: no write, no new password, no restar
 
 `restore` also works when `config.yaml` no longer reads — that is what it is for — but
 then the running connector's order queue cannot be asked, so it needs
-`--assume-idle`.
+`--assume-idle`. It warns when the restored config's database does not answer (the
+client may have changed that password since). The service's recovery actions are not
+part of a pre-image: `restore` leaves them on.
+
+`discover` also reports what the transport needs to know: `host.winrmAnalytic` (the
+note `winrm_analytic_on` — that log records what crosses WinRM, secrets on stdin
+included), `host.localAccountTokenFilterPolicy`, and the SQL Server Browser's start
+type (`browser_not_automatic` when a named instance reached without a port depends on
+it; `verify` checks it too).
 
 ## Running it by hand
 

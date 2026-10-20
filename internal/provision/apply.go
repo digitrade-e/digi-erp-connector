@@ -139,7 +139,7 @@ func (a *applier) run(ctx context.Context) error {
 	}
 	dbUser := strings.TrimSpace(a.s.DB.User)
 	if a.s.DB.LeastPrivilege {
-		dbUser = LeastPrivilegeLogin
+		dbUser = a.s.DB.login()
 	}
 	a.tgt = buildTarget(a.cur, a.s, a.dir, dbUser)
 	if strings.TrimSpace(a.tgt.Auth.Secret) == "" {
@@ -156,13 +156,16 @@ func (a *applier) run(ctx context.Context) error {
 	if err := api.CheckConfig(check); err != nil {
 		return refuse(CodeConfigRefused, "fix the spec: the connector would refuse to start on this config", "%v", err)
 	}
-	for _, f := range []func() error{a.checkImporterStated, a.checkFilesExist, a.checkOrderNumbers, a.checkFirewallOwner} {
+	for _, f := range []func() error{a.checkImporterStated, a.checkFilesExist, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
 		if err := f(); err != nil {
 			return err
 		}
 	}
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
+	}
+	if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
+		return r
 	}
 	admin, err := a.openAdmin()
 	if err != nil {
@@ -305,6 +308,33 @@ func (a *applier) checkFilesExist() error {
 	return nil
 }
 
+// checkImporterWriters refuses an importer that accounts besides the
+// administrators can change (System.Writers): the connector runs it as
+// LocalSystem for every order, so it would be their code run as SYSTEM — on a
+// domain controller, the whole domain's (plan 068's panel). allowWritable
+// accepts it, as a risk a human was shown.
+func (a *applier) checkImporterWriters() error {
+	for _, p := range []string{a.tgt.HasExePath, a.tgt.HasBatFile} {
+		if p == "" {
+			continue
+		}
+		who, err := a.env.Sys.Writers(p)
+		if err != nil {
+			return refuse(CodeImporterWritable, "run it elevated (as an administrator)", "read who can change %s: %v", p, err)
+		}
+		if len(who) == 0 {
+			continue
+		}
+		if a.s.Importer != nil && a.s.Importer.AllowWritable {
+			a.warn("importer_writable: %s can be changed by %s, and the connector runs it as LocalSystem", p, strings.Join(who, ", "))
+			continue
+		}
+		return refuse(CodeImporterWritable, "let only the administrators change it and its folder, or set importer.allowWritable once a human accepted the risk",
+			"%s can be changed by %s, and the connector would run it as LocalSystem for every order", p, strings.Join(who, ", "))
+	}
+	return nil
+}
+
 // checkOrderNumbers: the order counter lives in sendOrderDir. A new folder
 // without it would start again at 1 and hand Hasavshevet numbers it already
 // has, so the counter moves with the folder (at the restart, when no order
@@ -441,33 +471,41 @@ func (a *applier) planLogin(ctx context.Context, admin Database) error {
 		a.dbPassword = a.s.DB.Password
 		return nil
 	}
-	if strings.EqualFold(a.cur.DB.User, LeastPrivilegeLogin) {
-		stored, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP))
-		if err == nil {
-			a.res.secrets = append(a.res.secrets, string(stored))
-			dbc, oerr := a.env.OpenDB(a.tgt, string(stored))
-			if oerr == nil {
-				_ = dbc.Close()
-				a.loginPlan = "keep"
-				a.dbPassword = string(stored)
-				return nil
-			}
-			err = oerr
-		}
-		if !a.s.DB.RotateLogin {
-			return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password; anything else that logs in as it then needs the new one",
-				"%s's stored password does not log in: %v", LeastPrivilegeLogin, err)
-		}
-		a.loginPlan = "rotate"
-		return nil
+	login := a.s.DB.login()
+	// The passwords this box knows for the login: its own key, and the
+	// daemon's secret while the running config logs in as it (a box
+	// provisioned before the key existed).
+	var known []string
+	if b, err := a.env.Sys.SecretGet(loginKey(login)); err == nil {
+		known = append(known, string(b))
 	}
-	exists, err := admin.LoginExists(ctx)
+	if strings.EqualFold(a.cur.DB.User, login) {
+		if b, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP)); err == nil {
+			known = append(known, string(b))
+		}
+	}
+	var last error
+	for _, pw := range known {
+		a.res.secrets = append(a.res.secrets, pw)
+		dbc, err := a.env.OpenDB(a.tgt, pw)
+		if err == nil {
+			_ = dbc.Close()
+			a.loginPlan, a.dbPassword = "keep", pw
+			return nil
+		}
+		last = err
+	}
+	if len(known) > 0 && !a.s.DB.RotateLogin {
+		return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password; anything else that logs in as it then needs the new one",
+			"%s's stored password does not log in: %v", login, last)
+	}
+	exists, err := admin.LoginExists(ctx, login)
 	if err != nil {
-		return refuse(CodeLeastPrivilege, "the given login needs VIEW ANY DEFINITION or to be an administrator", "look for %s: %v", LeastPrivilegeLogin, err)
+		return refuse(CodeLeastPrivilege, "the given login needs VIEW ANY DEFINITION or to be an administrator", "look for %s: %v", login, err)
 	}
 	if exists && !a.s.DB.RotateLogin {
-		return refuse(CodeLeastPrivilege, "set db.rotateLogin to take it over (its password changes), or drop it if nothing uses it",
-			"%s already exists and this connector does not use it: another connector or a person may", LeastPrivilegeLogin)
+		return refuse(CodeLeastPrivilege, "name another login (db.login), or set db.rotateLogin to take this one over (its password changes)",
+			"%s already exists and this box does not know its password: another connector or a person may use it", login)
 	}
 	a.loginPlan = "create"
 	if exists {
@@ -525,7 +563,13 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 		a.step("login", false, "the given login")
 		return nil
 	case "keep":
-		a.step("login", false, LeastPrivilegeLogin+" works with the stored password")
+		// A box provisioned before the login's own key gets it now.
+		if b, err := a.env.Sys.SecretGet(loginKey(a.s.DB.login())); err != nil || string(b) != a.dbPassword {
+			if err := a.env.Sys.SecretSet(loginKey(a.s.DB.login()), []byte(a.dbPassword)); err != nil {
+				return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "keep %s's password: %v", a.s.DB.login(), err)
+			}
+		}
+		a.step("login", false, a.s.DB.login()+" works with the stored password")
 		return nil
 	}
 	pw, err := NewSQLPassword()
@@ -535,22 +579,26 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 	a.res.secrets = append(a.res.secrets, pw)
 	// From here the password may have reached SQL Server even if a step
 	// fails: treat it as set, so a rollback keeps the stored secret in step.
+	login := a.s.DB.login()
+	if err := a.env.Sys.SecretSet(loginKey(login), []byte(pw)); err != nil {
+		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "keep %s's new password: %v", login, err)
+	}
 	a.rotated, a.dbPassword = true, pw
-	if err := admin.EnsureLeastPrivilegeLogin(ctx, a.tgt.DB.Database, pw); err != nil {
+	if err := admin.EnsureLeastPrivilegeLogin(ctx, login, a.tgt.DB.Database, pw); err != nil {
 		return refuse(CodeLeastPrivilege, "the given login needs ALTER ANY LOGIN and rights in the database",
-			"%s %s: %v", a.loginPlan, LeastPrivilegeLogin, err)
+			"%s %s: %v", a.loginPlan, login, err)
 	}
 	dbc, err := a.env.OpenDB(a.tgt, pw)
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "check the server allows SQL logins (mixed mode)",
-			"%s was set up but does not log in: %v", LeastPrivilegeLogin, err)
+			"%s was set up but does not log in: %v", login, err)
 	}
 	_ = dbc.Close()
 	what := "created"
 	if a.loginPlan == "rotate" {
 		what = "given a new password"
 	}
-	a.step("login", true, LeastPrivilegeLogin+" "+what)
+	a.step("login", true, login+" "+what)
 	return nil
 }
 
@@ -822,10 +870,12 @@ func (a *applier) rollback() error {
 	if _, err := putBack(a.env, p); err != nil {
 		return err
 	}
-	if a.rotated {
-		if err := keepLoginPassword(a.env, a.dbPassword); err != nil {
-			return err
-		}
+	var pw []byte
+	if a.dbPassword != "" {
+		pw = []byte(a.dbPassword)
+	}
+	if err := keepLoginPassword(a.env, a.tgt.DB.User, pw); err != nil {
+		return err
 	}
 	if err := a.env.Sys.ProtectDataDir(); err != nil {
 		a.warn("the data directory could not be protected after the rollback: %v", err)
@@ -834,6 +884,10 @@ func (a *applier) rollback() error {
 		return nil // it still runs the old config, from memory
 	}
 	_ = a.env.Sys.StopService(ServiceName)
+	// The target's order folder may have issued numbers while it ran.
+	if err := a.carryOrderCounter(a.tgt.SendOrderDir, a.cur.SendOrderDir); err != nil {
+		return fmt.Errorf("the service is left stopped: %w; copy %s by hand before starting it", err, orderNumberFile)
+	}
 	if !a.running {
 		return nil // it was stopped before this run
 	}
@@ -843,21 +897,72 @@ func (a *applier) rollback() error {
 	return nil
 }
 
-// keepLoginPassword stores password as the DB secret when the config on disk
-// logs in as LeastPrivilegeLogin: its password in SQL Server is password, and
-// a restored older secret would lock the connector out.
-func keepLoginPassword(env Env, password string) error {
+// keepLoginPassword makes the daemon's DB secret the current password of the
+// login the config on disk uses, when this box knows it: that login's own key
+// (loginKey, kept out of every pre-image), else before — the secret in use
+// until now — when userBefore is the same login. A credential only moves
+// forward: SQL Server knows no older password, and a restored one would lock
+// the connector out.
+func keepLoginPassword(env Env, userBefore string, before []byte) error {
 	b, err := os.ReadFile(filepath.Join(env.Sys.DataDir(), configFile))
 	if err != nil {
 		return nil // no config: nothing logs in
 	}
 	cfg, err := config.Parse(b)
-	if err != nil || !strings.EqualFold(cfg.DB.User, LeastPrivilegeLogin) {
+	if err != nil {
 		return nil
 	}
-	if err := env.Sys.SecretSet(config.DBPasswordKey(cfg.ERP), []byte(password)); err != nil {
-		return fmt.Errorf("keep %s's current password: %w", LeastPrivilegeLogin, err)
+	pw := before
+	if !strings.EqualFold(cfg.DB.User, userBefore) {
+		pw = nil
 	}
+	if user := strings.ToLower(cfg.DB.User); loginNameRe.MatchString(user) {
+		if k, err := env.Sys.SecretGet(loginKey(user)); err == nil {
+			pw = k
+		}
+	}
+	if pw == nil {
+		return nil
+	}
+	if err := env.Sys.SecretSet(config.DBPasswordKey(cfg.ERP), pw); err != nil {
+		return fmt.Errorf("keep %s's current password: %w", cfg.DB.User, err)
+	}
+	return nil
+}
+
+// carryOrderCounter gives the order folder to a counter no lower than from's.
+// Run while the service is stopped, when a restore or a rollback takes the
+// connector back to an older sendOrderDir: moveOrderCounter copied the counter
+// and left the old file behind, so that folder's counter is stale, and
+// Hasavshevet must never get a number twice.
+func (a *applier) carryOrderCounter(from, to string) error {
+	if from == "" || to == "" || sameFolder(from, to) {
+		return nil
+	}
+	src := filepath.Join(from, orderNumberFile)
+	b, err := os.ReadFile(src)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", src, err)
+	}
+	n := lastOrderNumber(b)
+	if n < 0 {
+		return fmt.Errorf("%s holds no order counter", src)
+	}
+	dst := filepath.Join(to, orderNumberFile)
+	cur, err := os.ReadFile(dst)
+	switch {
+	case err == nil && lastOrderNumber(cur) >= n:
+		return nil
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("read %s: %w", dst, err)
+	}
+	if err := atomicfile.Write(dst, b, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	a.step("order_counter", true, fmt.Sprintf("carried to %s at %d", to, n))
 	return nil
 }
 

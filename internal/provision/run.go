@@ -41,20 +41,28 @@ Secrets travel on stdin only. The output is one JSON object; exit 0 ok, 1 refuse
 // Run runs one command and returns what to print and the exit code. Every
 // byte printed passes Redact over the secrets the input carried and the ones
 // born here.
-func Run(ctx context.Context, env Env, args []string, stdin io.Reader) ([]byte, int) {
+func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []byte, code int) {
 	if len(args) == 0 {
 		return []byte(Usage + "\n"), ExitUsage
 	}
 	cmd, rest := args[0], args[1:]
+	var secrets []string
+	defer func() {
+		// A panic answers like everything else: one envelope, redacted, since
+		// its text can quote what the run held.
+		if r := recover(); r != nil {
+			out, code = envelope(cmd, nil, refuse(CodeInternal, "run verify to see the box's state, and report it",
+				"provision stopped on an internal error: %v", r), secrets), ExitRefused
+		}
+	}()
 	env.ensureDefaults()
 	if u, ok := env.Sys.(interface{ Unsupported() error }); ok && cmd != "version" {
 		return envelope(cmd, nil, refuse(CodeUnsupported, "run it on the Windows machine the connector is installed on", "%v", u.Unsupported()), nil), ExitRefused
 	}
 
 	var (
-		result  any
-		err     error
-		secrets []string
+		result any
+		err    error
 	)
 	switch cmd {
 	case "version":
@@ -134,7 +142,7 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) ([]byte, 
 	if err != nil && !errors.As(err, &refusal) {
 		refusal = &Refusal{Code: "failed", Message: err.Error()}
 	}
-	code := ExitOK
+	code = ExitOK
 	if refusal != nil {
 		code = ExitRefused
 	}
@@ -205,5 +213,8 @@ func (e *Env) ensureDefaults() {
 	}
 	if e.ProofTimeout <= 0 {
 		e.ProofTimeout = d.ProofTimeout
+	}
+	if e.LookupIP == nil {
+		e.LookupIP = d.LookupIP
 	}
 }

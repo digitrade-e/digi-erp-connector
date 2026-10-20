@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
@@ -65,13 +64,12 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	if err := a.idle(ctx, "before the restore"); err != nil {
 		return res, err
 	}
-	// The login's current password, if what runs now logs in as it.
-	var loginPassword string
-	if strings.EqualFold(a.cur.DB.User, LeastPrivilegeLogin) {
-		if b, err := env.Sys.SecretGet(config.DBPasswordKey(a.cur.ERP)); err == nil {
-			loginPassword = string(b)
-			res.secrets = append(res.secrets, loginPassword)
-		}
+	// The DB secret in use now: a login both configs use keeps it
+	// (keepLoginPassword).
+	var current []byte
+	if b, err := env.Sys.SecretGet(config.DBPasswordKey(a.cur.ERP)); err == nil {
+		current = b
+		res.secrets = append(res.secrets, string(b))
 	}
 
 	if err := env.Sys.ProtectDataDir(); err != nil {
@@ -79,8 +77,8 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 			"the data directory could not be protected, so nothing was written: %v", err)
 	}
 	changed, err := putBack(env, p)
-	if err == nil && loginPassword != "" {
-		err = keepLoginPassword(env, loginPassword)
+	if err == nil {
+		err = keepLoginPassword(env, a.cur.DB.User, current)
 	}
 	a.step("restore", changed, "pre-image of "+p.m.Created.Format("2006-01-02 15:04:05Z"))
 	if err != nil {
@@ -103,15 +101,22 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	if err != nil || perr != nil {
 		return res, refuse(CodeConfigRefused, "fix config.yaml by hand", "the restored config.yaml does not read back")
 	}
-	if !a.running {
-		a.step("restart", false, "the service was stopped before the restore, and stays stopped")
-		return res, nil
-	}
 	if !changed {
 		a.step("restart", false, "nothing changed")
 		return res, nil
 	}
-	_ = env.Sys.StopService(ServiceName)
+	if a.running {
+		_ = env.Sys.StopService(ServiceName)
+	}
+	// Stopped: the order folder the restore leaves may have a stale counter.
+	if err := a.carryOrderCounter(a.cur.SendOrderDir, restored.SendOrderDir); err != nil {
+		return res, refuse(CodeOrderNumberConflict, "copy "+orderNumberFile+" to the restored order folder by hand, then start the service",
+			"the service is left stopped: %v", err)
+	}
+	if !a.running {
+		a.step("restart", false, "the service was stopped before the restore, and stays stopped")
+		return res, nil
+	}
 	if err := env.Sys.StartService(ServiceName); err != nil {
 		return res, refuse(CodeServiceFailed, "read server.log for why it stopped", "the service did not start on the restored config: %v", err)
 	}
@@ -122,5 +127,8 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 		return res, refuse(CodePortProofFailed, "read server.log", "%v", err)
 	}
 	res.Proof = proof
+	if proof.Health != "ok" {
+		a.warn("the connector answers but its database does not (/api/health: %s): the restored credential may be out of date", proof.Health)
+	}
 	return res, nil
 }

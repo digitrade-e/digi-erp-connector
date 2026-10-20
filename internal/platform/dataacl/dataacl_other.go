@@ -17,6 +17,9 @@ func ProtectFile(string) error { return nil }
 // FileTrusted is always true outside Windows.
 func FileTrusted(string) (bool, error) { return true, nil }
 
+// Writers has nobody to name off Windows.
+func Writers(string) ([]string, error) { return []string{}, nil }
+
 // OpenLog opens path for appending, creating it 0600.
 func OpenLog(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)

@@ -45,18 +45,21 @@ type System interface {
 	// ImporterCandidates lists has.exe files and BATs where Hasavshevet
 	// usually lives (C:\Hash*), for a human to choose from.
 	ImporterCandidates() ([]string, error)
+	// Writers names who besides the administrators can change what a file
+	// runs (dataacl.Writers); empty when nobody can.
+	Writers(path string) ([]string, error)
 }
 
 // Database is the SQL Server work provisioning does, as fixed operations.
 type Database interface {
 	Ping(ctx context.Context) error
 	EnsureProcedures(ctx context.Context) ([]hasavshevet.ProcedureResult, error)
-	// LoginExists reports whether LeastPrivilegeLogin is on the server.
-	LoginExists(ctx context.Context) (bool, error)
-	// EnsureLeastPrivilegeLogin creates LeastPrivilegeLogin (or sets its
-	// password and unlocks it), its user in database, and the read-only grants
-	// of scripts/sql/least-privilege-read-node.sql.
-	EnsureLeastPrivilegeLogin(ctx context.Context, database, password string) error
+	// LoginExists reports whether the login is on the server.
+	LoginExists(ctx context.Context, login string) (bool, error)
+	// EnsureLeastPrivilegeLogin creates the login (or sets its password and
+	// unlocks it), its user in database, and the read-only grants of
+	// scripts/sql/least-privilege-read-node.sql.
+	EnsureLeastPrivilegeLogin(ctx context.Context, login, database, password string) error
 	// Databases fingerprints the databases this login can open.
 	Databases(ctx context.Context) ([]DatabaseFact, error)
 	Close() error
@@ -184,6 +187,13 @@ type HostInfo struct {
 	PowerShell string   `json:"powershell,omitempty"`
 	Elevated   bool     `json:"elevated"`
 	Addresses  []string `json:"addresses,omitempty"`
+	// WinRMAnalytic: the WinRM Analytic log is on, and it records what
+	// crosses WinRM — a spec's secrets on stdin included.
+	WinRMAnalytic bool `json:"winrmAnalytic"`
+	// LocalAccountTokenFilterPolicy 1 gives a local administrator its full
+	// token over WinRM; 0 (the default) filters it, unless the account is a
+	// domain account (plan 068 §9 Q7).
+	LocalAccountTokenFilterPolicy int `json:"localAccountTokenFilterPolicy"`
 }
 
 // DomainController reports DomainRole 4 or 5.
@@ -212,6 +222,8 @@ type Env struct {
 	Sleep     func(time.Duration)
 	// ProofTimeout bounds the port proof after a restart.
 	ProofTimeout time.Duration
+	// LookupIP resolves a host name here, on the box (checkDBHost).
+	LookupIP func(ctx context.Context, host string) ([]net.IP, error)
 }
 
 // staleGrace: the daemon writes config.yaml itself just after its first start
@@ -246,6 +258,9 @@ func NewEnv(sys System) Env {
 		Now:          time.Now,
 		Sleep:        time.Sleep,
 		ProofTimeout: DefaultProofTimeout,
+		LookupIP: func(ctx context.Context, host string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip", host)
+		},
 	}
 }
 

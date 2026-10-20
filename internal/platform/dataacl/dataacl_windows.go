@@ -544,6 +544,105 @@ func ProtectFile(path string) error {
 	return write(path, n, t.childFile, false)
 }
 
+// fileDeleteChild is FILE_DELETE_CHILD, which golang.org/x/sys does not name.
+const fileDeleteChild = 0x40
+
+// fileWrite and dirWrite are the rights that let someone change what a file
+// runs: on the file, its content, its ACL or owner, or deleting it; on its
+// folder, adding an entry (FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY are the
+// bits of FILE_WRITE_DATA and FILE_APPEND_DATA — and cmd.exe looks in the
+// current folder first for a command a BAT names) or deleting one.
+const (
+	fileWrite = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | windows.WRITE_DAC |
+		windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL
+	dirWrite = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | fileDeleteChild | windows.WRITE_DAC |
+		windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL
+)
+
+// Writers names who, besides SYSTEM, the Administrators, TrustedInstaller and
+// this process's own account, can change what path runs: an owner outside
+// them, and every account an allow entry gives a write-class right on the
+// file (fileWrite) or on its folder (dirWrite). OWNER RIGHTS and CREATOR
+// OWNER are left out: the owner is judged itself, and CREATOR OWNER only
+// shapes what a folder's new entries inherit. The connector runs its
+// importer as LocalSystem for every order, so a file someone else can change
+// is their code run as SYSTEM (plan 068's panel, 2026-10-20). Empty: only the
+// administrators control it.
+func Writers(path string) ([]string, error) {
+	t, err := newTrust()
+	if err != nil {
+		return nil, err
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, o := range []struct {
+		path string
+		mask uint32
+	}{{path, fileWrite}, {filepath.Dir(path), dirWrite}} {
+		sd, err := windows.GetNamedSecurityInfo(longPath(o.path), windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			return nil, fmt.Errorf("dataacl: read the security of %s: %w", o.path, err)
+		}
+		owner, _, err := sd.Owner()
+		if err != nil {
+			return nil, fmt.Errorf("dataacl: read the owner of %s: %w", o.path, err)
+		}
+		who := []*windows.SID{owner} // an owner can always rewrite the DACL
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			return nil, fmt.Errorf("dataacl: read the DACL of %s: %w", o.path, err)
+		}
+		if dacl == nil { // no DACL at all: every right to everyone
+			if !seen["S-1-1-0"] {
+				seen["S-1-1-0"] = true
+				out = append(out, "Everyone (no DACL on "+o.path+")")
+			}
+			continue
+		}
+		for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(dacl, i, &ace); err != nil {
+				return nil, fmt.Errorf("dataacl: read entry %d of %s: %w", i, o.path, err)
+			}
+			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 ||
+				uint32(ace.Mask)&o.mask == 0 {
+				continue
+			}
+			who = append(who, (*windows.SID)(unsafe.Pointer(&ace.SidStart)))
+		}
+		for _, sid := range who {
+			s := sid.String()
+			switch s {
+			case "S-1-3-0", "S-1-3-4": // CREATOR OWNER, OWNER RIGHTS
+				continue
+			}
+			if seen[s] {
+				continue
+			}
+			if ok, _ := trustedOwner(s, t.tokenUser, t.admins, t.indirectFn); ok {
+				continue
+			}
+			seen[s] = true
+			out = append(out, accountName(sid))
+		}
+	}
+	return out, nil
+}
+
+// accountName is a SID as DOMAIN\name, or the SID itself when it names no
+// account.
+func accountName(sid *windows.SID) string {
+	account, domain, _, err := sid.LookupAccount("")
+	switch {
+	case err != nil:
+		return sid.String()
+	case domain == "":
+		return account
+	}
+	return domain + `\` + account
+}
+
 // FileTrusted reports whether path is a file this process may keep appending
 // to as it is: absent (it will be created fresh), or a single-link,
 // non-reparse file with a trusted owner and exactly the inherited DACL.

@@ -19,12 +19,19 @@ func secretFile(erp config.ERPType) string {
 	return filepath.Join("secrets", config.DBPasswordKey(erp)+".bin")
 }
 
+// loginKey is the secret store's key for a least-privilege login's password,
+// kept apart from the daemon's (secretFile) and out of every pre-image: a
+// restore or a rollback never takes it back, since SQL Server knows no older
+// password. So a box that restored a config without the login still holds it,
+// and the next apply keeps the login instead of taking it over.
+func loginKey(login string) string { return "login_" + login }
+
 // buildTarget is the config Apply writes: cur with the spec's fields set and
 // everything else — receipts, image folders, query limits, erpUser, the token
 // lifetime, the signing secret, and every optional spec field left out
 // (encrypt, trustServerCertificate, sendOrderDir, the importer) — as it was.
-// dbUser is the login the connector will use (LeastPrivilegeLogin, or the one
-// the client gave).
+// dbUser is the login the connector will use (the least-privilege login, or
+// the one the client gave).
 func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Config {
 	t := cur
 	t.ERP = config.ERPType(s.ERP)

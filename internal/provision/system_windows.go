@@ -139,10 +139,14 @@ func (winSystem) Host() (HostInfo, error) {
 	out, err := powershell(`
 $cs = Get-CimInstance -ClassName Win32_ComputerSystem
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
+$analytic = Get-WinEvent -ListLog 'Microsoft-Windows-WinRM/Analytic' -ErrorAction SilentlyContinue
+$uac = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue
 ConvertTo-Json -Compress -InputObject ([ordered]@{
   name = [string]$cs.Name; domain = [string]$cs.Domain; partOfDomain = [bool]$cs.PartOfDomain
   domainRole = [int]$cs.DomainRole; os = [string]$os.Caption; osVersion = [string]$os.Version
   powershell = $PSVersionTable.PSVersion.ToString()
+  winrmAnalytic = [bool]($analytic -and $analytic.IsEnabled)
+  localAccountTokenFilterPolicy = [int]$uac.LocalAccountTokenFilterPolicy
 })`, nil)
 	var h HostInfo
 	if err == nil {
@@ -171,6 +175,8 @@ func hostAddresses() []string {
 	}
 	return out
 }
+
+func (winSystem) Writers(path string) ([]string, error) { return dataacl.Writers(path) }
 
 func (winSystem) ImporterCandidates() ([]string, error) {
 	const max = 20

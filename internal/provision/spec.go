@@ -20,9 +20,11 @@ import (
 // connectordWindowsServiceName and the installer's ServiceName.
 const ServiceName = "digi-erp-connectord"
 
-// LeastPrivilegeLogin is the SQL login Apply creates when DB.LeastPrivilege is
-// set — the name scripts/sql/least-privilege-read-node.sql uses.
-const LeastPrivilegeLogin = "erp_connector_read"
+// DefaultLogin is the SQL login Apply creates when DB.LeastPrivilege is set
+// and DB.Login names none — the name scripts/sql/least-privilege-read-node.sql
+// uses. A server that serves two connectors needs one name per connector:
+// rotating a shared login locks the other connector out.
+const DefaultLogin = "erp_connector_read"
 
 // DefaultFirewallRule is the inbound rule's display name when the spec names
 // none.
@@ -82,15 +84,26 @@ type DBSpec struct {
 	// AllowSa keeps sa as the connector's own login. Without it (and without
 	// LeastPrivilege) sa is refused.
 	AllowSa bool `json:"allowSa,omitempty"`
-	// LeastPrivilege: User/Password are used once, to create
-	// LeastPrivilegeLogin with a password born here; the connector then logs
-	// in as that login and User's password is not stored.
+	// LeastPrivilege: User/Password are used once, to create the login Login
+	// names, with a password born here; the connector then logs in as that
+	// login and User's password is not stored.
 	LeastPrivilege bool `json:"leastPrivilege,omitempty"`
-	// RotateLogin lets Apply give LeastPrivilegeLogin a new password when it
-	// exists and either this connector does not use it (another connector or
-	// a person may) or its stored password no longer logs in. Without it
-	// Apply only creates the login, or keeps one that works.
+	// Login is the least-privilege login's name, erp_connector_<name>; empty
+	// is DefaultLogin.
+	Login string `json:"login,omitempty"`
+	// RotateLogin lets Apply give the login a new password when it exists and
+	// this box knows no password that logs in as it: another connector or a
+	// person may use it, or its password was changed. Without it Apply only
+	// creates the login, or keeps one that works.
 	RotateLogin bool `json:"rotateLogin,omitempty"`
+}
+
+// login is the least-privilege login's name.
+func (d DBSpec) login() string {
+	if d.Login == "" {
+		return DefaultLogin
+	}
+	return d.Login
 }
 
 // ImporterSpec is how Hasavshevet imports the order files: has.exe with a
@@ -100,6 +113,11 @@ type ImporterSpec struct {
 	HasExePath   string `json:"hasExePath,omitempty"`
 	HasParamFile string `json:"hasParamFile,omitempty"`
 	HasBatFile   string `json:"hasBatFile,omitempty"`
+	// AllowWritable accepts an importer that accounts besides the
+	// administrators can change (System.Writers): the connector runs it as
+	// LocalSystem, so it is their code run as SYSTEM. Set it only once a
+	// human has accepted that.
+	AllowWritable bool `json:"allowWritable,omitempty"`
 }
 
 // AuthSpec is the connector's one credential — what erp-manager and the
@@ -170,6 +188,11 @@ var (
 	sha256HexRe   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	dnsNameRe     = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 	importerModes = map[string]bool{"none": true, "hasExe": true, "bat": true}
+
+	// loginNameRe is a least-privilege login this tool creates: the prefix
+	// keeps it clear of SQL Server's own principals (public, dbo, guest), and
+	// the alphabet lets it stand in T-SQL between brackets.
+	loginNameRe = regexp.MustCompile(`^erp_connector_[a-z0-9_]{1,50}$`)
 )
 
 // Validate checks the whole spec before anything is touched. The first
@@ -254,12 +277,19 @@ func (s Spec) validateDB() *Refusal {
 		return refuse(CodeSpecInvalid, "send the login the client gave, and its password", "db.user or db.password is missing or not text")
 	}
 	if strings.EqualFold(strings.TrimSpace(d.User), "sa") && !d.AllowSa && !d.LeastPrivilege {
-		return refuse(CodeSaLogin, "set leastPrivilege (sa creates erp_connector_read once and is not stored), or allowSa",
+		return refuse(CodeSaLogin, "set leastPrivilege (sa creates a least-privilege login once and is not stored), or allowSa",
 			"db.user is sa: the connector would run every saved query as the server's administrator")
 	}
-	if d.LeastPrivilege && strings.EqualFold(strings.TrimSpace(d.User), LeastPrivilegeLogin) {
-		return refuse(CodeSpecInvalid, "send an administrator's login: it creates "+LeastPrivilegeLogin,
-			"db.user is %s itself: it cannot create its own login", LeastPrivilegeLogin)
+	if d.Login != "" && !d.LeastPrivilege {
+		return refuse(CodeSpecInvalid, "set leastPrivilege, or leave db.login out", "db.login names a login, but leastPrivilege is off")
+	}
+	if d.Login != "" && !loginNameRe.MatchString(d.Login) {
+		return refuse(CodeSpecInvalid, "use erp_connector_ followed by lower-case letters, digits or _",
+			"db.login %q is not a login this tool creates", d.Login)
+	}
+	if d.LeastPrivilege && strings.EqualFold(strings.TrimSpace(d.User), d.login()) {
+		return refuse(CodeSpecInvalid, "send an administrator's login: it creates "+d.login(),
+			"db.user is %s itself: it cannot create its own login", d.login())
 	}
 	return nil
 }

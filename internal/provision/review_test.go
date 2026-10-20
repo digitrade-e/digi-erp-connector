@@ -22,13 +22,13 @@ func leastPrivBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 	t.Helper()
 	sys, fdb, orders := handInstallBox(t)
 	cfg, _ := readConfig(t, sys.dir)
-	cfg.DB.Host, cfg.DB.Port, cfg.DB.User = `127.0.0.1\WIZSOFT`, 0, LeastPrivilegeLogin
+	cfg.DB.Host, cfg.DB.Port, cfg.DB.User = `127.0.0.1\WIZSOFT`, 0, DefaultLogin
 	writeConfig(t, sys.dir, cfg)
 	if err := sys.SecretSet(config.DBPasswordKey(cfg.ERP), []byte("Stored0password0nobody0takes")); err != nil {
 		t.Fatal(err)
 	}
 	sys.calls = nil
-	fdb.loginExists, fdb.loginPass = true, "TheServer0has0another0one0now"
+	fdb.setLogin(DefaultLogin, "TheServer0has0another0one0now")
 	return sys, fdb, orders
 }
 
@@ -56,7 +56,7 @@ func TestReview_ALoginIsRotatedOnlyWhenAskedAndARollbackKeepsItsPassword(t *test
 		t.Error("config.yaml is not the run's pre-image")
 	}
 	stored, _ := sys.SecretGet(config.DBPasswordKey(config.ERPHasavshevet))
-	if string(stored) != fdb.loginPass {
+	if pw, _ := fdb.login(DefaultLogin); string(stored) != pw {
 		t.Error("after the rollback the stored password is not the one SQL Server has")
 	}
 }
@@ -65,12 +65,12 @@ func TestReview_ALoginIsRotatedOnlyWhenAskedAndARollbackKeepsItsPassword(t *test
 // this connector does not use it.
 func TestReview_AnExistingLoginThisConnectorDoesNotUseIsLeftAlone(t *testing.T) {
 	sys, fdb, orders := handInstallBox(t)
-	fdb.loginExists, fdb.loginPass = true, "Another0connector0uses0this0one"
+	fdb.setLogin(DefaultLogin, "Another0connector0uses0this0one")
 	_, before := readConfig(t, sys.dir)
 
 	_, err := Apply(context.Background(), testEnv(sys, fdb), handInstallSpec(orders))
 	r := wantRefusal(t, err, CodeLeastPrivilege)
-	if !strings.Contains(r.Message, "does not use it") || fdb.loginCalls != 0 {
+	if !strings.Contains(r.Message, "does not know its password") || fdb.loginCalls != 0 {
 		t.Errorf("refusal %q, login calls %d", r.Message, fdb.loginCalls)
 	}
 	assertUntouched(t, sys, before)
@@ -295,21 +295,21 @@ func TestReview_RestoreKeepsTheLoginsCurrentPassword(t *testing.T) {
 	if _, err := Apply(context.Background(), env, handInstallSpec(orders)); err != nil {
 		t.Fatal(err)
 	}
-	fdb.loginPass = "Changed0on0the0server0meanwhile" // the stored one no longer logs in
+	fdb.setLogin(DefaultLogin, "Changed0on0the0server0meanwhile") // the stored one no longer logs in
 	spec := handInstallSpec(orders)
 	spec.ChangeSet, spec.DB.RotateLogin = "cs-erp01-0002", true
 	spec.Firewall.AllowFrom = []string{"198.51.100.241", "198.51.100.120"}
 	if _, err := Apply(context.Background(), env, spec); err != nil {
 		t.Fatalf("second change set: %v", err)
 	}
-	latest := fdb.loginPass
+	latest, _ := fdb.login(DefaultLogin)
 
 	if _, err := Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-erp01-0002"}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	cfg, _ := readConfig(t, sys.dir)
 	stored, _ := sys.SecretGet(config.DBPasswordKey(cfg.ERP))
-	if cfg.DB.User != LeastPrivilegeLogin || string(stored) != latest {
+	if cfg.DB.User != DefaultLogin || string(stored) != latest {
 		t.Errorf("user %s; the stored password is not the login's current one", cfg.DB.User)
 	}
 }

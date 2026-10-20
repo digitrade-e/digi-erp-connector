@@ -69,6 +69,13 @@ func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error)
 			add("dependency", slices.ContainsFunc(svc.Dependencies, func(d string) bool { return strings.EqualFold(d, dep) }),
 				"depends on %s", dep)
 		}
+		// A named instance on this machine reached without a port: the
+		// Browser answers for it, after every reboot too.
+		if server, instance := db.SplitInstance(cfg.DB.Host); isLocalHost(server) && instance != "" && cfg.DB.Port == 0 {
+			b, err := env.Sys.Service("SQLBrowser")
+			add("browser", err == nil && b.Installed && b.State == "running" && b.StartType == "auto",
+				"SQL Server Browser: %s, starts %s", orUnknown(b.State), orUnknown(b.StartType))
+		}
 	}
 
 	host, _, _ := net.SplitHostPort(cfg.APIListen)
@@ -121,6 +128,13 @@ func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error)
 		res.OK = res.OK && c.OK
 	}
 	return res, nil
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 // sqlDependency is the SQL Server service a connector whose database is on

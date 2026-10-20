@@ -46,4 +46,7 @@ const (
 	CodeFirewallForeign     = "firewall_foreign"
 	CodeOrderNumberConflict = "order_number_conflict"
 	CodeBusy                = "busy"
+	CodeDBHostPublic        = "db_host_public"
+	CodeImporterWritable    = "importer_writable"
+	CodeInternal            = "internal_error"
 )

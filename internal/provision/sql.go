@@ -15,17 +15,21 @@ import (
 // leastPrivilegeBatches is scripts/sql/least-privilege-read-node.sql made
 // runnable by a program: no GO, no USE — the connection's database is the
 // target (the DSN sets it), and each database-scoped batch first checks it —
-// with the database name and the password filled in. Neither can carry SQL:
-// the name passes hasavshevet.IsSafeDBName and the password is NewSQLPassword's
-// alphabet, both checked again here.
-func leastPrivilegeBatches(database, password string) ([]string, error) {
+// with the login, the database name and the password filled in. None can
+// carry SQL: the login matches loginNameRe, the name passes
+// hasavshevet.IsSafeDBName and the password is NewSQLPassword's alphabet, all
+// checked again here.
+func leastPrivilegeBatches(login, database, password string) ([]string, error) {
+	if !loginNameRe.MatchString(login) {
+		return nil, fmt.Errorf("login name %q is not safe to write into SQL", login)
+	}
 	if !hasavshevet.IsSafeDBName(database) {
 		return nil, fmt.Errorf("database name %q is not safe to write into SQL", database)
 	}
 	if password == "" || strings.Trim(password, sqlPasswordAlphabet) != "" {
 		return nil, errors.New("the login's password is not from the generated alphabet")
 	}
-	l := LeastPrivilegeLogin
+	l := login
 	inDB := fmt.Sprintf("IF DB_NAME() <> N'%s' THROW 51000, N'digi-erp-connector-provision: connected to the wrong database', 1;\n", database)
 	return []string{
 		// 1. The login: created with the password, or given it. CHECK_POLICY
@@ -98,13 +102,13 @@ func (s sqlDatabase) EnsureProcedures(ctx context.Context) ([]hasavshevet.Proced
 	return hasavshevet.EnsureProcedures(ctx, s.conn)
 }
 
-func (s sqlDatabase) LoginExists(ctx context.Context) (bool, error) {
-	names, err := scanNames(ctx, s.conn, `SELECT name FROM sys.server_principals WHERE name = @p1`, LeastPrivilegeLogin)
+func (s sqlDatabase) LoginExists(ctx context.Context, login string) (bool, error) {
+	names, err := scanNames(ctx, s.conn, `SELECT name FROM sys.server_principals WHERE name = @p1`, login)
 	return len(names) > 0, err
 }
 
-func (s sqlDatabase) EnsureLeastPrivilegeLogin(ctx context.Context, database, password string) error {
-	batches, err := leastPrivilegeBatches(database, password)
+func (s sqlDatabase) EnsureLeastPrivilegeLogin(ctx context.Context, login, database, password string) error {
+	batches, err := leastPrivilegeBatches(login, database, password)
 	if err != nil {
 		return err
 	}
