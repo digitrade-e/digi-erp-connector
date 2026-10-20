@@ -135,6 +135,9 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	mux.Handle("GET /api/folders/list", wrap(folderFilesHandler))
 	mux.Handle("POST /api/file", wrap(fileHandler))
 	mux.Handle("POST /api/sendOrder", wrap(sendOrderHandler))
+	// How many accepted orders are not written yet: asked before a restart,
+	// which would drop them (the queue is in memory).
+	mux.Handle("GET /api/sendOrder", wrap(handlers.NewSendOrderQueueHandler(deps.SendOrderQueue)))
 	mux.Handle("GET /api/sendOrder/{jobId}", wrap(sendOrderStatusHandler))
 	// Synchronous, unlike sendOrder: the caller needs the receipt number. It
 	// extends its own write deadline to handlers.ReceiptWriteDeadline.

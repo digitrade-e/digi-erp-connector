@@ -158,6 +158,25 @@ func (q *OrderQueue) forget(jobID string) {
 // Pending is the number of orders accepted but not yet started.
 func (q *OrderQueue) Pending() int { return len(q.ch) }
 
+// Unfinished counts the orders accepted (202) and not written yet, by state:
+// queued — which includes one the worker has taken off the channel and is
+// still waiting to import (lockImport), so Pending would no longer count it —
+// and running. A restart is safe only when both are 0 (GET /api/sendOrder):
+// the queue lives in memory.
+func (q *OrderQueue) Unfinished() (queued, running int) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	for _, r := range q.jobs {
+		switch r.Status {
+		case JobStatusQueued:
+			queued++
+		case JobStatusRunning:
+			running++
+		}
+	}
+	return queued, running
+}
+
 // reserveJobIdentity reserves the next order number when available and uses it
 // as the externally visible job ID (for backward compatibility with clients
 // that expect sendOrder's jobId to carry the Hasavshevet order number).
