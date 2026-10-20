@@ -943,6 +943,21 @@ func TestProtectTree_RefusesAnEntrySwappedBeforeTheClaim(t *testing.T) {
 	}
 }
 
+// rendered is sddl as the OS prints it back (SY, BA, OW aliases), the form
+// the walk compares.
+func rendered(t *testing.T, sddl func(account string, container bool) (string, error), container bool) string {
+	t.Helper()
+	text, err := sddl("", container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
+}
+
 // The b4l write node (192.168.0.7), 2026-10-20: the first start after the
 // upgrade to 1.0.19 wrote the directory's DACL and then made SYSTEM its owner.
 // Every start after that found the directory and every file created since
@@ -965,10 +980,7 @@ func TestProtectTree_SteadyAfterTheOwnerBecomesSystem(t *testing.T) {
 	}
 	root, _ := daclOf(t, dir)
 	t.Logf("the directory after the owner change: %s", root)
-	want, err := SDDL("", true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	want := rendered(t, SDDL, true)
 	if !sameDACL(root, want) {
 		t.Errorf("the directory's DACL after the owner change is %s; want %s", root, want)
 	}
@@ -977,10 +989,7 @@ func TestProtectTree_SteadyAfterTheOwnerBecomesSystem(t *testing.T) {
 	later := filepath.Join(dir, "server.log")
 	mkfile(t, later)
 	got, _ := daclOf(t, later)
-	child, err := ChildSDDL("", false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	child := rendered(t, ChildSDDL, false)
 	if !sameDACL(got, child) {
 		t.Errorf("a file created after the walk carries %s; want %s", got, child)
 	}
@@ -1008,10 +1017,7 @@ func TestProtectTree_SteadyAfterAClaim(t *testing.T) {
 	later := filepath.Join(dir, "ui.log")
 	mkfile(t, later)
 	got, _ := daclOf(t, later)
-	child, err := ChildSDDL("", false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	child := rendered(t, ChildSDDL, false)
 	if !sameDACL(got, child) {
 		t.Errorf("a file created after the claim carries %s; want %s", got, child)
 	}
