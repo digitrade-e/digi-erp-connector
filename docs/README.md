@@ -10,6 +10,7 @@
 | register or change a SQL query | [saved-queries.md](saved-queries.md) |
 | install, upgrade or roll back a customer machine | [operations.md](operations.md) |
 | configure a machine (every key explained) | [configuration.md](configuration.md) |
+| configure a machine without the GUI (what digi-mcp runs over WinRM) | [provisioning.md](provisioning.md) |
 | work out why something is broken | [troubleshooting.md](troubleshooting.md) |
 | change the code | [development.md](development.md) + [../CLAUDE.md](../CLAUDE.md) |
 | know what the backend needs back before a release can ship | [connector-adaptation-plan.md](connector-adaptation-plan.md) |
@@ -44,6 +45,7 @@
 **Running it**
 
 - [operations.md](operations.md) — install, upgrade, rollback, service hardening, verification
+- [provisioning.md](provisioning.md) — `digi-erp-connector-provision.exe`: discover, apply a spec, verify, restore — headless, JSON in and out
 - [deployment-topologies.md](deployment-topologies.md) — single node, or a split read/write pair when the database and the import folder are on different servers
 - [troubleshooting.md](troubleshooting.md) — symptom → cause → fix, and where the logs are
 - [autostart.md](autostart.md) — Windows service registration
