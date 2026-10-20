@@ -351,8 +351,9 @@ func assertUntouched(t *testing.T, sys *fakeSys, before []byte) {
 	if _, after := readConfig(t, sys.dir); !bytes.Equal(before, after) {
 		t.Error("config.yaml changed")
 	}
-	if _, err := os.Stat(filepath.Join(sys.dir, "provision")); err == nil {
-		t.Error("a pre-image was written")
+	// The lock file may be there; no pre-image may.
+	if all, _ := listPreimages(sys.dir); len(all) != 0 {
+		t.Errorf("a pre-image was written: %v", all)
 	}
 	for _, c := range sys.calls {
 		t.Errorf("called %s", c)

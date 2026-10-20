@@ -16,6 +16,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
@@ -40,9 +41,9 @@ type ServerDeps struct {
 	ReceiptWriter handlers.ReceiptWriter
 }
 
-// CheckConfig makes every startup check NewServer makes on the config alone:
-// the listen address, the credential, the receipt keys and a loadable TLS
-// pair. A writer of config.yaml (digi-erp-connector-provision) passes it
+// CheckConfig makes every startup check the daemon makes on the config alone:
+// the listen address, the credential, the receipt keys, a database setting
+// OpenLazy accepts, and a loadable TLS pair. A writer of config.yaml (digi-erp-connector-provision) passes it
 // before it writes, so it never leaves a box holding a config its own service
 // will not start on — the rule the GUI's save follows. auth.secret is not
 // checked: the daemon generates it when it is empty.
@@ -54,6 +55,9 @@ func CheckConfig(cfg config.Config) error {
 		return err
 	}
 	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return err
+	}
+	if err := db.Check(cfg); err != nil {
 		return err
 	}
 	_, err := buildTLSConfig(cfg.TLS)

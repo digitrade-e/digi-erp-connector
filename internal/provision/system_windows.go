@@ -91,6 +91,7 @@ $out = foreach ($r in @(Get-NetFirewallRule -DisplayName $env:DIGI_RULE -ErrorAc
     protocol = [string]$pf.Protocol
     localPort = @($pf.LocalPort | ForEach-Object { [string]$_ })
     remoteAddress = @($af.RemoteAddress | ForEach-Object { [string]$_ })
+    group = [string]$r.Group
   }
 }
 ConvertTo-Json -Compress -Depth 4 -InputObject @($out)`, map[string]string{"DIGI_RULE": name})
@@ -110,12 +111,15 @@ func (winSystem) SetFirewallRule(rule FirewallRule) error {
 		enabled = "1"
 	}
 	_, err := powershell(`
-Remove-NetFirewallRule -DisplayName $env:DIGI_RULE -ErrorAction SilentlyContinue
+$theirs = @(Get-NetFirewallRule -DisplayName $env:DIGI_RULE -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $env:DIGI_GROUP })
+if ($theirs.Count -gt 0) { throw "a rule of this name was not made by digi-erp-connector-provision" }
+Get-NetFirewallRule -DisplayName $env:DIGI_RULE -ErrorAction SilentlyContinue | Where-Object { $_.Group -eq $env:DIGI_GROUP } | Remove-NetFirewallRule
 $remote = @($env:DIGI_REMOTE -split ',' | Where-Object { $_ -ne '' })
 if ($remote.Count -eq 0) { $remote = @('Any') }
 $state = 'False'; if ($env:DIGI_ENABLED -eq '1') { $state = 'True' }
-New-NetFirewallRule -DisplayName $env:DIGI_RULE -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([int]$env:DIGI_PORT) -RemoteAddress $remote -Profile Any -Enabled $state | Out-Null
+New-NetFirewallRule -DisplayName $env:DIGI_RULE -Group $env:DIGI_GROUP -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([int]$env:DIGI_PORT) -RemoteAddress $remote -Profile Any -Enabled $state | Out-Null
 '{}'`, map[string]string{
+		"DIGI_GROUP":   firewallGroup,
 		"DIGI_RULE":    rule.Name,
 		"DIGI_PORT":    fmt.Sprint(rule.Port),
 		"DIGI_REMOTE":  strings.Join(canonicalSources(rule.RemoteAddress), ","),
@@ -126,8 +130,8 @@ New-NetFirewallRule -DisplayName $env:DIGI_RULE -Direction Inbound -Action Allow
 
 func (winSystem) RemoveFirewallRule(name string) error {
 	_, err := powershell(`
-Remove-NetFirewallRule -DisplayName $env:DIGI_RULE -ErrorAction SilentlyContinue
-'{}'`, map[string]string{"DIGI_RULE": name})
+Get-NetFirewallRule -DisplayName $env:DIGI_RULE -ErrorAction SilentlyContinue | Where-Object { $_.Group -eq $env:DIGI_GROUP } | Remove-NetFirewallRule
+'{}'`, map[string]string{"DIGI_RULE": name, "DIGI_GROUP": firewallGroup})
 	return err
 }
 

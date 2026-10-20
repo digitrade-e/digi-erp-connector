@@ -70,6 +70,11 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 	// may have no database of its own, and refusing to save left such a node
 	// impossible to configure at all. Whether orders can actually be built is
 	// decided at request time, where the missing piece can be named precisely.
+	// But a database setting the daemon cannot use at all — a host that is not
+	// a host — stops it starting, so it is refused here too.
+	if err := db.Check(cfg); err != nil {
+		return config.Config{}, "", fmt.Errorf("database: %w", err)
+	}
 
 	folders := make([]string, 0, len(f.folderEdits))
 	for _, edit := range f.folderEdits {

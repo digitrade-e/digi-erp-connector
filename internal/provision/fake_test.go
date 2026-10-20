@@ -198,8 +198,10 @@ func (s *fakeSys) FirewallRule(name string) (*FirewallRule, error) {
 	return nil, nil
 }
 
+// SetFirewallRule tags the rule as the real one does (its group).
 func (s *fakeSys) SetFirewallRule(r FirewallRule) error {
 	s.call("rule:" + r.Name)
+	r.Ours = true
 	s.rules[r.Name] = r
 	return nil
 }
@@ -220,13 +222,14 @@ func (s *fakeSys) ImporterCandidates() ([]string, error) {
 // fakeDB records what provisioning asked SQL Server to do. A login opens
 // only with the password it was last given (sa's is saPass).
 type fakeDB struct {
-	mu         sync.Mutex
-	saPass     string
-	loginPass  string // erp_connector_read's, once created
-	procsMade  bool
-	opened     []string // user names
-	loginCalls int
-	databases  []DatabaseFact
+	mu          sync.Mutex
+	saPass      string
+	loginPass   string // erp_connector_read's, once created
+	loginExists bool   // the login is on the server already (the hand script made it)
+	procsMade   bool
+	opened      []string // user names
+	loginCalls  int
+	databases   []DatabaseFact
 }
 
 type fakeConn struct{ db *fakeDB }
@@ -253,6 +256,11 @@ func (c fakeConn) EnsureProcedures(context.Context) ([]hasavshevet.ProcedureResu
 	made := !c.db.procsMade
 	c.db.procsMade = true
 	return []hasavshevet.ProcedureResult{{Name: "GPRICE_Bulk", Created: made}, {Name: "GetOnHandStockForSkus", Created: made}}, nil
+}
+func (c fakeConn) LoginExists(context.Context) (bool, error) {
+	c.db.mu.Lock()
+	defer c.db.mu.Unlock()
+	return c.db.loginExists || c.db.loginPass != "", nil
 }
 func (c fakeConn) EnsureLeastPrivilegeLogin(_ context.Context, database, password string) error {
 	c.db.mu.Lock()
@@ -346,7 +354,7 @@ func handInstallSpec(sendOrderDir string) Spec {
 			Host: `127.0.0.1\WIZSOFT`, Database: "erp_db",
 			User: "sa", Password: testSaPass, LeastPrivilege: true,
 		},
-		SendOrderDir: sendOrderDir,
+		SendOrderDir: &sendOrderDir,
 		Importer:     &ImporterSpec{Mode: "none"},
 		Auth:         AuthSpec{Username: "digi-hub", Password: testAuthPass},
 		Firewall:     &FirewallSpec{AllowFrom: []string{"198.51.100.241"}},

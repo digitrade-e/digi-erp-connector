@@ -5,10 +5,12 @@ import (
 	"testing"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/db"
 )
 
-// CheckConfig refuses what NewServer refuses on the config alone, so a writer
-// that passes it never leaves a config the daemon will not start on.
+// CheckConfig refuses what the daemon refuses at its start — NewServer, or
+// db.OpenLazy before it — so a writer that passes it never leaves a config
+// the daemon will not start on.
 func TestCheckConfigRefusesWhatNewServerRefuses(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -36,6 +38,16 @@ func TestCheckConfigRefusesWhatNewServerRefuses(t *testing.T) {
 				t.Fatal("NewServer accepted it: the two checks drifted apart")
 			}
 		})
+	}
+
+	// The database is refused before NewServer, by the daemon's OpenLazy.
+	cfg := authConfig(t)
+	cfg.DB.Host, cfg.DB.Port, cfg.DB.User = "my host", 1433, "sa"
+	if err := CheckConfig(cfg); err == nil {
+		t.Error("CheckConfig accepted a db.host that is not a host")
+	}
+	if _, err := db.OpenLazy(cfg, "pw", db.DefaultOptions()); err == nil {
+		t.Error("OpenLazy accepted it: the two checks drifted apart")
 	}
 }
 

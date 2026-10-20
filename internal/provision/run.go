@@ -1,7 +1,6 @@
 package provision
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,6 +74,9 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) ([]byte, 
 		}
 		if in.DB != nil {
 			secrets = append(secrets, in.DB.Password)
+			if r := in.DB.Validate(); r != nil {
+				return envelope(cmd, nil, r, secrets), ExitRefused
+			}
 		}
 		result, err = Discover(ctx, env, in)
 	case "apply":
@@ -90,7 +92,7 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) ([]byte, 
 		res, err = Apply(ctx, env, spec)
 		result = res
 		if res != nil {
-			secrets = append(secrets, res.generated...)
+			secrets = append(secrets, res.secrets...)
 		}
 	case "verify":
 		var in VerifyInput
@@ -119,7 +121,12 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) ([]byte, 
 				in.ChangeSet = a
 			}
 		}
-		result, err = Restore(ctx, env, in)
+		var res *ApplyResult
+		res, err = Restore(ctx, env, in)
+		result = res
+		if res != nil {
+			secrets = append(secrets, res.secrets...)
+		}
 	default:
 		return []byte(Usage + "\n"), ExitUsage
 	}
@@ -164,16 +171,18 @@ func failedChecks(res *VerifyResult) int {
 	return n
 }
 
+// envelope encodes the one object a command prints, redacted inside its
+// strings (redactJSON).
 func envelope(cmd string, result any, refusal *Refusal, secrets []string) []byte {
 	e := Envelope{Command: cmd, OK: refusal == nil, Tool: buildinfo.Version, Refusal: refusal, Result: result}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(e); err != nil {
-		buf.Reset()
-		fmt.Fprintf(&buf, `{"command":%q,"ok":false,"refusal":{"code":"failed","message":"the result does not encode"}}`+"\n", cmd)
+	raw, err := json.Marshal(e)
+	if err == nil {
+		var out []byte
+		if out, err = redactJSON(raw, secrets...); err == nil {
+			return out
+		}
 	}
-	return Redact(buf.Bytes(), secrets...)
+	return []byte(fmt.Sprintf(`{"command":%q,"ok":false,"refusal":{"code":"failed","message":"the result does not encode"}}`+"\n", cmd))
 }
 
 // ensureDefaults fills what a caller left out with the real box's.

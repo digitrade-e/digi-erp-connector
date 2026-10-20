@@ -33,7 +33,7 @@ func leastPrivilegeBatches(database, password string) ([]string, error) {
 		fmt.Sprintf(`IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'%[1]s')
     CREATE LOGIN [%[1]s] WITH PASSWORD = N'%[2]s', CHECK_POLICY = ON, DEFAULT_DATABASE = [%[3]s];
 ELSE
-    ALTER LOGIN [%[1]s] WITH PASSWORD = N'%[2]s';
+    ALTER LOGIN [%[1]s] WITH PASSWORD = N'%[2]s' UNLOCK;
 ALTER LOGIN [%[1]s] ENABLE;`, l, password, database),
 		// 2. The database user, mapped to the login again when it outlived an
 		// earlier login of the same name.
@@ -96,6 +96,11 @@ func (s sqlDatabase) Close() error { return s.conn.Close() }
 
 func (s sqlDatabase) EnsureProcedures(ctx context.Context) ([]hasavshevet.ProcedureResult, error) {
 	return hasavshevet.EnsureProcedures(ctx, s.conn)
+}
+
+func (s sqlDatabase) LoginExists(ctx context.Context) (bool, error) {
+	names, err := scanNames(ctx, s.conn, `SELECT name FROM sys.server_principals WHERE name = @p1`, LeastPrivilegeLogin)
+	return len(names) > 0, err
 }
 
 func (s sqlDatabase) EnsureLeastPrivilegeLogin(ctx context.Context, database, password string) error {

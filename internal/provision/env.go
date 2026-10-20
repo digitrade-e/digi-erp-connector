@@ -51,9 +51,11 @@ type System interface {
 type Database interface {
 	Ping(ctx context.Context) error
 	EnsureProcedures(ctx context.Context) ([]hasavshevet.ProcedureResult, error)
+	// LoginExists reports whether LeastPrivilegeLogin is on the server.
+	LoginExists(ctx context.Context) (bool, error)
 	// EnsureLeastPrivilegeLogin creates LeastPrivilegeLogin (or sets its
-	// password), its user in database, and the read-only grants of
-	// scripts/sql/least-privilege-read-node.sql.
+	// password and unlocks it), its user in database, and the read-only grants
+	// of scripts/sql/least-privilege-read-node.sql.
 	EnsureLeastPrivilegeLogin(ctx context.Context, database, password string) error
 	// Databases fingerprints the databases this login can open.
 	Databases(ctx context.Context) ([]DatabaseFact, error)
@@ -71,6 +73,10 @@ type FirewallProfiles struct {
 // perimeter is the only gate.
 func (p FirewallProfiles) AllOff() bool { return !p.Domain && !p.Private && !p.Public }
 
+// firewallGroup tags the rules provisioning creates. A rule of the same name
+// without it is the client's: it is never changed or removed.
+const firewallGroup = "digi-erp-connector"
+
 // FirewallRule is an inbound TCP allow rule on one port.
 type FirewallRule struct {
 	Name    string `json:"name"`
@@ -79,11 +85,15 @@ type FirewallRule struct {
 	// RemoteAddress is canonical (a.b.c.d or a.b.c.d/nn) and sorted; empty
 	// means any source.
 	RemoteAddress []string `json:"remoteAddress"`
+	// Ours: every rule of this name carries firewallGroup. Only such a rule is
+	// replaced or removed, and its fields are all there is to it, so a
+	// pre-image re-creates it exactly.
+	Ours bool `json:"ours"`
 }
 
 // Same reports whether two rules let the same traffic in.
 func (r FirewallRule) Same(o FirewallRule) bool {
-	return r.Name == o.Name && r.Enabled == o.Enabled && r.Port == o.Port &&
+	return r.Name == o.Name && r.Ours == o.Ours && r.Enabled == o.Enabled && r.Port == o.Port &&
 		slices.Equal(canonicalSources(r.RemoteAddress), canonicalSources(o.RemoteAddress))
 }
 

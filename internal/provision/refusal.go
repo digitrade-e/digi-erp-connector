@@ -43,4 +43,7 @@ const (
 	CodePortProofFailed     = "port_proof_failed"
 	CodePreimageMissing     = "preimage_missing"
 	CodeUnsupported         = "unsupported_os"
+	CodeFirewallForeign     = "firewall_foreign"
+	CodeOrderNumberConflict = "order_number_conflict"
+	CodeBusy                = "busy"
 )

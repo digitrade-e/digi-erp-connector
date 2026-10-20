@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,13 +23,14 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
 )
 
 // ApplyResult is what Apply did. It never carries a secret.
 type ApplyResult struct {
 	ChangeSet string `json:"changeSet"`
-	// PreimageCaptured is false when this change set already had a pre-image
-	// (a re-run): the one from before its first run is kept.
+	// PreimageCaptured: this run took the change set's pre-image (its first
+	// run that changed something). A re-run keeps the first one.
 	PreimageCaptured bool     `json:"preimageCaptured"`
 	Steps            []Step   `json:"steps"`
 	Restarted        bool     `json:"restarted"`
@@ -35,7 +38,7 @@ type ApplyResult struct {
 	RolledBack       bool     `json:"rolledBack,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
 
-	generated []string // passwords born here, for Redact; never marshalled
+	secrets []string // seen or born here, for Redact; never marshalled
 }
 
 // Step is one part of the change: whether it changed anything.
@@ -53,16 +56,44 @@ type Proof struct {
 	Seconds float64 `json:"seconds"`
 }
 
-// Apply makes the connector match s (see the package doc). On a refusal the
-// result says what had been done; nothing is written before every check has
-// passed, and a failed port proof puts the pre-image back.
+// orderNumberFile is the order counter, kept in sendOrderDir
+// (hasavshevet.OrderNumberStore). A missing one starts again at 1.
+const orderNumberFile = "lastOrderNumber.json"
+
+// Apply makes the connector match s (see the package doc). Nothing is written
+// before every check has passed; a failure after the first write puts this
+// run's pre-image back.
 func Apply(ctx context.Context, env Env, s Spec) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
 	if r := s.Validate(); r != nil {
 		return res, r
 	}
 	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res}
-	return res, a.run(ctx)
+	unlock, err := lockRuns(a.dir)
+	if err != nil {
+		return res, err
+	}
+	defer unlock()
+	err = a.run(ctx)
+	a.settle()
+	return res, err
+}
+
+// lockRuns holds provision\.lock for one run: two at once — a WinRM retry
+// over a run still restarting the service — would interleave the login's
+// password and the stored secret.
+func lockRuns(dataDir string) (func(), error) {
+	if err := os.MkdirAll(provisionDir(dataDir), 0o700); err != nil {
+		return nil, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "create the provision folder: %v", err)
+	}
+	held, err := filelock.Lock(filepath.Join(provisionDir(dataDir), ".lock"))
+	if errors.Is(err, filelock.ErrLocked) {
+		return nil, refuse(CodeBusy, "wait for the other run to finish", "another provisioning run is in progress on this machine")
+	}
+	if err != nil {
+		return nil, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "lock the provision folder: %v", err)
+	}
+	return func() { _ = held.Unlock() }, nil
 }
 
 type applier struct {
@@ -77,14 +108,24 @@ type applier struct {
 	svc      autostart.ServiceInfo
 	tgt      config.Config
 
+	running    bool          // the service ran before this run
+	fwBefore   *FirewallRule // the rule of the spec's name before this run (ours, or none)
+	loginPlan  string        // given | keep | create | rotate
+	moveOrders bool          // carry lastOrderNumber.json to the new sendOrderDir at the restart
+
 	dbPassword string // what the connector will log in to SQL with
+	rotated    bool   // this run set the least-privilege login's password in SQL Server
 	restart    bool   // the config, the secret or the TLS pair changed
-	captured   bool   // a pre-image exists: a failure from here on can be rolled back
-	stopped    bool   // this run stopped the service: a rollback starts it again
+	captured   bool   // this run's pre-image exists: a failure from here on is rolled back
+	wrote      bool   // something on the box changed
+	touched    bool   // this run stopped (or started) the service
 }
 
 func (a *applier) step(name string, changed bool, detail string) {
 	a.res.Steps = append(a.res.Steps, Step{Name: name, Changed: changed, Detail: detail})
+	if changed {
+		a.wrote = true
+	}
 }
 
 func (a *applier) warn(format string, args ...any) {
@@ -115,8 +156,10 @@ func (a *applier) run(ctx context.Context) error {
 	if err := api.CheckConfig(check); err != nil {
 		return refuse(CodeConfigRefused, "fix the spec: the connector would refuse to start on this config", "%v", err)
 	}
-	if err := a.checkFilesExist(); err != nil {
-		return err
+	for _, f := range []func() error{a.checkImporterStated, a.checkFilesExist, a.checkOrderNumbers, a.checkFirewallOwner} {
+		if err := f(); err != nil {
+			return err
+		}
 	}
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
@@ -126,6 +169,9 @@ func (a *applier) run(ctx context.Context) error {
 		return err
 	}
 	defer admin.Close()
+	if err := a.planLogin(ctx, admin); err != nil {
+		return err
+	}
 
 	// The DACL first: the pre-image copies config.yaml — credential in clear —
 	// into the data directory, so it lands only in a tree the walk accepted.
@@ -136,60 +182,80 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.capture(); err != nil {
 		return err
 	}
-
-	for _, f := range []func(context.Context, Database) error{a.procedures, a.login} {
+	for _, f := range []func(context.Context, Database) error{a.procedures, a.applyLogin} {
 		if err := f(ctx, admin); err != nil {
-			return err
+			return a.fail(err)
 		}
 	}
 	for _, f := range []func() error{a.writeTLS, a.writeSecret, a.writeConfig, a.firewall, a.service} {
 		if err := f(); err != nil {
-			return a.fail(ctx, err)
+			return a.fail(err)
 		}
 	}
 	if err := a.env.Sys.ProtectDataDir(); err != nil {
 		a.warn("the data directory could not be protected after the writes (%v); the service sets it at its start, and refuses to start if it cannot", err)
 	}
-	if err := a.restartAndProve(ctx); err != nil {
-		return err
+	return a.restartAndProve(ctx)
+}
+
+// settle runs after every run: the run's pre-image goes (it holds config.yaml
+// in clear and is only for rolling this run back); a change-set pre-image
+// this run took but did not need — nothing changed — goes too, so runs that
+// change nothing never push a real restore point out; and old pre-images are
+// pruned.
+func (a *applier) settle() {
+	_ = os.RemoveAll(runDir(a.dir, a.s.ChangeSet))
+	if a.res.PreimageCaptured && !a.wrote && !a.rotated {
+		_ = os.RemoveAll(preimageDir(a.dir, a.s.ChangeSet))
+		a.res.PreimageCaptured = false
 	}
-	if err := prunePreimages(a.dir, a.s.ChangeSet); err != nil {
-		a.warn("old pre-images were not pruned: %v", err)
+	if a.res.PreimageCaptured {
+		if err := prunePreimages(a.dir, a.s.ChangeSet); err != nil {
+			a.warn("old pre-images were not pruned: %v", err)
+		}
 	}
-	return nil
 }
 
 // readCurrent reads config.yaml (absent is fine: a fresh install), guards
 // against drift, and requires the service.
 func (a *applier) readCurrent() error {
-	p := filepath.Join(a.dir, configFile)
-	b, err := os.ReadFile(p)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		a.cur = config.Default()
-	case err != nil:
-		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read config.yaml: %v", err)
-	default:
-		a.cur, err = config.Parse(b)
-		if err != nil {
-			return refuse(CodeConfigRefused, "fix config.yaml by hand or restore it", "config.yaml does not parse: %v", err)
-		}
-		a.curBytes = b
-		if info, err := os.Stat(p); err == nil {
-			a.curMod = info.ModTime()
-		}
+	if err := a.readConfig(); err != nil {
+		return err
 	}
 	if e := a.s.Expect; e != nil && e.ConfigSHA256 != nil {
 		if got := fileSHA(a.curBytes); got != *e.ConfigSHA256 {
 			return refuse(CodeDrift, "discover again and make a new plan", "config.yaml changed after the plan read it")
 		}
 	}
+	var err error
 	a.svc, err = a.env.Sys.Service(ServiceName)
 	if err != nil {
 		return refuse(CodeServiceFailed, "run it elevated (as an administrator)", "read the %s service: %v", ServiceName, err)
 	}
 	if !a.svc.Installed {
 		return refuse(CodeServiceMissing, "install the connector first (its installer creates the service)", "the %s service is not installed", ServiceName)
+	}
+	a.running = a.svc.State != "stopped"
+	return nil
+}
+
+func (a *applier) readConfig() error {
+	p := filepath.Join(a.dir, configFile)
+	b, err := os.ReadFile(p)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		a.cur = config.Default()
+		return nil
+	case err != nil:
+		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read config.yaml: %v", err)
+	}
+	a.cur, err = config.Parse(b)
+	if err != nil {
+		return refuse(CodeConfigRefused, "fix config.yaml by hand or restore it", "config.yaml does not parse: %v", err)
+	}
+	a.curBytes = b
+	if info, err := os.Stat(p); err == nil {
+		a.curMod = info.ModTime()
 	}
 	return nil
 }
@@ -201,6 +267,18 @@ func fileSHA(b []byte) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// checkImporterStated refuses orders whose import nobody stated: has.exe, a
+// BAT, or an explicit "none".
+func (a *applier) checkImporterStated() error {
+	if a.tgt.ERP != config.ERPHasavshevet || a.tgt.SendOrderDir == "" ||
+		a.tgt.HasExePath != "" || a.tgt.HasBatFile != "" ||
+		(a.s.Importer != nil && a.s.Importer.Mode == "none") {
+		return nil
+	}
+	return refuse(CodeImporterRequired, `name has.exe and its parameter file ("mode": "hasExe"), a BAT ("bat"), or say "none" — orders are then written and imported by hand`,
+		"orders go to %s but no importer is named", a.tgt.SendOrderDir)
 }
 
 // checkFilesExist refuses an order folder or importer that is not on this
@@ -224,6 +302,84 @@ func (a *applier) checkFilesExist() error {
 			return refuse(CodeImporterMissing, "name a file that exists (discover lists candidates)", "importer file %s is not on this machine", p)
 		}
 	}
+	return nil
+}
+
+// checkOrderNumbers: the order counter lives in sendOrderDir. A new folder
+// without it would start again at 1 and hand Hasavshevet numbers it already
+// has, so the counter moves with the folder (at the restart, when no order
+// can come in); two different counters are a human's call.
+func (a *applier) checkOrderNumbers() error {
+	from, to := strings.TrimSpace(a.cur.SendOrderDir), strings.TrimSpace(a.tgt.SendOrderDir)
+	if from == "" || to == "" || sameFolder(from, to) {
+		return nil
+	}
+	old, err := os.ReadFile(filepath.Join(from, orderNumberFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read %s: %v", filepath.Join(from, orderNumberFile), err)
+	}
+	cur, err := os.ReadFile(filepath.Join(to, orderNumberFile))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		a.moveOrders = true
+		return nil
+	case err != nil:
+		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read %s: %v", filepath.Join(to, orderNumberFile), err)
+	}
+	n, m := lastOrderNumber(old), lastOrderNumber(cur)
+	if n == m && n >= 0 {
+		return nil
+	}
+	return refuse(CodeOrderNumberConflict, "keep one counter by hand: Hasavshevet must never get a number twice",
+		"%s and %s each hold an order counter (%d and %d)", from, to, n, m)
+}
+
+func lastOrderNumber(b []byte) int64 {
+	var f struct {
+		LastOrderNumber *int64 `json:"lastOrderNumber"`
+	}
+	if json.Unmarshal(b, &f) != nil || f.LastOrderNumber == nil {
+		return -1
+	}
+	return *f.LastOrderNumber
+}
+
+// sameFolder compares two paths as the file system does: cleaned, links
+// resolved, and without case on Windows.
+func sameFolder(a, b string) bool {
+	norm := func(p string) string {
+		p = filepath.Clean(p)
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return p
+	}
+	x, y := norm(a), norm(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(x, y)
+	}
+	return x == y
+}
+
+// checkFirewallOwner refuses a rule of the spec's name that this tool did
+// not make: it is the client's, and it is never changed or removed.
+func (a *applier) checkFirewallOwner() error {
+	if a.s.Firewall == nil {
+		return nil
+	}
+	name := ruleName(a.s.Firewall)
+	rule, err := a.env.Sys.FirewallRule(name)
+	if err != nil {
+		return refuse(CodeFirewallFailed, "run it elevated (as an administrator)", "read the firewall rule %q: %v", name, err)
+	}
+	if rule != nil && !rule.Ours {
+		return refuse(CodeFirewallForeign, "name another firewall.ruleName, or remove that rule yourself",
+			"a firewall rule named %q exists and this tool did not make it", name)
+	}
+	a.fwBefore = rule
 	return nil
 }
 
@@ -274,6 +430,52 @@ func (a *applier) openAdmin() (Database, error) {
 	return dbc, nil
 }
 
+// planLogin settles, before anything is written, which login the connector
+// will use. The least-privilege login gets a new password only when it is new,
+// or when the spec says rotateLogin: it may be another connector's (the hand
+// script creates the same name), and a password set in SQL Server cannot be
+// taken back.
+func (a *applier) planLogin(ctx context.Context, admin Database) error {
+	if !a.s.DB.LeastPrivilege {
+		a.loginPlan = "given"
+		a.dbPassword = a.s.DB.Password
+		return nil
+	}
+	if strings.EqualFold(a.cur.DB.User, LeastPrivilegeLogin) {
+		stored, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP))
+		if err == nil {
+			a.res.secrets = append(a.res.secrets, string(stored))
+			dbc, oerr := a.env.OpenDB(a.tgt, string(stored))
+			if oerr == nil {
+				_ = dbc.Close()
+				a.loginPlan = "keep"
+				a.dbPassword = string(stored)
+				return nil
+			}
+			err = oerr
+		}
+		if !a.s.DB.RotateLogin {
+			return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password — anything else that logs in as it then needs the new one",
+				"%s's stored password does not log in: %v", LeastPrivilegeLogin, err)
+		}
+		a.loginPlan = "rotate"
+		return nil
+	}
+	exists, err := admin.LoginExists(ctx)
+	if err != nil {
+		return refuse(CodeLeastPrivilege, "the given login needs VIEW ANY DEFINITION or to be an administrator", "look for %s: %v", LeastPrivilegeLogin, err)
+	}
+	if exists && !a.s.DB.RotateLogin {
+		return refuse(CodeLeastPrivilege, "set db.rotateLogin to take it over (its password changes), or drop it if nothing uses it",
+			"%s already exists and this connector does not use it: another connector or a person may", LeastPrivilegeLogin)
+	}
+	a.loginPlan = "create"
+	if exists {
+		a.loginPlan = "rotate"
+	}
+	return nil
+}
+
 func (a *applier) capture() error {
 	files := []string{configFile, secretFile(a.cur.ERP), secretFile(a.tgt.ERP), tlsCertFile, tlsKeyFile}
 	var svc *preService
@@ -282,18 +484,13 @@ func (a *applier) capture() error {
 	}
 	var fw *preFirewall
 	if a.s.Firewall != nil {
-		name := ruleName(a.s.Firewall)
-		rule, err := a.env.Sys.FirewallRule(name)
-		if err != nil {
-			return refuse(CodeFirewallFailed, "run it elevated (as an administrator)", "read the firewall rule %q: %v", name, err)
-		}
-		fw = &preFirewall{Name: name, Rule: rule}
+		fw = &preFirewall{Name: ruleName(a.s.Firewall), Rule: a.fwBefore}
 	}
-	captured, err := capturePreimage(a.dir, a.s.ChangeSet, files, svc, fw, a.env.Now())
+	first, err := capturePreimage(a.dir, a.s.ChangeSet, files, svc, fw, a.env.Now())
 	if err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "the pre-image could not be written, so nothing was changed: %v", err)
 	}
-	a.res.PreimageCaptured = captured
+	a.res.PreimageCaptured = first
 	a.captured = true
 	return nil
 }
@@ -321,42 +518,39 @@ func (a *applier) procedures(ctx context.Context, admin Database) error {
 	return nil
 }
 
-// login settles the credential the connector logs in to SQL with. With least
-// privilege, a login that already works with the stored password is kept —
-// a second run must not rotate it.
-func (a *applier) login(ctx context.Context, admin Database) error {
-	if !a.s.DB.LeastPrivilege {
-		a.dbPassword = a.s.DB.Password
+// applyLogin carries out planLogin's decision.
+func (a *applier) applyLogin(ctx context.Context, admin Database) error {
+	switch a.loginPlan {
+	case "given":
 		a.step("login", false, "the given login")
 		return nil
-	}
-	if strings.EqualFold(a.cur.DB.User, LeastPrivilegeLogin) {
-		if stored, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP)); err == nil {
-			if dbc, err := a.env.OpenDB(a.tgt, string(stored)); err == nil {
-				_ = dbc.Close()
-				a.dbPassword = string(stored)
-				a.step("login", false, LeastPrivilegeLogin+" works with the stored password")
-				return nil
-			}
-		}
+	case "keep":
+		a.step("login", false, LeastPrivilegeLogin+" works with the stored password")
+		return nil
 	}
 	pw, err := NewSQLPassword()
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "run it again", "%v", err)
 	}
-	a.res.generated = append(a.res.generated, pw)
+	a.res.secrets = append(a.res.secrets, pw)
+	// From here the password may have reached SQL Server even if a step
+	// fails: treat it as set, so a rollback keeps the stored secret in step.
+	a.rotated, a.dbPassword = true, pw
 	if err := admin.EnsureLeastPrivilegeLogin(ctx, a.tgt.DB.Database, pw); err != nil {
 		return refuse(CodeLeastPrivilege, "the given login needs ALTER ANY LOGIN and rights in the database",
-			"create %s: %v", LeastPrivilegeLogin, err)
+			"%s %s: %v", a.loginPlan, LeastPrivilegeLogin, err)
 	}
 	dbc, err := a.env.OpenDB(a.tgt, pw)
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "check the server allows SQL logins (mixed mode)",
-			"%s was created but does not log in: %v", LeastPrivilegeLogin, err)
+			"%s was set up but does not log in: %v", LeastPrivilegeLogin, err)
 	}
 	_ = dbc.Close()
-	a.dbPassword = pw
-	a.step("login", true, LeastPrivilegeLogin+" created or given a new password")
+	what := "created"
+	if a.loginPlan == "rotate" {
+		what = "given a new password"
+	}
+	a.step("login", true, LeastPrivilegeLogin+" "+what)
 	return nil
 }
 
@@ -377,6 +571,7 @@ func (a *applier) writeTLS() error {
 	if err := atomicfile.Write(filepath.Join(a.dir, tlsKeyFile), keyPEM, 0o600); err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "write the TLS key: %v", err)
 	}
+	a.wrote = true
 	if err := atomicfile.Write(filepath.Join(a.dir, tlsCertFile), certPEM, 0o600); err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "write the TLS certificate: %v", err)
 	}
@@ -394,6 +589,7 @@ func (a *applier) writeSecret() error {
 	if err := a.env.Sys.SecretSet(key, []byte(a.dbPassword)); err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "store the DB password: %v", err)
 	}
+	a.wrote = true
 	if back, err := a.env.Sys.SecretGet(key); err != nil || string(back) != a.dbPassword {
 		return refuse(CodeSecretRoundTrip, "check the data directory's secrets folder", "the stored DB password does not read back")
 	}
@@ -465,15 +661,12 @@ func (a *applier) firewall() error {
 		Enabled:       true,
 		Port:          listenPort(a.tgt.APIListen),
 		RemoteAddress: canonicalSources(a.s.Firewall.AllowFrom),
+		Ours:          true,
 	}
 	if profiles, err := a.env.Sys.FirewallProfiles(); err == nil && profiles.AllOff() {
 		a.warn("firewall_inert: every Windows firewall profile is off, so the rule filters nothing — the client's perimeter is the only gate")
 	}
-	have, err := a.env.Sys.FirewallRule(want.Name)
-	if err != nil {
-		return refuse(CodeFirewallFailed, "run it elevated (as an administrator)", "read the firewall rule: %v", err)
-	}
-	if have != nil && have.Same(want) {
+	if a.fwBefore != nil && a.fwBefore.Same(want) {
 		a.step("firewall", false, "")
 		return nil
 	}
@@ -517,34 +710,58 @@ func sameFold(a, b []string) bool {
 
 // restartAndProve restarts the service when something it reads changed (or
 // it runs a config older than config.yaml, or does not run), after asking
-// the queue again, then proves the port with the new credential. A failure
-// puts the pre-image back.
+// the queue again; moves the order counter while it is stopped; then proves
+// the port with the new credential. A failure puts the run's pre-image back.
 func (a *applier) restartAndProve(ctx context.Context) error {
 	stale := configStale(a.curMod, a.svc.ProcessStart)
-	if !a.restart && !stale && a.svc.State == "running" {
+	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders {
 		a.step("restart", false, "nothing the service reads changed")
 		return nil
 	}
 	if err := a.idle(ctx, "before the restart"); err != nil {
-		return a.fail(ctx, err)
+		return a.fail(err)
 	}
-	a.stopped = true
+	a.touched = true
 	if err := a.env.Sys.StopService(ServiceName); err != nil {
-		return a.fail(ctx, refuse(CodeServiceFailed, "stop it in services.msc and run it again", "stop the service: %v", err))
+		return a.fail(refuse(CodeServiceFailed, "stop it in services.msc and run it again", "stop the service: %v", err))
+	}
+	if a.moveOrders {
+		if err := a.moveOrderCounter(); err != nil {
+			return a.fail(err)
+		}
 	}
 	if err := a.env.Sys.StartService(ServiceName); err != nil {
-		return a.fail(ctx, refuse(CodePortProofFailed, "read server.log for why it stopped", "the service did not start: %v", err))
+		return a.fail(refuse(CodePortProofFailed, "read server.log for why it stopped", "the service did not start: %v", err))
 	}
 	a.res.Restarted = true
 	a.step("restart", true, "")
 	proof, err := a.prove(ctx, a.tgt)
 	if err != nil {
-		return a.fail(ctx, refuse(CodePortProofFailed, "read server.log; the pre-image was put back", "%v", err))
+		return a.fail(refuse(CodePortProofFailed, "read server.log; the pre-image was put back", "%v", err))
 	}
 	a.res.Proof = proof
 	if proof.Health != "ok" {
 		a.warn("the connector answers but its database does not (/api/health: %s)", proof.Health)
 	}
+	return nil
+}
+
+// moveOrderCounter copies lastOrderNumber.json from the old order folder to
+// the new one, read now — the service is stopped, so no order can move it.
+func (a *applier) moveOrderCounter() error {
+	from := filepath.Join(a.cur.SendOrderDir, orderNumberFile)
+	to := filepath.Join(a.tgt.SendOrderDir, orderNumberFile)
+	b, err := os.ReadFile(from)
+	if err != nil {
+		return refuse(CodeWriteFailed, "copy it by hand before the service takes an order", "read %s: %v", from, err)
+	}
+	if _, err := os.Stat(to); err == nil {
+		return refuse(CodeOrderNumberConflict, "keep one counter by hand", "%s appeared during the run", to)
+	}
+	if err := atomicfile.Write(to, b, 0o600); err != nil {
+		return refuse(CodeWriteFailed, "copy it by hand before the service takes an order", "write %s: %v", to, err)
+	}
+	a.step("order_counter", true, fmt.Sprintf("moved to %s at %d", a.tgt.SendOrderDir, lastOrderNumber(b)))
 	return nil
 }
 
@@ -580,61 +797,107 @@ func (a *applier) prove(ctx context.Context, cfg config.Config) (*Proof, error) 
 	}
 }
 
-// fail puts the pre-image back when there is one — restarting the service on
-// it only if this run had stopped it — and returns cause.
-func (a *applier) fail(ctx context.Context, cause error) error {
+// fail puts this run's pre-image back when there is one and returns cause.
+func (a *applier) fail(cause error) error {
 	if !a.captured {
 		return cause
 	}
-	if err := a.rollback(ctx); err != nil {
-		a.warn("the rollback did not finish: %v — run restore %s", err, a.s.ChangeSet)
+	if err := a.rollback(); err != nil {
+		a.warn("the rollback did not finish: %v — restore by hand from provision\\%s\\run", err, a.s.ChangeSet)
 	}
 	return cause
 }
 
-func (a *applier) rollback(ctx context.Context) error {
+// rollback returns the box to where this run found it: the files, the
+// firewall rule and the dependencies from the run's pre-image; the
+// least-privilege login's password kept if this run set it and the restored
+// config logs in as it (SQL Server has no other); the service as it was —
+// running on the restored config, or stopped.
+func (a *applier) rollback() error {
 	a.res.RolledBack = true
-	m, err := loadPreimage(a.dir, a.s.ChangeSet)
+	p, err := loadPreimage(runDir(a.dir, a.s.ChangeSet))
 	if err != nil {
-		return fmt.Errorf("read the pre-image: %w", err)
+		return fmt.Errorf("read the run's pre-image: %w", err)
 	}
-	if _, err := putBack(a.env, m); err != nil {
+	if _, err := putBack(a.env, p); err != nil {
 		return err
+	}
+	if a.rotated {
+		if err := keepLoginPassword(a.env, a.dbPassword); err != nil {
+			return err
+		}
 	}
 	if err := a.env.Sys.ProtectDataDir(); err != nil {
 		a.warn("the data directory could not be protected after the rollback: %v", err)
 	}
-	if !a.stopped {
+	if !a.touched {
 		return nil // it still runs the old config, from memory
 	}
 	_ = a.env.Sys.StopService(ServiceName)
+	if !a.running {
+		return nil // it was stopped before this run
+	}
 	if err := a.env.Sys.StartService(ServiceName); err != nil {
 		return fmt.Errorf("the service did not start on the restored config: %w", err)
 	}
 	return nil
 }
 
+// keepLoginPassword stores password as the DB secret when the config on disk
+// logs in as LeastPrivilegeLogin: its password in SQL Server is password, and
+// a restored older secret would lock the connector out.
+func keepLoginPassword(env Env, password string) error {
+	b, err := os.ReadFile(filepath.Join(env.Sys.DataDir(), configFile))
+	if err != nil {
+		return nil // no config: nothing logs in
+	}
+	cfg, err := config.Parse(b)
+	if err != nil || !strings.EqualFold(cfg.DB.User, LeastPrivilegeLogin) {
+		return nil
+	}
+	if err := env.Sys.SecretSet(config.DBPasswordKey(cfg.ERP), []byte(password)); err != nil {
+		return fmt.Errorf("keep %s's current password: %w", LeastPrivilegeLogin, err)
+	}
+	return nil
+}
+
 // putBack restores a pre-image's files, firewall rule and dependencies.
-func putBack(env Env, m manifest) (bool, error) {
-	changed, err := restoreFiles(env.Sys.DataDir(), m)
+func putBack(env Env, p preimage) (bool, error) {
+	changed, err := restoreFiles(env.Sys.DataDir(), p)
 	if err != nil {
 		return changed, err
 	}
-	if fw := m.Firewall; fw != nil {
-		if fw.Rule == nil {
+	if fw := p.m.Firewall; fw != nil {
+		cur, err := env.Sys.FirewallRule(fw.Name)
+		if err != nil {
+			return changed, fmt.Errorf("read the firewall rule: %w", err)
+		}
+		switch {
+		case cur != nil && !cur.Ours:
+			// Not ours now: leave it alone, whatever the pre-image says.
+		case fw.Rule == nil && cur != nil:
 			if err := env.Sys.RemoveFirewallRule(fw.Name); err != nil {
 				return changed, fmt.Errorf("remove the firewall rule: %w", err)
 			}
-		} else if err := env.Sys.SetFirewallRule(*fw.Rule); err != nil {
-			return changed, fmt.Errorf("restore the firewall rule: %w", err)
+			changed = true
+		case fw.Rule != nil && (cur == nil || !cur.Same(*fw.Rule)):
+			if err := env.Sys.SetFirewallRule(*fw.Rule); err != nil {
+				return changed, fmt.Errorf("restore the firewall rule: %w", err)
+			}
+			changed = true
 		}
-		changed = true
 	}
-	if svc := m.Service; svc != nil {
-		if err := env.Sys.SetServiceDependencies(ServiceName, svc.Dependencies); err != nil {
-			return changed, fmt.Errorf("restore the service's dependencies: %w", err)
+	if svc := p.m.Service; svc != nil {
+		cur, err := env.Sys.Service(ServiceName)
+		if err != nil {
+			return changed, fmt.Errorf("read the service: %w", err)
 		}
-		changed = true
+		if !sameFold(cur.Dependencies, svc.Dependencies) {
+			if err := env.Sys.SetServiceDependencies(ServiceName, svc.Dependencies); err != nil {
+				return changed, fmt.Errorf("restore the service's dependencies: %w", err)
+			}
+			changed = true
+		}
 	}
 	return changed, nil
 }

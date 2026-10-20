@@ -78,6 +78,8 @@ type ConfigFacts struct {
 	DBPort             int       `json:"dbPort"`
 	Database           string    `json:"database"`
 	DBUser             string    `json:"dbUser"`
+	DBEncrypt          bool      `json:"dbEncrypt"`
+	DBTrustServerCert  bool      `json:"dbTrustServerCertificate"`
 	AuthUsername       string    `json:"authUsername"`
 	AuthPassword       string    `json:"authPassword"`
 	AuthSecret         string    `json:"authSecret"`
@@ -284,22 +286,24 @@ func configFacts(cfg config.Config, raw []byte) *ConfigFacts {
 		return "set"
 	}
 	cf := &ConfigFacts{
-		SHA256:         hex.EncodeToString(sum[:]),
-		ERP:            string(cfg.ERP),
-		APIListen:      cfg.APIListen,
-		TLS:            cfg.TLS.Enabled(),
-		DBHost:         cfg.DB.Host,
-		DBPort:         cfg.DB.Port,
-		Database:       cfg.DB.Database,
-		DBUser:         cfg.DB.User,
-		AuthUsername:   cfg.Auth.Username,
-		AuthPassword:   setOrMissing(cfg.Auth.Password),
-		AuthSecret:     setOrMissing(cfg.Auth.Secret),
-		SendOrderDir:   cfg.SendOrderDir,
-		HasExePath:     cfg.HasExePath,
-		HasParamFile:   cfg.HasParamFile,
-		HasBatFile:     cfg.HasBatFile,
-		SendReceiptDir: cfg.SendReceiptDir,
+		SHA256:            hex.EncodeToString(sum[:]),
+		ERP:               string(cfg.ERP),
+		APIListen:         cfg.APIListen,
+		TLS:               cfg.TLS.Enabled(),
+		DBHost:            cfg.DB.Host,
+		DBPort:            cfg.DB.Port,
+		Database:          cfg.DB.Database,
+		DBUser:            cfg.DB.User,
+		DBEncrypt:         cfg.DB.Encrypt,
+		DBTrustServerCert: cfg.DB.TrustServerCertificate,
+		AuthUsername:      cfg.Auth.Username,
+		AuthPassword:      setOrMissing(cfg.Auth.Password),
+		AuthSecret:        setOrMissing(cfg.Auth.Secret),
+		SendOrderDir:      cfg.SendOrderDir,
+		HasExePath:        cfg.HasExePath,
+		HasParamFile:      cfg.HasParamFile,
+		HasBatFile:        cfg.HasBatFile,
+		SendReceiptDir:    cfg.SendReceiptDir,
 	}
 	if d := strings.TrimSpace(cfg.SendOrderDir); d != "" {
 		if info, err := os.Stat(d); err == nil && info.IsDir() {

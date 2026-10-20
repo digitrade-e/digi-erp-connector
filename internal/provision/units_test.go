@@ -3,6 +3,7 @@ package provision
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"slices"
 	"strings"
@@ -25,7 +26,6 @@ func TestSpecValidate_Refusals(t *testing.T) {
 		{"no port and no instance", func(s *Spec) { s.DB.Host = "127.0.0.1" }, CodeSpecInvalid},
 		{"an instance name with a quote", func(s *Spec) { s.DB.Host = `127.0.0.1\WIZ'SOFT` }, CodeSpecInvalid},
 		{"a database name with a bracket", func(s *Spec) { s.DB.Database = "erp]db" }, CodeSpecInvalid},
-		{"orders with no importer named", func(s *Spec) { s.Importer = nil }, CodeImporterRequired},
 		{"an importer mode not known", func(s *Spec) { s.Importer = &ImporterSpec{Mode: "ftp"} }, CodeSpecInvalid},
 		{"a relative has.exe", func(s *Spec) { s.Importer = &ImporterSpec{Mode: "hasExe", HasExePath: `Hash7\has.exe`} }, CodeSpecInvalid},
 		{"orders for SAP", func(s *Spec) { s.ERP = "sap" }, CodeSpecInvalid},
@@ -165,13 +165,38 @@ func TestSelfSignedPair(t *testing.T) {
 	}
 }
 
+// Redact knows a secret as given and as a URL escapes it — a driver's parse
+// error quotes the DSN, password URL-escaped in its userinfo.
 func TestRedact(t *testing.T) {
-	out := string(Redact([]byte(`{"m":"login failed for sqlserver://sa:p\"w@host and p\"w again; short abc"}`), `p"w`, "", "abc"))
-	if strings.Contains(out, `p\"w`) || strings.Contains(out, "abc") {
-		t.Errorf("a secret survived: %s", out)
+	secret := "P@ss word!x"
+	for _, in := range []string{
+		`parse "sqlserver://sa:P%40ss%20word%21x@my%20host:1433": invalid character`,
+		"login failed: P@ss word!x",
+		"q=P%40ss+word%21x",
+	} {
+		if out := Redact(in, secret); strings.Contains(out, "word") {
+			t.Errorf("%q survived as %q", in, out)
+		}
 	}
-	if strings.Count(out, Redacted) != 3 {
-		t.Errorf("redactions = %d, want 3: %s", strings.Count(out, Redacted), out)
+}
+
+// A short secret — "1", "true", a port — must not touch the JSON's shape:
+// redaction runs inside string values only.
+func TestRedactJSON_KeepsTheShape(t *testing.T) {
+	in := []byte(`{"ok":true,"port":8082,"n":1,"msg":"pass 1 is true at 8082","list":["true"]}`)
+	out, err := redactJSON(in, "true", "1", "8082")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("not JSON any more: %s", out)
+	}
+	if v["ok"] != true || v["port"] != float64(8082) || v["n"] != float64(1) {
+		t.Errorf("a value outside a string changed: %s", out)
+	}
+	if msg := v["msg"].(string); strings.Contains(msg, "true") || strings.Contains(msg, "8082") {
+		t.Errorf("msg = %q", msg)
 	}
 }
 
