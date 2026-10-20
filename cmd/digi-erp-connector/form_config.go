@@ -17,6 +17,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 	"github.com/digitrade-e/digi-erp-connector/internal/secrets"
 )
 
@@ -87,6 +88,13 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 		cfg.HasBatFile = ""
 	}
 
+	// The receipt keys have no widget, but the order folder does: moving it
+	// onto sendReceiptDir, or a bad receiptCardNames entry carried over from
+	// config.yaml, would stop the daemon starting. Same check as the daemon.
+	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return config.Config{}, "", fmt.Errorf("receipts: %w", err)
+	}
+
 	return cfg, f.passEdit.Text(), nil
 }
 
@@ -139,8 +147,21 @@ func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bo
 // solely by price/stock. Failing the whole save there would make such a node
 // impossible to configure at all.
 func persistConfig(cfg config.Config, password string, logSvc logger.LoggerService) (warning string, err error) {
+	// Every save protects the data directory first, and writes nothing if
+	// that fails (config_acl.go): everything below lands in a tree the walk
+	// accepted.
+	dataDir := paths.DataDir()
+	rep, err := protectDirBeforeSave(dataDir, logSvc)
+	if err != nil {
+		return "", err
+	}
+	reopenHeldLogs(rep) // a log the walk had to reset is reopened fresh
+	var notes []string
+
 	if cfg.ERP == config.ERPHasavshevet {
-		warning = ensureProceduresBestEffort(cfg, password, logSvc)
+		if w := ensureProceduresBestEffort(cfg, password, logSvc); w != "" {
+			notes = append([]string{w}, notes...)
+		}
 	}
 
 	// An empty field means "keep the stored password", so only overwrite when
@@ -154,7 +175,13 @@ func persistConfig(cfg config.Config, password string, logSvc logger.LoggerServi
 	if err := config.Save(cfg); err != nil {
 		return "", fmt.Errorf("error saving config: %w", err)
 	}
-	return warning, nil
+
+	// What the save wrote gets the daemon's DACL and Administrators as owner,
+	// now rather than at the service's next start.
+	if w := protectAfterSave(dataDir, logSvc); w != "" {
+		notes = append(notes, w)
+	}
+	return strings.Join(notes, " "), nil
 }
 
 // ensureProceduresBestEffort tries to install the Hasavshevet stored procedures

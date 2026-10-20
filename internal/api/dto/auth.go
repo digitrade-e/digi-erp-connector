@@ -18,10 +18,15 @@ type TokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
-// PingResponse is {"ok":true,"ts":<epoch millis>} from GET /api/ping.
+// PingResponse is {"ok":true,"ts":<epoch millis>,"version":"<tag>"} from
+// GET /api/ping.
 //
 // `ts` is milliseconds because that is what the original emitted (JS Date.now).
+// `version` is the release tag the binary was built from ("dev" for a local
+// build) — added with sendReceipt, so a caller can tell whether the connector
+// it talks to has the route.
 type PingResponse struct {
-	OK bool  `json:"ok"`
-	TS int64 `json:"ts"`
+	OK      bool   `json:"ok"`
+	TS      int64  `json:"ts"`
+	Version string `json:"version"`
 }

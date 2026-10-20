@@ -45,6 +45,7 @@ internal/
       price_stock.go    ← POST /api/priceAndStockHandler
       send_order.go     ← POST /api/sendOrder (async queue)
       send_order_status.go ← GET /api/sendOrder/{jobId}
+      send_receipt.go   ← POST /api/sendReceipt (synchronous, strict decode)
     middleware/
       auth.go           ← verifies the issued token on every route
       ratelimit.go      ← Per-IP token bucket (429 RATE_LIMITED)
@@ -58,7 +59,9 @@ internal/
   auth/                 ← HS256 sign/verify + secret/password generation (no deps)
   config/               ← YAML config (atomic write, 0o600)
   db/                   ← MSSQL pool
-  erp/hasavshevet/      ← Complete order pipeline (IMOVEIN, queue, GPRICE)
+  erp/hasavshevet/      ← Order pipeline (IMOVEIN, queue, GPRICE) + receipts
+                          (KUPAIN, number store, idempotency index, writer)
+  buildinfo/            ← Version, stamped by the release build (-X)
   erp/sap/              ← SAP B1 price/stock query
   files/                ← Path traversal prevention
   logger/               ← LoggerService interface
@@ -66,10 +69,12 @@ internal/
     autostart/          ← Windows service registration/control
     paths/              ← data dir + config path (PROGRAMDATA-based)
     atomicfile/         ← THE way to write a file: temp + sync + rename
+    filelock/           ← OS lock on a file (flock / LockFileEx): one receipt writer per DataDir
+    dataacl/            ← protected DACL on DataDir + config.yaml (Windows; no-op elsewhere)
   secrets/              ← Windows DPAPI (machine scope)
 ```
 
-Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/). Linux: `/etc/digi-erp-connector/`.
+Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/, receipts/, history/receipts/). Linux: `/etc/digi-erp-connector/`. On Windows the daemon gives it a **protected DACL** at every start (SYSTEM + Administrators Full Control, the service account only if it is not an admin, OWNER RIGHTS READ_CONTROL only; children carry the same as inherited ACEs) via `dataacl.ProtectTree`, run BEFORE server.log is opened and BEFORE config.Load (`cmd/digi-erp-connectord/dataacl.go`). **It works by handle only** (FILE_FLAG_OPEN_REPARSE_POINT, ancestors held without FILE_SHARE_DELETE, GetSecurityInfo / SetKernelObjectSecurity, no MARTA propagation — never reintroduce SetNamedSecurityInfo here: as SYSTEM a path can be redirected), refuses reparse points, multiply-linked files, entries resolving elsewhere and untrusted owners (fail closed), writes only what differs (a steady-state start only reads), sets SYSTEM as owner when running as SYSTEM, trusts owners that are Administrators members directly or via nested groups (NetUserGetLocalGroups, fail closed when unresolvable or orphaned) and then hands those entries to BUILTIN\Administrators (needsClaim) so the domain is needed at most once; the SCM restarts a refused service after 1 / 5 / every 30 min. **A refused start opens no file in DataDir**: the reason goes to the Windows Event Log and the service exits with service-specific code 2 (`autostart.ExitDataDirRefused`). server.log is kept only when it is provably the daemon's own object (`.server-log-id` file-ID marker); otherwise it is moved aside, or the daemon logs to `server-<UTC>.log` if it cannot be. The elevated GUI walks at launch before opening its logs and before **every** save — a failed walk refuses the save with nothing written — and hands what it created to Administrators (`ClaimForAdministrators`; `cmd/digi-erp-connector/config_acl.go`, `gui_logs.go`). Off Windows the receipt import stubs return an error, so model (b) records `failed`, never `ok`.
 
 ## API endpoints (all `/api/*` require `Authorization: Bearer <token from /auth/token>`; all rate-limited)
 
@@ -77,7 +82,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 |-------|--------|--------------|
 | `/auth/token` | POST | **Unauthenticated** (it is the credential check). Username+password → short-lived token. The only way in. |
 | `/api/health` | GET | Pings DB; `{"status":"ok"}` or 503 |
-| `/api/ping` | GET | Liveness + credential check; **no DB touch**. `{"ok":true,"ts":<epoch ms>}` |
+| `/api/ping` | GET | Liveness + credential check; **no DB touch**. `{"ok":true,"ts":<epoch ms>,"version":"<tag or dev>"}` |
 | `/api/custom_sql` | POST | Create saved query `{name, description, sql, params}` (409 on duplicate) |
 | `/api/create_custom_sql` | POST | Legacy alias of the above (electron-mssql-app compat) |
 | `/api/custom_sql` | GET | List saved queries |
@@ -88,6 +93,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/priceAndStockHandler` | POST | Hasavshevet or SAP price/stock fetch |
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
+| `/api/sendReceipt` | POST | **Synchronous** (≤120 s): one KUPAIN receipt per `idempotencyKey` → `200 {receiptNumber, written, idempotencyKey, import, warnings}`; flat §4.6a body (16 keys, all present, none null), strict decode (also refuses duplicate and wrong-case keys); 400 only for the request's content (the backend stops on it); 503 when `sendReceiptDir` unset (`RECEIPTS_NOT_CONFIGURED`), the number store unusable (`RECEIPT_NUMBER_STORE_UNAVAILABLE`), the import lock busy (`RECEIPT_WRITER_BUSY`), the body not readable to its end (`RECEIPT_REQUEST_READ_FAILED`) or another process holding the data dir (`RECEIPT_DATA_IN_USE`). `docs/hasavshevet-send-receipt.md` |
 
 ## Saved-query model — hard constraints, NEVER bypass
 
@@ -128,6 +134,23 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 
 **Single-worker constraint:** never make the order queue concurrent — IMOVEIN files are shared.
 
+**Shutdown order (`serverApp.Stop`):** `srv.Shutdown` → `orderQueue.Drain` (≤120 s, within the one 150 s stop budget `autostart.StopTimeout`) → cancel the worker. Never cancel first — that dropped every queued order (pinned by `cmd/digi-erp-connectord/app_test.go`).
+
+## Hasavshevet send-receipt flow
+
+`POST /api/sendReceipt` → `ReceiptWriter.Write`, synchronously, under the **import lock shared with the order worker** (`importmu.go`). Full doc: `docs/hasavshevet-send-receipt.md`.
+
+- The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` creates it (write-if-absent).
+- One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt. Never restore or copy `DataDir/receipts` while the service runs — stop it first (a running writer trusts its in-memory recovery state).
+- **One process per data directory**: the writer holds an OS lock on `DataDir/receipts/writer.lock` (`internal/platform/filelock`: flock / LockFileEx) from its first Recover/Write to `Close` (called last in `Stop`) or exit; a second process answers receipts 503 `RECEIPT_DATA_IN_USE`. The importMu is in-process only.
+- The store never persists a next number outside 1…999 999 999 + 1; history and index files are 0600 in 0700 dirs on Unix (no chmod on Windows — the DataDir's protected DACL, `internal/platform/dataacl`).
+- Import model (b) has two runners, mirroring sendOrder: `hasReceiptBatFile` (cmd.exe /C) **or** `hasReceiptParamFile` (the orders' `hasExePath`, cwd sendReceiptDir) — never both (refused); same 90 s cap + 5 s WaitDelay, `started` recorded before it runs, never re-run for a key, never run by Recover.
+- 4xx only for request faults — and never echo a value (a key path at most 64 bytes); a body read cut short is 503, not 400; `CardNamesConfigError`, a stored request that no longer builds (`ErrStoredReceiptUnbuildable`) and every other connector fault are 5xx. The response never carries `ReceiptResult.Files`.
+- Config guard `hasavshevet.ValidateReceiptConfig` (sendReceiptDir ≠ sendOrderDir, one absolute receipt importer, card names writable) is called by both `api.NewServer` and the GUI save.
+- Contract pinned by `handlers/send_receipt_test.go` against `testdata/receipt/wire.json` + `wire-blanks.json`: the backend's REAL `Receipt` serialized by its HTTP client (`generate.php` beside them, run in a throwaway `backend-php` container; sha256 checked). Regenerate, never hand-edit.
+- The strict decoder's key walk descends only where the Go type nests (≤ 8 levels) and skips other values with `Decode` — walking them token by token cost O(depth²) memory.
+- Every text value is edge-trimmed on the RAW value, then `normalize1255`, then strict Windows-1255; widths are encoded bytes (U+FB2A and an inner line break are two).
+
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.
@@ -163,6 +186,9 @@ production backend. Covered by `queries/normalize_test.go`:
 - **Decode request bodies with `decodeJSONBody`** (handlers/json.go): it applies
   the shared 1 MiB limit, rejects trailing data and keeps numbers exact. Do not
   reintroduce per-handler decoders or per-handler size constants.
+  `decodeJSONBodyStrict` is the same plus `DisallowUnknownFields` and a token
+  pre-pass refusing duplicate keys and keys that match a field only
+  case-insensitively, for contract bodies (sendReceipt).
 - **`respond.JSON` / `respond.Error` only** — no direct `json.NewEncoder(w)` in
   handlers. There is exactly one error envelope; do not add a second shape.
 - **`readFormConfig` must start from `f.cfg`**, never a zero `config.Config`.

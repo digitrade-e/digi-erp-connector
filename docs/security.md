@@ -102,11 +102,41 @@ form (short 8.3 path, junction) still matches.
 | Secret | Where | Protection |
 |---|---|---|
 | DB password | `secrets/db_password_<erp>.bin` | Windows DPAPI, machine scope. **Plaintext on Unix** — the daemon supports Linux but its secret storage does not protect anything there. |
-| Auth password and signing secret | `config.yaml` | File mode 0600 only. Plaintext by design: the operator has to read the password back to give it to the calling backend. |
+| Auth password and signing secret | `config.yaml` | Windows: the data directory's protected DACL (below). Unix: file mode 0600. Plaintext by design: the operator has to read the password back to give it to the calling backend. |
 
 Both files are written atomically. Writes report failure — a secret write that
 silently "succeeded" while failing used to leave the daemon starting with the wrong
 password and no explanation.
+
+**The data directory's DACL (Windows).** `%ProgramData%`'s default ACL lets
+every local user read what is under it — `config.yaml`, and with receipts on the
+receipt index and history (names, phones, emails, card last 4, confirmation
+codes). At every start, before it opens `server.log` or reads the config, the
+daemon gives the data directory a protected DACL — Full Control for SYSTEM
+(`S-1-5-18`) and BUILTIN\Administrators (`S-1-5-32-544`), READ_CONTROL only for
+OWNER RIGHTS (`S-1-3-4`), so an owner cannot rewrite it — and every entry beneath
+the same ACEs as inherited ones (`internal/platform/dataacl`). Because it runs as
+SYSTEM, it does this **by handle, never by path**: each entry is opened without
+following a reparse point and with its ancestors held open, refused if it is a
+reparse point, a multiply-linked file, resolves elsewhere, or has an untrusted
+owner, and its security is read and written through that handle with no
+propagation — so no link can point a SYSTEM write at a file outside the
+directory. Every refusal and every failure of the walk stops the daemon (fail
+closed) without opening a file there — the reason goes to the Windows Event
+Log; what is only logged: the SYSTEM owner change, the extra `config.yaml` check
+after the config loads, a failed listing of the Administrators group (each
+owner's membership is then resolved on its own, direct members included), and a
+failed hand-over of an admin-owned entry to Administrators (the owner stays
+trusted). The elevated GUI walks the same way at
+launch, before it opens a log, and before every save — refusing the save, with
+nothing written, when the walk fails — and makes Administrators the owner of
+what it created. Logs that are not provably the daemon's own file are moved
+aside and restarted. See
+[configuration.md](configuration.md#data-directory-permissions-windows).
+
+The link refusals are **Windows-only**. On Linux nothing here runs: the data
+directory is root's `/etc/digi-erp-connector`, files are written 0600, and paths
+are followed as usual (only root can plant a link there).
 
 None of these values is ever logged. Log lines about the DB password mention only
 its length; the line recording first-run secret generation says that it happened

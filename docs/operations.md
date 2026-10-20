@@ -74,24 +74,58 @@ port rule.
 
 ## Upgrading
 
-The installer **does not stop the service**, and a running executable cannot be
-overwritten. Stop it first:
+Installers built with sendReceipt (DIG-929) **stop the service themselves**: before
+replacing any file they run `sc stop` and wait up to 180 s for `STOPPED`, and abort
+with a message if it has not stopped. The daemon's own stop is graceful — it lets a
+receipt in flight finish and then writes every queued order (≤120 s, within a
+150 s stop budget) before it exits — so the wait can be long on a busy box. The
+uninstaller now also waits for STOPPED before deleting the service. Older installers did not stop it, and a
+running executable cannot be overwritten; stopping it first is still harmless:
 
 ```powershell
-Stop-Service digi-erp-connectord
+Stop-Service digi-erp-connectord      # waits for the graceful stop
 Start-Process .\digi-erp-connector-setup-<version>.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
 Start-Service digi-erp-connectord     # the installer also tries to start it
 ```
 
+After an upgrade, `GET /api/ping` returns the installed release in `version`.
+
 What survives an upgrade:
 
-- **Everything in the data directory** — config, queries, secrets, logs. The
-  installer only writes to `C:\Program Files\…`.
+- **Everything in the data directory** — config, queries, secrets, logs, and the
+  receipt number store, index, process lock and history (`receipts/`,
+  `history/receipts/`).
+  The installer only writes to `C:\Program Files\…`. Back `receipts/` up with
+  the rest: a lost index turns a receipt retry into a second receipt.
 - **The service definition**, including `depend=` and the recovery actions. The
   installer's `sc create` fails harmlessly when the service already exists. Only a
   full *uninstall* removes the service and therefore the hardening.
 
 Re-running the hardening commands afterwards is harmless and worth it as a check.
+
+## Reboots
+
+A reboot does **not** give the daemon its graceful stop. On an OS shutdown
+Windows caps every service's stop at `WaitToKillServiceTimeout`
+(`HKLM\SYSTEM\CurrentControlSet\Control`, a few seconds by default), whatever
+the 160 s wait hint the service reports. Orders still queued at that moment
+were already answered 202 and hold their order numbers, but no IMOVEIN is
+written for them — **they are lost**. A receipt cut off mid-write is safe: it
+is finished by recovery at the next start, and the backend's retry gets the
+same number.
+
+So before a planned reboot — Windows Update included — stop the service and
+let the stop finish:
+
+```powershell
+Stop-Service digi-erp-connectord      # waits for the graceful stop (up to ~2.5 min)
+Restart-Computer
+```
+
+(The GUI's **Stop server** does the same.) The service does not use
+`SERVICE_ACCEPT_PRESHUTDOWN`; it would need a preshutdown timeout configured by
+both the GUI and the installer and would still be a cap, so the stop-first rule
+is the guarantee.
 
 ## Verifying
 
@@ -153,7 +187,14 @@ automatically if the probe fails, so a failed deploy never leaves the API down.
 
 Neither ever contains the API password, the DB password or the signing secret.
 `server.log` is written by the service (LocalSystem), so a non-elevated process may not be able to append
-to it — if the GUI or a tool seems to log nothing, that is usually why.
+to it — if the GUI or a tool seems to log nothing, that is usually why. Since the service gives the data
+directory a protected DACL (SYSTEM + Administrators only, see
+[configuration.md](configuration.md#data-directory-permissions-windows)), **reading** the logs or any other
+file there also needs an elevated prompt or editor. The first start after an upgrade from 1.0.17 rewrites the permissions of
+everything in the data directory and moves `server.log` aside (`server.log.<UTC time>.old`; the GUI does the same
+for `ui.log`). If a program is tailing it, the service logs to a new `server-<UTC time>.log` that time (a warning near its top says why) and moves
+`server.log` aside at the next start. If the service refuses to start (`sc query` shows `SERVICE_EXIT_CODE : 2`), the
+reason is in the Windows Event Log (Application, source `digi-erp-connectord`) — not in `server.log`.
 
 Useful check — is anything failing to authenticate, and with which username?
 

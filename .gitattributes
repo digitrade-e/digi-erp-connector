@@ -24,3 +24,11 @@
 *.ico  binary
 *.syso binary
 *.exe  binary
+
+# Byte-exact Windows-1255 goldens written by the legacy receipt writer. Text
+# detection would happily "normalise" them; they must stay exactly as written.
+internal/erp/hasavshevet/testdata/kupain/* binary
+
+# The backend's golden sendReceipt payload (DIG-928), copied byte for byte and
+# pinned by sha256 in send_receipt_test.go.
+internal/api/handlers/testdata/receipt/* binary

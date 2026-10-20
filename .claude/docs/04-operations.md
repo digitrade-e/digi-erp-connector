@@ -151,8 +151,12 @@ upgrade install. Re-running the hardening afterwards is still worth it as a
 cheap idempotent check; `install-1.0.4-and-harden.ps1` does the whole sequence
 with auto-rollback.
 
-Only `[UninstallRun]` stops and deletes the service, so a full uninstall does
-lose the hardening.
+Only an uninstall deletes the service, so a full uninstall does lose the
+hardening. Since DIG-929 that is the `[Code]` handler `CurUninstallStepChanged`
+(at `usUninstall`), not `[UninstallRun]`: it runs `sc stop`, polls `sc query`
+up to 180 s for STOPPED (the daemon drains a receipt in flight and queued
+orders first), then `sc delete`. Setup's `PrepareToInstall` does the same stop
+and wait before replacing binaries, and aborts if the service has not stopped.
 
 ### Orphaned print binaries: removed 2026-08-05
 

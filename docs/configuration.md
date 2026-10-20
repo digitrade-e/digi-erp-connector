@@ -93,6 +93,151 @@ all until these are set.
 Leave both `hasBatFile` and `hasExePath` empty and the files are still written but
 nothing imports them — occasionally useful for diagnosis.
 
+## Hasavshevet receipts
+
+Optional, for `POST /api/sendReceipt` — see
+[hasavshevet-send-receipt.md](hasavshevet-send-receipt.md). All four keys are
+omitted from the file when unset, and without `sendReceiptDir` the route answers
+`503 RECEIPTS_NOT_CONFIGURED`. None has a GUI widget; a GUI save keeps them.
+
+| Key | Meaning |
+|---|---|
+| `sendReceiptDir` | The receipt importer's folder: only `KUPAIN_{n}.doc` and `KUPAIN.prm` are written here. **Must be absolute and must not be `sendOrderDir`** (compared after resolving `..`, trailing separators and symlinks; case-insensitively on Windows) — the daemon will not start and the GUI will not save. Receipts are configured only with `erp: hasavshevet` and this set. |
+| `hasReceiptBatFile` | Model (b), the BAT way: this BAT runs once (via `cmd.exe /C`, from its own folder, 90 s cap) after each receipt is written. **Absolute.** Empty (and no `hasReceiptParamFile`) is model (a): files only, imported by hand. |
+| `hasReceiptParamFile` | Model (b), the `has.exe` way — the mirror of the orders' `hasExePath` + `hasParamFile`: the orders' `has.exe` (`hasExePath`) runs once with this parameter file, from `sendReceiptDir`, 90 s cap, after each receipt is written. **Absolute, needs an absolute `hasExePath`, and is refused together with `hasReceiptBatFile`** (ambiguous) — the daemon will not start and the GUI will not save. `hasExePath` alone imports no receipt. |
+| `receiptCardNames` | `{issuer: {code: name}, brand: {code: name}}` — overrides of the receipt's card name (F17), keyed by the raw HYP code. Codes compare as numbers (`"06"` is `6`). A name that is not Windows-1255 or is wider than 25 bytes, a blank code, or two keys of one table naming the same code (`"6"` and `"06"`) stops the daemon and the GUI save. |
+
+The receipt number store (`receipts/receiptNumber.json`), the idempotency index
+(`receipts/index/`), the process lock (`receipts/writer.lock`) and history copies
+(`history/receipts/{n}/`) live in the **data directory**, never in
+`sendReceiptDir`; on Linux the receipt directories are 0700 and their files
+0600. The store is created only by `cutover-seed -receipt-seed N`; until then
+receipts answer 503. Back up `receipts/` with the rest of the data directory — a
+lost index turns a retry into a second receipt.
+
+One connector process per data directory: the receipt writer holds an OS lock on
+`receipts/writer.lock` while it runs. A second process on the same directory
+serves orders and queries but answers receipts `503 RECEIPT_DATA_IN_USE`, and
+takes over once the first has stopped. The file itself is not the lock — one
+left behind by a crash locks nobody out — so never delete it to "unlock" a
+connector; stop the other process.
+
+## Data directory permissions (Windows)
+
+The data directory gets a **protected DACL** — nothing inherited from
+`%ProgramData%`, whose default ACL lets every local user read — granting Full
+Control to exactly `SYSTEM` and `BUILTIN\Administrators`, plus **OWNER RIGHTS
+with READ_CONTROL only**. (A service run under a dedicated *non-admin* account
+also gets an ACE for that account; LocalSystem and the elevated GUI add none, so
+both write the same DACL.) Every file and folder beneath carries the same ACEs,
+as inherited ones: `config.yaml`, `secrets\`, `queries.json`, the logs and the
+receipt data.
+
+**What is protected, when:**
+
+| When | By | What |
+|---|---|---|
+| Every service start, **before `server.log` is opened and before the config is read** — so also the installer's first `sc start`, which has no config yet (the service creates the directory then, and owns it) | the daemon | the directory and everything under it (below). If this fails the daemon **does not start** (exit code 2, below). |
+| Every service start, right after `config.yaml` loads | the daemon | `config.yaml` once more (a config written between the walk and the load). A failure is logged; the daemon starts. |
+| Every GUI launch, **before the GUI opens any log** (creating the directory if needed) | the elevated GUI | the directory and everything under it. If this fails the GUI logs nowhere in it and **refuses to save**. |
+| **Every** GUI save, **before** it writes the secret or `config.yaml`, and again after | the elevated GUI | the directory and everything under it. If the walk before the save fails, **the save is refused and nothing is written**; one after the save is a "Saved, but…" note (the service re-checks at its start). |
+
+The GUI's walk also makes `BUILTIN\Administrators` the owner of everything the
+operator's own account created there (`config.yaml`, `secrets\*.bin`, the
+directory) — an owner the daemon always trusts, however the operator is an
+administrator. Nothing to configure; nothing happens on Linux.
+
+**How the walk works.** It opens the directory, then every entry under it —
+parents before children — **by handle, never following a link**, and keeps every
+ancestor folder open so none can be renamed or replaced meanwhile. It reads each
+entry's security through that handle and writes it only if it differs from the
+template, without any propagation (the walk writes each child's inherited ACEs
+itself). So:
+
+- A file or folder that carries an ACL of its own — protected, NULL, explicit
+  ACEs, or the old `%ProgramData%` ACEs — gets the inherited DACL. A folder
+  planted before the first protected start does not survive, and **explicit
+  ACEs an operator added under the data directory are dropped at the next
+  start**.
+- A start where everything already matches **only reads** (measured on the
+  Windows CI, 3,032 entries: steady state 0.25–0.61 s, the first full rewrite
+  1.23–2.31 s). While it runs the service reports start progress to the service
+  manager, and the GUI waits as long as progress keeps coming.
+
+**What stops the start** (nothing further is changed; the path is named):
+
+- the directory, or anything under it, is a **symlink, junction or other
+  reparse point** — data written through it would land outside the protected
+  tree. **Data Deduplication files are refused too** (they are reparse points);
+- a file under it has **more than one hard link** — its permissions are shared
+  with the other name, which may be anywhere on the volume;
+- an entry is **owned by someone untrusted** — anyone but SYSTEM,
+  Administrators (the group, or a member of it, directly or through a nested
+  group such as Domain Admins — looked up with the domain), TrustedInstaller and
+  the service's account. A planted entry is owned by its planter, who may still
+  hold it open. If membership cannot be resolved (e.g. the domain controller is
+  unreachable), the entry is refused. An owner whose SID resolves to "no
+  account" is either a deleted user — refused until the file is replaced or
+  re-owned (troubleshooting) — or a domain account while the domain cannot be
+  reached, which clears once it can (Windows gives the same answer for both). An owner trusted through membership is handed to
+  `BUILTIN\Administrators` once resolved, so the domain is needed at most once;
+- an entry's final path is not where the walk expects it, or the walk cannot
+  open or read an entry at all (access denied).
+
+A refused start opens **no file** in the data directory: the reason goes to the
+**Windows Event Log** (Application, source `digi-erp-connectord`; the same reason
+at most once a day, a new reason at once — the last one is stamped in
+`HKLM\SOFTWARE\digi-erp-connector`, value `LastRefusal`, and a good start clears
+it), the service
+stops with service exit code **2** (`sc query digi-erp-connectord` shows it), the
+service manager restarts it after 1 min, 5 min and then every 30 min (the count
+resets after a day without failures), and the GUI says the service refused to start and where to
+look. See [troubleshooting.md](troubleshooting.md#the-service-will-not-start-or-starts-and-stops).
+
+**Logs.** `server.log` gets a fresh file object at a start unless it is provably
+the daemon's own: exactly ours, not reset by this start's walk, and the very
+file a previous start created fresh (its file ID is recorded in
+`.server-log-id`). So the first start after an upgrade from 1.0.17 renames it to
+`server.log.<UTC time>.old`, and a start that could not rename it tries again the
+next time. If it cannot be renamed (a program holds it open), the daemon logs to
+a new `server-<UTC time>.log` this time — the warning saying so is near the
+top of that file, right after the start line — rather than refusing to start.
+The GUI does the same for `ui.log` and `server.log` before opening them (also
+after an upgrade), and reopens one fresh if a save's walk had to reset it. Logs
+are always opened without following a link.
+
+**Owner.** When the daemon runs as SYSTEM it also makes SYSTEM the directory's
+owner (a failure is logged, not fatal). Under any other account the owner is left
+as it is.
+
+Why OWNER RIGHTS: without it, whoever *owns* the directory or a file in it keeps
+an implicit right to read and rewrite its DACL, whatever the DACL says — and
+the owner can be a plain user, since Users may create folders in
+`%ProgramData%`. The OWNER RIGHTS ACE replaces those implicit rights with what it
+grants: the owner can still see who has access (READ_CONTROL, which `icacls`
+and Explorer need), but cannot open the object to change it or to read data
+unless it is SYSTEM, an Administrator or the service account. That holds for
+opening a handle (pinned on the Windows CI); a rewrite through
+`SetNamedSecurityInfo` was once seen to go through in 18 CI runs, so OWNER
+RIGHTS is not the guarantee — refusing untrusted owners outright is.
+
+Consequence: anything that reads the data directory must run **elevated** or as
+SYSTEM — the GUI does (desktop shortcut), and so must `cutover-seed`, Notepad on
+`server.log`, or a backup job.
+
+**Probe** (elevated PowerShell, when a start is refused for an owner):
+
+```powershell
+Get-Item "$env:ProgramData\digi-erp-connector" | % { (Get-Acl $_.FullName).Owner + '  ' + $_.FullName }   # the directory itself
+Get-ChildItem "$env:ProgramData\digi-erp-connector" -Recurse -Force | % { (Get-Acl $_.FullName).Owner + '  ' + $_.FullName }
+sc.exe qfailure digi-erp-connectord   # restart / 60000, restart / 300000, restart / 1800000
+(Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).EnableLUA   # 0 = UAC off
+whoami /groups
+```
+
+Follow-up (not in this release): `history\receipts\` and the moved-aside
+`*.old` / `server-*.log` logs grow without limit; a retention policy is owed.
+
 ## `db`
 
 | Key | Default | Meaning |

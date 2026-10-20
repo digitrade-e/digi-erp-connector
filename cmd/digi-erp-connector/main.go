@@ -19,13 +19,20 @@ import (
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
 func main() {
 	// walk requires all UI work on one OS thread.
 	runtime.LockOSThread()
 
-	uiLog := newUILogger()
+	// Before any log is opened in it, the data directory is created and walked
+	// (gui_logs.go): a log the walk had to reset, or one not exactly ours, is
+	// moved aside so a fresh file is opened; a directory the walk refuses gets
+	// no log, and saving is refused until it is fixed.
+	uiPath, _ := paths.UILogFilePath()
+	serverPath, _ := paths.LoggerFilePath()
+	uiLog, serverLogOK, protectErr := startGUILogs(paths.DataDir(), uiPath, serverPath)
 	defer uiLog.Close()
 
 	// The GUI has no console when launched from the shortcut, so a panic would
@@ -38,7 +45,7 @@ func main() {
 	}()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetOutput(uiLog.Writer())
+	log.SetOutput(uiLog.Writer()) // the uiLogger itself, so a reopen redirects it
 
 	uiLog.Printf("startup begin")
 	if session := os.Getenv("SESSIONNAME"); session != "" {
@@ -70,11 +77,7 @@ func main() {
 		uiLog.Printf("config loaded")
 	}
 
-	logSvc, logErr := logger.New(cfg)
-	if logErr != nil {
-		logSvc = logger.NewStderr()
-		logSvc.Warn("logger init failed; using stderr")
-	}
+	logSvc := openGUIServerLog(serverLogOK, serverPath, func() (logger.LoggerService, error) { return logger.New(cfg) })
 	defer logSvc.Close()
 
 	uiLog.Printf("building window")
@@ -89,6 +92,9 @@ func main() {
 	// error, so a corrupt config.yaml was never reported in the UI.
 	if cfgErr != nil {
 		form.setStatus("Error loading config: " + cfgErr.Error())
+	}
+	if protectErr != nil {
+		form.setStatus("The data directory could not be protected, so saving is refused until it is fixed: " + protectErr.Error())
 	}
 
 	uiLog.Printf("run loop")

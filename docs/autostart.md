@@ -32,4 +32,4 @@ Use `launchd` LaunchAgent/LaunchDaemon:
 - UI is a configuration tool.
 - Daemon reads config from disk and starts independently.
 - On Windows, the UI `Start server` action installs/updates `digi-erp-connectord` as a Windows Service (`start=auto`) and starts it.
-- On Windows, the UI `Stop server` action stops the `digi-erp-connectord` Windows Service.
+- On Windows, the UI `Stop server` action stops the `digi-erp-connectord` Windows Service. It waits up to 165 s (`autostart.ServiceStopWait`): the daemon's graceful stop can take up to 150 s (a receipt in flight, then the queued orders). `Restart server` starts the service again only if the stop completed.
