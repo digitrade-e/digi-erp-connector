@@ -45,6 +45,7 @@ internal/
       price_stock.go    ← POST /api/priceAndStockHandler
       send_order.go     ← POST /api/sendOrder (async queue)
       send_order_status.go ← GET /api/sendOrder/{jobId}
+      send_order_queue.go  ← GET /api/sendOrder (queued/running counts, asked before a restart)
       send_receipt.go   ← POST /api/sendReceipt (synchronous, strict decode)
     middleware/
       auth.go           ← verifies the issued token on every route
@@ -92,6 +93,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/file` | POST | Path-validated binary file streaming |
 | `/api/priceAndStockHandler` | POST | Hasavshevet or SAP price/stock fetch |
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
+| `/api/sendOrder` | GET | `{queued, running}`: accepted orders not written yet — a restart drops them (in-memory queue) |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
 | `/api/sendReceipt` | POST | **Synchronous** (≤120 s): one KUPAIN receipt per `idempotencyKey` → `200 {receiptNumber, written, idempotencyKey, import, warnings}`; flat §4.6a body (16 keys, all present, none null), strict decode (also refuses duplicate and wrong-case keys); 400 only for the request's content (the backend stops on it); 503 when `sendReceiptDir` unset (`RECEIPTS_NOT_CONFIGURED`), the number store unusable (`RECEIPT_NUMBER_STORE_UNAVAILABLE`), the import lock busy (`RECEIPT_WRITER_BUSY`), the body not readable to its end (`RECEIPT_REQUEST_READ_FAILED`) or another process holding the data dir (`RECEIPT_DATA_IN_USE`). `docs/hasavshevet-send-receipt.md` |
 

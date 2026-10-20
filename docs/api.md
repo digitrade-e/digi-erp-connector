@@ -69,6 +69,7 @@ See `saved-queries.md` for the full model.
 
 `POST /api/sendOrder` → `202 {"status":"queued","jobId":"<orderNumber>"}`; `VALIDATION_ERROR`, `QUEUE_FULL` (503).
 `GET /api/sendOrder/{jobId}` → `{"jobId","status":"queued|running|done|failed","orderNumber","writtenFiles"}`; `NOT_FOUND`.
+`GET /api/sendOrder` → `{"queued","running"}`: orders accepted (202) and not written yet. The queue is in memory, so a restart with either above 0 loses them; `digi-erp-connector-provision` asks before it restarts the service. `QUEUE_UNAVAILABLE` (503).
 
 ## Receipts (Hasavshevet)
 
