@@ -40,6 +40,26 @@ type ServerDeps struct {
 	ReceiptWriter handlers.ReceiptWriter
 }
 
+// CheckConfig makes every startup check NewServer makes on the config alone:
+// the listen address, the credential, the receipt keys and a loadable TLS
+// pair. A writer of config.yaml (digi-erp-connector-provision) passes it
+// before it writes, so it never leaves a box holding a config its own service
+// will not start on — the rule the GUI's save follows. auth.secret is not
+// checked: the daemon generates it when it is empty.
+func CheckConfig(cfg config.Config) error {
+	if err := validateListenAddr(strings.TrimSpace(cfg.APIListen)); err != nil {
+		return err
+	}
+	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
+	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return err
+	}
+	_, err := buildTLSConfig(cfg.TLS)
+	return err
+}
+
 func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	addr := strings.TrimSpace(cfg.APIListen)
 	if err := validateListenAddr(addr); err != nil {

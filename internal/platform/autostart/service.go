@@ -171,6 +171,41 @@ func recoveryActions() []recoveryAction {
 	return out
 }
 
+// recoveryMatches reports whether a service's failure settings are the plan:
+// recoveryActions, reset after recoveryResetPeriod, also on non-crash
+// failures. EnsureWindowsServiceRecovery writes only when they are not.
+func recoveryMatches(actions []recoveryAction, reset time.Duration, nonCrash bool) bool {
+	want := recoveryActions()
+	if !nonCrash || reset != recoveryResetPeriod || len(actions) != len(want) {
+		return false
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ServiceInfo is what digi-erp-connector-provision reads of a Windows
+// service (WindowsServiceInfo).
+type ServiceInfo struct {
+	Installed bool `json:"installed"`
+	// State is "running", "stopped", "start_pending", "stop_pending",
+	// "paused", "continue_pending" or "pause_pending".
+	State string `json:"state,omitempty"`
+	// StartType is "auto", "manual", "disabled", "boot" or "system".
+	StartType    string   `json:"startType,omitempty"`
+	Account      string   `json:"account,omitempty"`
+	Dependencies []string `json:"dependencies,omitempty"`
+	ProcessID    uint32   `json:"processId,omitempty"`
+	// ProcessStart is when the running process started (zero when it is not
+	// running): a config.yaml written after it is not what the service runs.
+	ProcessStart time.Time `json:"processStart,omitempty"`
+	// RecoveryPlanned: the failure actions are the plan (recoveryMatches).
+	RecoveryPlanned bool `json:"recoveryPlanned"`
+}
+
 type ServiceApp interface {
 	Start() error
 	Stop(ctx context.Context)
