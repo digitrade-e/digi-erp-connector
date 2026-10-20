@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -39,12 +41,14 @@ func TestSpecValidate_Refusals(t *testing.T) {
 		{"tls with a bad host", func(s *Spec) { s.TLS = &TLSSpec{Mode: "self-signed", Hosts: []string{"a b"}} }, CodeSpecInvalid},
 		{"an expected hash that is not one", func(s *Spec) { h := "abc"; s.Expect = &Expect{ConfigSHA256: &h} }, CodeSpecInvalid},
 	}
-	if r := handInstallSpec("/tmp/orders").Validate(); r != nil {
+	// Absolute on every OS: "/tmp/orders" is not absolute on Windows.
+	orders := filepath.Join(os.TempDir(), "orders")
+	if r := handInstallSpec(orders).Validate(); r != nil {
 		t.Fatalf("the pilot spec itself: %v", r)
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := handInstallSpec("/tmp/orders")
+			s := handInstallSpec(orders)
 			tc.mutate(&s)
 			r := s.Validate()
 			if r == nil || r.Code != tc.code {
