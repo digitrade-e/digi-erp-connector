@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,10 +37,22 @@ func DefaultOptions() Options {
 // connector never queries anything. Everything that touches the database checks
 // this first so an unconfigured node degrades cleanly — endpoints answer 503
 // instead of failing with a confusing driver error.
+//
+// A named instance (db.host "host\instance") counts without a port: the driver
+// then asks the SQL Server Browser where the instance listens.
 func IsConfigured(cfg config.Config) bool {
-	return strings.TrimSpace(cfg.DB.Host) != "" &&
+	server, instance := SplitInstance(cfg.DB.Host)
+	return server != "" &&
 		strings.TrimSpace(cfg.DB.User) != "" &&
-		cfg.DB.Port > 0
+		(cfg.DB.Port > 0 || instance != "")
+}
+
+// SplitInstance separates db.host into the server and a named instance:
+// "127.0.0.1\WIZSOFT" is ("127.0.0.1", "WIZSOFT"), "localhost" is
+// ("localhost", "").
+func SplitInstance(host string) (server, instance string) {
+	server, instance, _ = strings.Cut(strings.TrimSpace(host), `\`)
+	return strings.TrimSpace(server), strings.TrimSpace(instance)
 }
 
 // Open returns a pool that is verified reachable: it pings the server and fails
@@ -107,8 +121,15 @@ func Ping(ctx context.Context, db *sql.DB, timeout time.Duration) error {
 	return db.PingContext(ctx)
 }
 
+// buildDSN puts a named instance in the URL path (sqlserver://host/INSTANCE),
+// the form go-mssqldb reads as host\INSTANCE. It used to go into the host
+// part, where the backslash was escaped to %5C and the driver refused the DSN
+// outright ("invalid URL escape") — so the host\instance form the docs offer
+// never connected. With an instance and no port the driver asks the SQL Server
+// Browser (UDP 1434) for the instance's port, which follows a dynamic port
+// across restarts; with a port it connects there directly.
 func buildDSN(cfg config.Config, password string) (driverName string, dsn string, err error) {
-	host := cfg.DB.Host
+	host, instance := SplitInstance(cfg.DB.Host)
 	port := cfg.DB.Port
 	user := cfg.DB.User
 	dbName := cfg.DB.Database
@@ -116,7 +137,7 @@ func buildDSN(cfg config.Config, password string) (driverName string, dsn string
 	if host == "" {
 		return "", "", errors.New("db.host is required")
 	}
-	if port <= 0 || port > 65535 {
+	if port < 0 || port > 65535 || (port == 0 && instance == "") {
 		return "", "", errors.New("db.port is invalid")
 	}
 	if user == "" {
@@ -128,7 +149,13 @@ func buildDSN(cfg config.Config, password string) (driverName string, dsn string
 		u := &url.URL{
 			Scheme: "sqlserver",
 			User:   url.UserPassword(user, password),
-			Host:   fmt.Sprintf("%s:%d", host, port),
+			Host:   host,
+		}
+		if port > 0 {
+			u.Host = net.JoinHostPort(host, strconv.Itoa(port))
+		}
+		if instance != "" {
+			u.Path = "/" + instance
 		}
 		q := url.Values{}
 		if dbName != "" {

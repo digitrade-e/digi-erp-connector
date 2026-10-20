@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microsoft/go-mssqldb/msdsn"
+
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
 
@@ -140,6 +142,75 @@ func TestBuildDSNValidation(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// db.host "host\instance" names a SQL Server instance (the docs have offered
+// it since the start). The DSN used to carry it in the host part, escaped to
+// %5C, and the driver refused it — so this reads every DSN back with the
+// driver's own parser, not a string comparison.
+func TestBuildDSNNamedInstance(t *testing.T) {
+	tests := []struct {
+		name         string
+		host         string
+		port         int
+		wantHost     string
+		wantInstance string
+		wantPort     uint64
+	}{
+		{"instance, no port: the Browser resolves it", `127.0.0.1\WIZSOFT`, 0, "127.0.0.1", "WIZSOFT", 0},
+		{"instance and a port: connect there directly", `127.0.0.1\WIZSOFT`, 63501, "127.0.0.1", "WIZSOFT", 63501},
+		{"spaces around either part are dropped", ` sql01 \ ERP `, 0, "sql01", "ERP", 0},
+		{"a default instance is unchanged", "localhost", 1433, "localhost", "", 1433},
+		{"an IPv6 literal gets brackets", "::1", 1433, "::1", "", 1433},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.DB.Host = tc.host
+			cfg.DB.Port = tc.port
+
+			_, dsn, err := buildDSN(cfg, "p@ss word")
+			if err != nil {
+				t.Fatalf("buildDSN: %v", err)
+			}
+			got, err := msdsn.Parse(dsn)
+			if err != nil {
+				t.Fatalf("the driver refuses %q: %v", dsn, err)
+			}
+			if got.Host != tc.wantHost || got.Instance != tc.wantInstance || got.Port != tc.wantPort {
+				t.Errorf("driver reads host=%q instance=%q port=%d, want %q %q %d (dsn %q)",
+					got.Host, got.Instance, got.Port, tc.wantHost, tc.wantInstance, tc.wantPort, dsn)
+			}
+			if got.Password != "p@ss word" || got.Database != "BFL" {
+				t.Errorf("password or database lost: %q %q", got.Password, got.Database)
+			}
+		})
+	}
+}
+
+func TestIsConfiguredNamedInstance(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		port int
+		want bool
+	}{
+		{"a named instance needs no port", `127.0.0.1\WIZSOFT`, 0, true},
+		{"a default instance needs one", "127.0.0.1", 0, false},
+		{"an instance with no server is not a host", `\WIZSOFT`, 0, false},
+		{"host and port", "127.0.0.1", 1433, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.DB.Host = tc.host
+			cfg.DB.Port = tc.port
+			if got := IsConfigured(cfg); got != tc.want {
+				t.Errorf("IsConfigured = %v, want %v", got, tc.want)
 			}
 		})
 	}
