@@ -393,7 +393,7 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 	if err := w.children(dir, ""); err != nil {
 		return w.rep, err
 	}
-	if t.tokenUser == SIDLocalSystem {
+	if t.tokenUser == SIDLocalSystem || testSetOwnerSystem {
 		w.rep.OwnerSet, w.rep.OwnerErr = setOwnerSystem(dir, w.rootFinal)
 	}
 	return w.rep, nil
