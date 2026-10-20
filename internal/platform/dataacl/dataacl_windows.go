@@ -389,14 +389,37 @@ func ProtectTree(dir string, opt TreeOptions) (Report, error) {
 		if err := w.claim(dir, root); err != nil {
 			return w.rep, err
 		}
+		if err := w.settle(dir, root, t.root, true); err != nil {
+			return w.rep, err
+		}
 	}
 	if err := w.children(dir, ""); err != nil {
 		return w.rep, err
 	}
 	if t.tokenUser == SIDLocalSystem || testSetOwnerSystem {
 		w.rep.OwnerSet, w.rep.OwnerErr = setOwnerSystem(dir, w.rootFinal)
+		if w.rep.OwnerSet {
+			if err := w.settle(dir, root, t.root, true); err != nil {
+				return w.rep, err
+			}
+		}
 	}
 	return w.rep, nil
+}
+
+// settle writes want again when n's DACL no longer matches it after an owner
+// change: Windows turns an object's OWNER RIGHTS ACEs inherit-only when its
+// owner changes (the new owner is not bound by the old owner's limit), so the
+// directory stops passing OWNER RIGHTS down to what is created in it, and
+// every later walk found the directory and each new file "differing" — the
+// b4l write node, 2026-10-20. The handle was opened for WRITE_DAC before the
+// change, so it still may.
+func (w *walker) settle(path string, n node, want *windows.SECURITY_DESCRIPTOR, protected bool) error {
+	differs, _, err := w.t.check(path, n, want)
+	if err != nil || !differs {
+		return err
+	}
+	return write(path, n, want, protected)
 }
 
 // claim hands an entry to Administrators. An entry that turned out to be
@@ -477,6 +500,9 @@ func (w *walker) entry(path, rel string) error {
 	}
 	if claim {
 		if err := w.claim(path, n); err != nil {
+			return err
+		}
+		if err := w.settle(path, n, want, false); err != nil {
 			return err
 		}
 	}
