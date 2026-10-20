@@ -2,7 +2,6 @@ package provision
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"slices"
@@ -250,11 +249,8 @@ func NewEnv(sys System) Env {
 		OpenDB: OpenDatabase,
 		HTTP: &http.Client{
 			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				// Local only (LocalAddr) and our own self-signed pair.
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
-				Proxy:           nil,
-			},
+			// Local only (LocalAddr); with TLS on, daemonFor trusts exactly the pair config.yaml names.
+			Transport: &http.Transport{Proxy: nil},
 		},
 		LocalAddr:    LocalAddr,
 		Now:          time.Now,

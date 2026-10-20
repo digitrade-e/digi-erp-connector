@@ -3,11 +3,16 @@ package provision
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
@@ -21,11 +26,36 @@ type daemon struct {
 }
 
 func (e Env) daemonFor(cfg config.Config) daemon {
-	scheme := "http"
-	if cfg.TLS.Enabled() {
-		scheme = "https"
+	if !cfg.TLS.Enabled() {
+		return daemon{base: "http://" + e.LocalAddr(cfg.APIListen), http: e.HTTP}
 	}
-	return daemon{base: scheme + "://" + e.LocalAddr(cfg.APIListen), http: e.HTTP}
+	return daemon{base: "https://" + e.LocalAddr(cfg.APIListen), http: pinnedClient(e.HTTP, cfg.TLS.CertFile)}
+}
+
+// pinnedClient is base with a TLS config that trusts exactly the certificate at certFile — the connector's own pair,
+// self-signed — and checks it against the name it was made for, its first SAN (the connector is dialled on loopback,
+// which no SAN names). An unreadable certificate trusts nothing: the proof then fails, as it should.
+func pinnedClient(base *http.Client, certFile string) *http.Client {
+	pool, name := x509.NewCertPool(), ""
+	if b, err := os.ReadFile(certFile); err == nil {
+		if blk, _ := pem.Decode(b); blk != nil {
+			if c, err := x509.ParseCertificate(blk.Bytes); err == nil {
+				pool.AddCert(c)
+				switch {
+				case len(c.IPAddresses) > 0:
+					name = c.IPAddresses[0].String()
+				case len(c.DNSNames) > 0:
+					name = c.DNSNames[0]
+				}
+			}
+		}
+	}
+	timeout := 10 * time.Second
+	if base != nil && base.Timeout > 0 {
+		timeout = base.Timeout
+	}
+	return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil,
+		TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: name, MinVersion: tls.VersionTLS12}}}
 }
 
 var (

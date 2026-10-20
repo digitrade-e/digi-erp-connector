@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -287,5 +289,38 @@ func TestEnvelopeIsASCII(t *testing.T) {
 		if back.Result[k] != v {
 			t.Errorf("%s = %q, want %q", k, back.Result[k], v)
 		}
+	}
+}
+
+// The proof's client trusts exactly the connector's own pair (no InsecureSkipVerify): its certificate passes, any
+// other certificate is refused, and an unreadable one trusts nothing.
+func TestPinnedClientTrustsTheConnectorsOwnPair(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
+	defer srv.Close()
+	own := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(own, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := pinnedClient(nil, own).Get(srv.URL); err != nil || res.StatusCode != 204 {
+		t.Fatalf("its own certificate: %v", err)
+	}
+	// httptest's servers all share one built-in certificate: the other one serves a pair of its own.
+	certPEM, keyPEM, err := selfSignedPair([]string{"127.0.0.1"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	other.TLS = &tls.Config{Certificates: []tls.Certificate{pair}}
+	other.StartTLS()
+	defer other.Close()
+	if _, err := pinnedClient(nil, own).Get(other.URL); err == nil {
+		t.Error("another certificate was trusted")
+	}
+	if _, err := pinnedClient(nil, filepath.Join(t.TempDir(), "none.pem")).Get(srv.URL); err == nil {
+		t.Error("no certificate trusted everything")
 	}
 }

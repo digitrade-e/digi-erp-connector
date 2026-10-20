@@ -197,8 +197,9 @@ func envelope(cmd string, result any, refusal *Refusal, secrets []string) []byte
 			return asciiOnly(out)
 		}
 	}
-	c, _ := json.Marshal(cmd) // whatever was typed, quoted as JSON
-	return asciiOnly([]byte(`{"command":` + string(c) + `,"ok":false,"refusal":{"code":"failed","message":"the result does not encode"}}` + "\n"))
+	b, _ := json.Marshal(Envelope{Command: cmd, Tool: buildinfo.Version,
+		Refusal: &Refusal{Code: "failed", Message: "the result does not encode"}}) // a string and a struct always marshal
+	return asciiOnly(append(b, '\n'))
 }
 
 // ensureDefaults fills what a caller left out with the real box's.
