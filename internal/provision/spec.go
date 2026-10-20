@@ -448,6 +448,9 @@ func (d DiscoverDB) Validate() *Refusal {
 	if strings.TrimSpace(d.User) == "" || hasControl(d.User) || d.Password == "" || hasControl(d.Password) {
 		return refuse(CodeSpecInvalid, "send the login and its password", "db.user or db.password is missing or not text")
 	}
+	if d.Database != "" && !hasavshevet.IsSafeDBName(d.Database) {
+		return refuse(CodeSpecInvalid, "use the database's name: letters, digits and _ only", "db.database is not a database name")
+	}
 	return nil
 }
 

@@ -18,6 +18,7 @@ can run it the same way in an elevated PowerShell. The code is
 | `apply --spec -` | the spec (below) | Makes the connector match the spec | see below |
 | `verify [--spec -]` | optional `{"expectVersion","firewallRule"}` | Checks the running connector against `config.yaml`: service, login, `/api/ping`, `/api/health`, the order queue, recovery, the SQL dependency, the firewall rule | nothing |
 | `restore <changeSet> [--assume-idle]` | none | Puts a change set's pre-image back and restarts on it | the pre-image's files, firewall rule, dependencies |
+| `apply --check --spec -` | the spec | Every check `apply` makes, its refusals included, then what it would change (`check`) | nothing |
 | `version` | none | Prints the build's version | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
@@ -204,6 +205,17 @@ then the running connector's order queue cannot be asked, so it needs
 `--assume-idle`. It warns when the restored config's database does not answer (the
 client may have changed that password since). The service's recovery actions are not
 part of a pre-image: `restore` leaves them on.
+
+**`discover` names one database.** With a credential (`{"db":{"user","password","database"}}`) it counts the
+databases the login can open (`databaseCount`) and fingerprints only the one named — or, when none is named, the one
+`config.yaml` uses. On a shared SQL Server the others are other companies' books: their names never leave the box
+(plan 068 D12).
+
+**`apply --check`** runs every check of a real `apply` — the spec, the queue, the database login, the login plan — and
+stops before the first write. Its `check` says what would change: `config` (the fields), `login`
+(`given`/`keep`/`create`/`rotate`), `dbSecret`, `tls`, `firewall`, `dependencies`, `recovery`, `orderCounter` and
+`restart`. digi-mcp's plan shows it, so the box's own decisions and refusals reach the plan. The Hasavshevet
+procedures are created where missing at apply; the check does not look.
 
 `discover` also reports what the transport needs to know: `host.winrmAnalytic` (the
 note `winrm_analytic_on` — that log records what crosses WinRM, secrets on stdin

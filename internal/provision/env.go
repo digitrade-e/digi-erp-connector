@@ -60,8 +60,10 @@ type Database interface {
 	// unlocks it), its user in database, and the read-only grants of
 	// scripts/sql/least-privilege-read-node.sql.
 	EnsureLeastPrivilegeLogin(ctx context.Context, login, database, password string) error
-	// Databases fingerprints the databases this login can open.
-	Databases(ctx context.Context) ([]DatabaseFact, error)
+	// CountDatabases counts the databases this login can open.
+	CountDatabases(ctx context.Context) (int, error)
+	// Fingerprint names the ERP of one database this login can open.
+	Fingerprint(ctx context.Context, database string) (DatabaseFact, error)
 	Close() error
 }
 

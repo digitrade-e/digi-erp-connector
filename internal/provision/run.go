@@ -31,8 +31,8 @@ const (
 
 // Usage is the command line, for a human.
 const Usage = `usage:
-  digi-erp-connector-provision discover [--spec -]      read the box (stdin: optional {"db":{...}} to fingerprint databases)
-  digi-erp-connector-provision apply --spec -           make the connector match the spec on stdin
+  digi-erp-connector-provision discover [--spec -]      read the box (stdin: optional {"db":{...}} to fingerprint the named database)
+  digi-erp-connector-provision apply [--check] --spec - make the connector match the spec on stdin; --check stops before the first write
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
   digi-erp-connector-provision version
@@ -87,6 +87,10 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		}
 		result, err = Discover(ctx, env, in)
 	case "apply":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
 		if ok, u := readSpecFlag(rest); !u || !ok {
 			return []byte(Usage + "\n"), ExitUsage
 		}
@@ -96,7 +100,11 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		}
 		secrets = append(secrets, spec.secrets()...)
 		var res *ApplyResult
-		res, err = Apply(ctx, env, spec)
+		if check {
+			res, err = ApplyCheck(ctx, env, spec)
+		} else {
+			res, err = Apply(ctx, env, spec)
+		}
 		result = res
 		if res != nil {
 			secrets = append(secrets, res.secrets...)

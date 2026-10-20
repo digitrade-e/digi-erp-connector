@@ -299,3 +299,77 @@ func checkByName(res *VerifyResult, name string) (Check, bool) {
 	}
 	return Check{}, false
 }
+
+// D12: discover names and opens no database but the one the client named;
+// the others are counted. On a shared server they are other companies' books.
+func TestPanel_DiscoverNamesOnlyTheClientsDatabase(t *testing.T) {
+	sys, fdb, _ := handInstallBox(t)
+	fdb.databases = []DatabaseFact{{Name: "erp_db", ERP: "hasavshevet"}, {Name: "another_company", ERP: "hasavshevet"}, {Name: "demo"}}
+	in := `{"db":{"user":"sa","password":"` + testSaPass + `","database":"erp_db"}}`
+	out, code := Run(context.Background(), testEnv(sys, fdb), []string{"discover", "--spec", "-"}, strings.NewReader(in))
+	if code != ExitOK || bytes.Contains(out, []byte("another_company")) || bytes.Contains(out, []byte(`"demo"`)) {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	var e struct{ Result Facts }
+	if err := json.Unmarshal(out, &e); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Result.Databases) != 1 || e.Result.Databases[0].ERP != "hasavshevet" || e.Result.DatabaseCount != 3 {
+		t.Errorf("databases %+v, count %d", e.Result.Databases, e.Result.DatabaseCount)
+	}
+
+	bad := `{"db":{"user":"sa","password":"x","database":"erp]; DROP DATABASE x"}}`
+	if _, code := Run(context.Background(), testEnv(sys, fdb), []string{"discover", "--spec", "-"}, strings.NewReader(bad)); code != ExitRefused {
+		t.Error("a database name that is not one was taken")
+	}
+}
+
+// apply --check runs every check, refusals included, and writes nothing:
+// not a file, a secret, a login, a rule or a service setting.
+func TestApplyCheck_WritesNothing(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	env := testEnv(sys, fdb)
+	_, before := readConfig(t, sys.dir)
+	res, err := ApplyCheck(context.Background(), env, handInstallSpec(orders))
+	if err != nil {
+		t.Fatalf("ApplyCheck: %v", err)
+	}
+	c := res.Check
+	if c == nil || c.Config != "changed: apiListen, db, auth" || c.Login != "create" || !c.DBSecret ||
+		c.Firewall != "set" || !c.Dependencies || !c.Recovery || !c.Restart {
+		t.Errorf("check %+v", c)
+	}
+	if _, after := readConfig(t, sys.dir); !bytes.Equal(before, after) || len(sys.calls) != 0 ||
+		fdb.loginCalls != 0 || fdb.procsMade || res.PreimageCaptured {
+		t.Errorf("written: calls %v, login calls %d, procedures %v", sys.calls, fdb.loginCalls, fdb.procsMade)
+	}
+	if _, err := os.Stat(preimageDir(sys.dir, "cs-erp01-0001")); !os.IsNotExist(err) {
+		t.Error("a pre-image was taken")
+	}
+
+	// After the real apply, the same spec would change nothing.
+	if _, err := Apply(context.Background(), env, handInstallSpec(orders)); err != nil {
+		t.Fatal(err)
+	}
+	res, err = ApplyCheck(context.Background(), env, handInstallSpec(orders))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := res.Check; c.Config != "unchanged" || c.Login != "keep" || c.DBSecret || c.Firewall != "keep" ||
+		c.Dependencies || c.Recovery || c.Restart {
+		t.Errorf("check after the apply %+v", c)
+	}
+
+	// A refusal reaches the caller as it would from apply.
+	spec := handInstallSpec(orders)
+	spec.DB.LeastPrivilege = false
+	_, err = ApplyCheck(context.Background(), env, spec)
+	wantRefusal(t, err, CodeSaLogin)
+
+	// The command line.
+	in, _ := json.Marshal(handInstallSpec(orders))
+	out, code := Run(context.Background(), env, []string{"apply", "--check", "--spec", "-"}, bytes.NewReader(in))
+	if code != ExitOK || !bytes.Contains(out, []byte(`"check":`)) || bytes.Contains(out, []byte(testSaPass)) {
+		t.Errorf("exit %d: %s", code, out)
+	}
+}

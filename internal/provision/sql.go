@@ -59,9 +59,6 @@ IF OBJECT_ID(N'dbo.GetOnHandStockForSkus', N'P') IS NOT NULL GRANT EXECUTE ON [d
 // fingerprintTables are the tables Databases looks for.
 var fingerprintTables = []string{"Accounts", "Stock", "Rates", "OITM", "OCRD"}
 
-// maxFingerprinted bounds how many databases Databases opens.
-const maxFingerprinted = 50
-
 // classify names the ERP a database's tables point to.
 func classify(tables []string) string {
 	has := map[string]bool{}
@@ -120,52 +117,42 @@ func (s sqlDatabase) EnsureLeastPrivilegeLogin(ctx context.Context, login, datab
 	return nil
 }
 
-func (s sqlDatabase) Databases(ctx context.Context) ([]DatabaseFact, error) {
-	rows, err := s.conn.QueryContext(ctx,
-		`SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1 ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		names = append(names, n)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(names) > maxFingerprinted {
-		names = names[:maxFingerprinted]
-	}
+// openable is the databases this login can open, the system ones left out.
+const openable = `database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1`
 
+func (s sqlDatabase) CountDatabases(ctx context.Context) (int, error) {
+	var n int
+	err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sys.databases WHERE `+openable).Scan(&n)
+	return n, err
+}
+
+// Fingerprint names the ERP of database by its tables. Only a name that is
+// safe to bracket-quote, and that this login can open, is looked into.
+func (s sqlDatabase) Fingerprint(ctx context.Context, database string) (DatabaseFact, error) {
+	f := DatabaseFact{Name: database}
+	if !hasavshevet.IsSafeDBName(database) {
+		return f, fmt.Errorf("%q is not a database name this tool opens", database)
+	}
+	names, err := scanNames(ctx, s.conn, `SELECT name FROM sys.databases WHERE name = @p1 AND `+openable, database)
+	if err != nil {
+		return f, err
+	}
+	if len(names) == 0 {
+		return f, fmt.Errorf("%s is not a database this login can open", database)
+	}
 	var placeholders []string
 	var args []any
 	for i, t := range fingerprintTables {
 		placeholders = append(placeholders, fmt.Sprintf("@t%d", i))
 		args = append(args, sql.Named(fmt.Sprintf("t%d", i), t))
 	}
-	out := make([]DatabaseFact, 0, len(names))
-	for _, n := range names {
-		f := DatabaseFact{Name: n}
-		if strings.EqualFold(n, "SBO-COMMON") {
-			f.ERP = "sap-common"
-		}
-		// Only a name that is safe to bracket-quote is opened; others are
-		// listed as they are.
-		if hasavshevet.IsSafeDBName(n) {
-			q := fmt.Sprintf("SELECT name FROM [%s].sys.tables WHERE name IN (%s)", n, strings.Join(placeholders, ", "))
-			if tables, err := scanNames(ctx, s.conn, q, args...); err == nil {
-				f.ERP = classify(tables)
-			}
-		}
-		out = append(out, f)
+	q := fmt.Sprintf("SELECT name FROM [%s].sys.tables WHERE name IN (%s)", database, strings.Join(placeholders, ", "))
+	tables, err := scanNames(ctx, s.conn, q, args...)
+	if err != nil {
+		return f, err
 	}
-	return out, nil
+	f.ERP = classify(tables)
+	return f, nil
 }
 
 func scanNames(ctx context.Context, conn *sql.DB, q string, args ...any) ([]string, error) {

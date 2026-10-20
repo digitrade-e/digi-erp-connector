@@ -37,8 +37,27 @@ type ApplyResult struct {
 	Proof            *Proof   `json:"proof,omitempty"`
 	RolledBack       bool     `json:"rolledBack,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
+	// Check is what the run would do, when it was apply --check.
+	Check *CheckResult `json:"check,omitempty"`
 
 	secrets []string // seen or born here, for Redact; never marshalled
+}
+
+// CheckResult is the answer of apply --check: every check of a real run, its
+// refusals included, then what it would change — and nothing written. digi-mcp
+// shows it in its plan, so the box's own decisions reach the plan instead of
+// being re-implemented there (plan 068 §10.2). Procedures are created where
+// missing at apply; the check does not look.
+type CheckResult struct {
+	Config       string `json:"config"`                 // "unchanged", or configDiff's "changed: …"
+	Login        string `json:"login"`                  // given | keep | create | rotate
+	DBSecret     bool   `json:"dbSecret"`               // the stored DB password would change
+	TLS          string `json:"tls,omitempty"`          // keep | generate, when the spec asks for a pair
+	Firewall     string `json:"firewall,omitempty"`     // keep | set, when the spec names a rule
+	Dependencies bool   `json:"dependencies,omitempty"` // the service's dependencies would change
+	Recovery     bool   `json:"recovery"`               // the service's recovery actions would be set
+	OrderCounter bool   `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
+	Restart      bool   `json:"restart"`                // the service would restart
 }
 
 // Step is one part of the change: whether it changed anything.
@@ -64,11 +83,21 @@ const orderNumberFile = "lastOrderNumber.json"
 // before every check has passed; a failure after the first write puts this
 // run's pre-image back.
 func Apply(ctx context.Context, env Env, s Spec) (*ApplyResult, error) {
+	return apply(ctx, env, s, false)
+}
+
+// ApplyCheck is apply --check: Apply's checks, then what it would change, with
+// nothing written (CheckResult).
+func ApplyCheck(ctx context.Context, env Env, s Spec) (*ApplyResult, error) {
+	return apply(ctx, env, s, true)
+}
+
+func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
 	if r := s.Validate(); r != nil {
 		return res, r
 	}
-	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res}
+	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -97,10 +126,11 @@ func lockRuns(dataDir string) (func(), error) {
 }
 
 type applier struct {
-	env Env
-	s   Spec
-	dir string
-	res *ApplyResult
+	env   Env
+	s     Spec
+	dir   string
+	res   *ApplyResult
+	check bool // apply --check: stop before the first write
 
 	cur      config.Config
 	curBytes []byte // nil: there is no config.yaml
@@ -175,6 +205,10 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.planLogin(ctx, admin); err != nil {
 		return err
 	}
+	if a.check {
+		a.res.Check = a.wouldDo()
+		return nil
+	}
 
 	// The DACL first: the pre-image copies config.yaml — credential in clear —
 	// into the data directory, so it lands only in a tree the walk accepted.
@@ -199,6 +233,39 @@ func (a *applier) run(ctx context.Context) error {
 		a.warn("the data directory could not be protected after the writes (%v); the service sets it at its start, and refuses to start if it cannot", err)
 	}
 	return a.restartAndProve(ctx)
+}
+
+// wouldDo is what the write steps would change, decided as they decide it.
+func (a *applier) wouldDo() *CheckResult {
+	c := &CheckResult{Config: "unchanged", Login: a.loginPlan, Recovery: !a.svc.RecoveryPlanned, OrderCounter: a.moveOrders}
+	if out, err := config.Marshal(a.tgt); err != nil || !bytes.Equal(out, a.curBytes) {
+		c.Config = configDiff(a.cur, a.tgt)
+	}
+	switch a.loginPlan {
+	case "create", "rotate":
+		c.DBSecret = true
+	default:
+		cur, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP))
+		c.DBSecret = err != nil || string(cur) != a.dbPassword
+	}
+	if a.s.TLS != nil && a.s.TLS.Mode == "self-signed" {
+		c.TLS = "generate"
+		if a.tlsCovered() {
+			c.TLS = "keep"
+		}
+	}
+	if a.s.Firewall != nil {
+		c.Firewall = "set"
+		if a.fwBefore != nil && a.fwBefore.Same(a.wantRule()) {
+			c.Firewall = "keep"
+		}
+	}
+	if a.s.Service != nil {
+		c.Dependencies = !sameFold(dedupe(a.s.Service.DependOn), a.svc.Dependencies)
+	}
+	c.Restart = c.Config != "unchanged" || c.DBSecret || c.TLS == "generate" || c.OrderCounter ||
+		configStale(a.curMod, a.svc.ProcessStart) || a.svc.State != "running"
+	return c
 }
 
 // settle runs after every run: the run's pre-image goes (it holds config.yaml
@@ -606,9 +673,7 @@ func (a *applier) writeTLS() error {
 	if a.s.TLS == nil || a.s.TLS.Mode != "self-signed" {
 		return nil
 	}
-	cert, _ := os.ReadFile(filepath.Join(a.dir, tlsCertFile))
-	_, keyErr := os.Stat(filepath.Join(a.dir, tlsKeyFile))
-	if keyErr == nil && certCovers(cert, a.s.TLS.Hosts, a.env.Now()) {
+	if a.tlsCovered() {
 		a.step("tls", false, "the pair covers "+strings.Join(a.s.TLS.Hosts, ", "))
 		return nil
 	}
@@ -626,6 +691,13 @@ func (a *applier) writeTLS() error {
 	a.restart = true
 	a.step("tls", true, "a self-signed pair for "+strings.Join(a.s.TLS.Hosts, ", "))
 	return nil
+}
+
+// tlsCovered: the box's pair covers the spec's hosts and has time left.
+func (a *applier) tlsCovered() bool {
+	cert, _ := os.ReadFile(filepath.Join(a.dir, tlsCertFile))
+	_, keyErr := os.Stat(filepath.Join(a.dir, tlsKeyFile))
+	return keyErr == nil && certCovers(cert, a.s.TLS.Hosts, a.env.Now())
 }
 
 func (a *applier) writeSecret() error {
@@ -704,13 +776,7 @@ func (a *applier) firewall() error {
 	if a.s.Firewall == nil {
 		return nil
 	}
-	want := FirewallRule{
-		Name:          ruleName(a.s.Firewall),
-		Enabled:       true,
-		Port:          listenPort(a.tgt.APIListen),
-		RemoteAddress: canonicalSources(a.s.Firewall.AllowFrom),
-		Ours:          true,
-	}
+	want := a.wantRule()
 	if profiles, err := a.env.Sys.FirewallProfiles(); err == nil && profiles.AllOff() {
 		a.warn("firewall_inert: every Windows firewall profile is off, so the rule filters nothing: the client's perimeter is the only gate")
 	}
@@ -723,6 +789,17 @@ func (a *applier) firewall() error {
 	}
 	a.step("firewall", true, fmt.Sprintf("TCP %d from %s", want.Port, strings.Join(want.RemoteAddress, ", ")))
 	return nil
+}
+
+// wantRule is the firewall rule the spec asks for.
+func (a *applier) wantRule() FirewallRule {
+	return FirewallRule{
+		Name:          ruleName(a.s.Firewall),
+		Enabled:       true,
+		Port:          listenPort(a.tgt.APIListen),
+		RemoteAddress: canonicalSources(a.s.Firewall.AllowFrom),
+		Ours:          true,
+	}
 }
 
 func (a *applier) service() error {

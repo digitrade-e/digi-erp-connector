@@ -301,7 +301,15 @@ func (c fakeConn) EnsureLeastPrivilegeLogin(_ context.Context, login, database, 
 	c.db.mu.Unlock()
 	return nil
 }
-func (c fakeConn) Databases(context.Context) ([]DatabaseFact, error) { return c.db.databases, nil }
+func (c fakeConn) CountDatabases(context.Context) (int, error) { return len(c.db.databases), nil }
+func (c fakeConn) Fingerprint(_ context.Context, name string) (DatabaseFact, error) {
+	for _, d := range c.db.databases {
+		if d.Name == name {
+			return d, nil
+		}
+	}
+	return DatabaseFact{Name: name}, errors.New(name + " is not a database this login can open")
+}
 
 // testEnv wires a fake box. The clock advances by every Sleep, so a port
 // proof that never succeeds ends at once.

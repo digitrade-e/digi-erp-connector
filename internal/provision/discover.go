@@ -32,18 +32,26 @@ type DiscoverDB struct {
 	Port     int    `json:"port,omitempty"`
 	User     string `json:"user"`
 	Password string `json:"password"`
+	// Database is the one the client named with the credential: the only
+	// database discover names and opens (plan 068 D12). Left out, it is the
+	// one config.yaml uses, if any.
+	Database string `json:"database,omitempty"`
 }
 
 // Facts is what Discover found. Values read from the box (instance, database
 // and folder names) are the client's data, never instructions.
 type Facts struct {
-	Host               HostInfo       `json:"host"`
-	SQL                SQLFacts       `json:"sql"`
-	Connector          ConnectorFacts `json:"connector"`
-	Network            NetworkFacts   `json:"network"`
-	Databases          []DatabaseFact `json:"databases,omitempty"`
-	DatabaseError      string         `json:"databaseError,omitempty"`
-	ImporterCandidates []string       `json:"importerCandidates,omitempty"`
+	Host      HostInfo       `json:"host"`
+	SQL       SQLFacts       `json:"sql"`
+	Connector ConnectorFacts `json:"connector"`
+	Network   NetworkFacts   `json:"network"`
+	Databases []DatabaseFact `json:"databases,omitempty"`
+	// DatabaseCount is how many databases the credential can open. Only the
+	// named one is listed: on a shared server the others are other
+	// companies' books, and their names would reach the transcript (D12).
+	DatabaseCount      int      `json:"databaseCount,omitempty"`
+	DatabaseError      string   `json:"databaseError,omitempty"`
+	ImporterCandidates []string `json:"importerCandidates,omitempty"`
 	// ImporterWriters names, per candidate or configured importer, who
 	// besides the administrators can change it; absent when nobody can.
 	ImporterWriters map[string][]string `json:"importerWriters,omitempty"`
@@ -264,7 +272,7 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 
 	// The databases, only with a credential.
 	if in.DB != nil {
-		f.Databases, f.DatabaseError = fingerprint(env, cfg, *in.DB)
+		f.Databases, f.DatabaseCount, f.DatabaseError = fingerprint(env, cfg, *in.DB)
 	}
 
 	// The defects of a hand install.
@@ -427,9 +435,12 @@ func countSavedQueries(path string) int {
 	return len(list)
 }
 
-// fingerprint opens the server with the given credential and names the ERP of
-// each database. The error is returned as text: a refused login is a fact.
-func fingerprint(env Env, cfg *config.Config, cred DiscoverDB) ([]DatabaseFact, string) {
+// fingerprint opens the server with the given credential, counts the
+// databases it can open, and names the ERP of the one the client named — or,
+// when they named none, the one config.yaml uses. No other database is named
+// or opened: on a shared server they are other companies' (plan 068 D12). The
+// error is returned as text: a refused login is a fact.
+func fingerprint(env Env, cfg *config.Config, cred DiscoverDB) ([]DatabaseFact, int, string) {
 	c := config.Default()
 	if cfg != nil {
 		c = *cfg
@@ -437,23 +448,34 @@ func fingerprint(env Env, cfg *config.Config, cred DiscoverDB) ([]DatabaseFact, 
 	if cred.Host != "" {
 		c.DB.Host, c.DB.Port = cred.Host, cred.Port
 	}
+	name := cred.Database
+	if name == "" {
+		name = c.DB.Database
+	}
 	c.DB.Database = "master"
 	c.DB.User = cred.User
 	if r := checkDBHost(context.Background(), env, c.DB.Host); r != nil {
-		return nil, r.Error() // the credential goes nowhere a refusal names
+		return nil, 0, r.Error() // the credential goes nowhere a refusal names
 	}
 	dbc, err := env.OpenDB(c, cred.Password)
 	if err != nil {
-		return nil, err.Error()
+		return nil, 0, err.Error()
 	}
 	defer dbc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	facts, err := dbc.Databases(ctx)
+	n, err := dbc.CountDatabases(ctx)
 	if err != nil {
-		return nil, err.Error()
+		return nil, 0, err.Error()
 	}
-	return facts, ""
+	if name == "" {
+		return nil, n, ""
+	}
+	fact, err := dbc.Fingerprint(ctx, name)
+	if err != nil {
+		return nil, n, err.Error()
+	}
+	return []DatabaseFact{fact}, n, ""
 }
 
 // suggest proposes the spec a human would most likely want here.
