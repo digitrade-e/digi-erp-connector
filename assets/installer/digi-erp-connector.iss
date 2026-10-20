@@ -2,6 +2,7 @@
 #define AppPublisher "Digitrade"
 #define AppExe "digi-erp-connector.exe"
 #define ServiceExe "digi-erp-connectord.exe"
+#define ProvisionExe "digi-erp-connector-provision.exe"
 #define ServiceName "digi-erp-connectord"
 
 #ifndef AppVersion
@@ -39,6 +40,8 @@ SetupIconFile={#SourcePath}\icon.ico
 [Files]
 Source: "{#BuildDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\{#ServiceExe}"; DestDir: "{app}"; Flags: ignoreversion
+; The headless configuration tool digi-mcp runs over WinRM (plan 068).
+Source: "{#BuildDir}\{#ProvisionExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\launch-admin.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
