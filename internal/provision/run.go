@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -172,17 +171,18 @@ func failedChecks(res *VerifyResult) int {
 }
 
 // envelope encodes the one object a command prints, redacted inside its
-// strings (redactJSON).
+// strings (redactJSON) and in ASCII only (asciiOnly).
 func envelope(cmd string, result any, refusal *Refusal, secrets []string) []byte {
 	e := Envelope{Command: cmd, OK: refusal == nil, Tool: buildinfo.Version, Refusal: refusal, Result: result}
 	raw, err := json.Marshal(e)
 	if err == nil {
 		var out []byte
 		if out, err = redactJSON(raw, secrets...); err == nil {
-			return out
+			return asciiOnly(out)
 		}
 	}
-	return []byte(fmt.Sprintf(`{"command":%q,"ok":false,"refusal":{"code":"failed","message":"the result does not encode"}}`+"\n", cmd))
+	c, _ := json.Marshal(cmd) // whatever was typed, quoted as JSON
+	return asciiOnly([]byte(`{"command":` + string(c) + `,"ok":false,"refusal":{"code":"failed","message":"the result does not encode"}}` + "\n"))
 }
 
 // ensureDefaults fills what a caller left out with the real box's.

@@ -277,7 +277,7 @@ func (a *applier) checkImporterStated() error {
 		(a.s.Importer != nil && a.s.Importer.Mode == "none") {
 		return nil
 	}
-	return refuse(CodeImporterRequired, `name has.exe and its parameter file ("mode": "hasExe"), a BAT ("bat"), or say "none" — orders are then written and imported by hand`,
+	return refuse(CodeImporterRequired, `name has.exe and its parameter file ("mode": "hasExe"), a BAT ("bat"), or say "none"; orders are then written and imported by hand`,
 		"orders go to %s but no importer is named", a.tgt.SendOrderDir)
 }
 
@@ -455,7 +455,7 @@ func (a *applier) planLogin(ctx context.Context, admin Database) error {
 			err = oerr
 		}
 		if !a.s.DB.RotateLogin {
-			return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password — anything else that logs in as it then needs the new one",
+			return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password; anything else that logs in as it then needs the new one",
 				"%s's stored password does not log in: %v", LeastPrivilegeLogin, err)
 		}
 		a.loginPlan = "rotate"
@@ -664,7 +664,7 @@ func (a *applier) firewall() error {
 		Ours:          true,
 	}
 	if profiles, err := a.env.Sys.FirewallProfiles(); err == nil && profiles.AllOff() {
-		a.warn("firewall_inert: every Windows firewall profile is off, so the rule filters nothing — the client's perimeter is the only gate")
+		a.warn("firewall_inert: every Windows firewall profile is off, so the rule filters nothing: the client's perimeter is the only gate")
 	}
 	if a.fwBefore != nil && a.fwBefore.Same(want) {
 		a.step("firewall", false, "")
@@ -803,7 +803,7 @@ func (a *applier) fail(cause error) error {
 		return cause
 	}
 	if err := a.rollback(); err != nil {
-		a.warn("the rollback did not finish: %v — restore by hand from provision\\%s\\run", err, a.s.ChangeSet)
+		a.warn("the rollback did not finish: %v; restore by hand from provision\\%s\\run", err, a.s.ChangeSet)
 	}
 	return cause
 }

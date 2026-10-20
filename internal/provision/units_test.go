@@ -257,3 +257,25 @@ func TestConfigStale(t *testing.T) {
 		t.Error("a service that is not running cannot run a stale config")
 	}
 }
+
+// The output is ASCII whatever the box holds — a Hebrew folder name, an em
+// dash, an emoji — and decodes back to the same text. On a Hebrew box, PowerShell
+// 5.1 showed the UTF-8 "—" of a warning as "ג€”".
+func TestEnvelopeIsASCII(t *testing.T) {
+	in := map[string]string{"folder": "C:\\הזמנות", "note": "a — b", "emoji": "ok 👍"}
+	out := envelope("discover", in, nil, nil)
+	for _, c := range out {
+		if c >= 0x80 {
+			t.Fatalf("non-ASCII byte in %s", out)
+		}
+	}
+	var back struct{ Result map[string]string }
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	for k, v := range in {
+		if back.Result[k] != v {
+			t.Errorf("%s = %q, want %q", k, back.Result[k], v)
+		}
+	}
+}

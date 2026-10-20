@@ -23,7 +23,10 @@ can run it the same way in an elevated PowerShell. The code is
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
 through a redaction pass over the secrets in the input and the passwords born during
-the run. Exit codes: 0 done, 1 refused (the `refusal` says why, with a `fix`), 2 usage.
+the run. It is ASCII only: anything else, a Hebrew folder name for one, is escaped as
+`\uXXXX`, because Windows PowerShell 5.1 reads a file in the system code page and shows
+UTF-8 as mojibake; every JSON reader decodes it back. Exit codes: 0 done, 1 refused (the
+`refusal` says why, with a `fix`), 2 usage.
 
 ## The spec
 

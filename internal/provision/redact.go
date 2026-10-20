@@ -3,9 +3,11 @@ package provision
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"sort"
 	"strings"
+	"unicode/utf16"
 )
 
 // Redacted replaces a secret in output.
@@ -83,4 +85,27 @@ func redactJSON(b []byte, secrets ...string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// asciiOnly escapes every non-ASCII character of a JSON document as \uXXXX
+// (a pair for one beyond the BMP). Windows PowerShell 5.1 reads a file in the
+// system code page — Windows-1255 on a Hebrew box — and shows UTF-8 as
+// mojibake; escaped, the output reads the same in any code page, and every
+// JSON reader decodes it back. Only strings can hold such characters, so the
+// escapes are always inside one.
+func asciiOnly(b []byte) []byte {
+	var out bytes.Buffer
+	out.Grow(len(b))
+	for _, r := range string(b) {
+		switch {
+		case r < 0x80:
+			out.WriteByte(byte(r))
+		case r > 0xFFFF:
+			hi, lo := utf16.EncodeRune(r)
+			fmt.Fprintf(&out, `\u%04x\u%04x`, hi, lo)
+		default:
+			fmt.Fprintf(&out, `\u%04x`, r)
+		}
+	}
+	return out.Bytes()
 }
