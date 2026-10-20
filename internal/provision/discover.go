@@ -197,8 +197,7 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 			c.Config = configFacts(parsed, b)
 			if info, err := os.Stat(filepath.Join(dir, configFile)); err == nil {
 				c.Config.Modified = info.ModTime().UTC()
-				c.ConfigNewerThanStart = c.Service.State == "running" && !c.Service.ProcessStart.IsZero() &&
-					info.ModTime().After(c.Service.ProcessStart)
+				c.ConfigNewerThanStart = c.Service.State == "running" && configStale(info.ModTime(), c.Service.ProcessStart)
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

@@ -127,12 +127,14 @@ func (a *applier) run(ctx context.Context) error {
 	}
 	defer admin.Close()
 
-	if err := a.capture(); err != nil {
-		return err
-	}
+	// The DACL first: the pre-image copies config.yaml — credential in clear —
+	// into the data directory, so it lands only in a tree the walk accepted.
 	if err := a.env.Sys.ProtectDataDir(); err != nil {
 		return refuse(CodeWriteFailed, `see "The service will not start" in docs/troubleshooting.md`,
 			"the data directory could not be protected, so nothing was written: %v", err)
+	}
+	if err := a.capture(); err != nil {
+		return err
 	}
 
 	for _, f := range []func(context.Context, Database) error{a.procedures, a.login} {
@@ -210,7 +212,11 @@ func (a *applier) checkFilesExist() error {
 				"sendOrderDir %s is not a folder on this machine", d)
 		}
 	}
-	for _, p := range []string{a.tgt.HasExePath, a.tgt.HasParamFile, a.tgt.HasBatFile} {
+	param := a.tgt.HasParamFile
+	if param != "" && !filepath.IsAbs(param) {
+		param = filepath.Join(a.tgt.SendOrderDir, param) // has.exe runs from sendOrderDir
+	}
+	for _, p := range []string{a.tgt.HasExePath, param, a.tgt.HasBatFile} {
 		if p == "" {
 			continue
 		}
@@ -514,7 +520,7 @@ func sameFold(a, b []string) bool {
 // the queue again, then proves the port with the new credential. A failure
 // puts the pre-image back.
 func (a *applier) restartAndProve(ctx context.Context) error {
-	stale := !a.svc.ProcessStart.IsZero() && a.curMod.After(a.svc.ProcessStart)
+	stale := configStale(a.curMod, a.svc.ProcessStart)
 	if !a.restart && !stale && a.svc.State == "running" {
 		a.step("restart", false, "nothing the service reads changed")
 		return nil
@@ -594,6 +600,9 @@ func (a *applier) rollback(ctx context.Context) error {
 	}
 	if _, err := putBack(a.env, m); err != nil {
 		return err
+	}
+	if err := a.env.Sys.ProtectDataDir(); err != nil {
+		a.warn("the data directory could not be protected after the rollback: %v", err)
 	}
 	if !a.stopped {
 		return nil // it still runs the old config, from memory

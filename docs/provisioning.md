@@ -52,6 +52,10 @@ the run. Exit codes: 0 done, 1 refused (the `refusal` says why, with a `fix`), 2
 }
 ```
 
+`hasParamFile` is passed to has.exe as written, and has.exe runs from `sendOrderDir`,
+so a bare name such as `digi_perm.bat` is looked up there. `apply` refuses a file
+that is not on the machine (`importer_missing`).
+
 A field that is left out keeps what the machine has: a missing `tls`, `firewall` or
 `service` means "leave it alone", not "remove it". Everything not in the spec —
 receipts, image folders, query limits, `erpUser`, the token lifetime, the signing
