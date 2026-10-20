@@ -16,6 +16,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
@@ -38,6 +39,29 @@ type ServerDeps struct {
 	// has receipts (erp: hasavshevet + sendReceiptDir); leave it nil (not a
 	// typed nil) otherwise, and the route answers 503.
 	ReceiptWriter handlers.ReceiptWriter
+}
+
+// CheckConfig makes every startup check the daemon makes on the config alone:
+// the listen address, the credential, the receipt keys, a database setting
+// OpenLazy accepts, and a loadable TLS pair. A writer of config.yaml (digi-erp-connector-provision) passes it
+// before it writes, so it never leaves a box holding a config its own service
+// will not start on — the rule the GUI's save follows. auth.secret is not
+// checked: the daemon generates it when it is empty.
+func CheckConfig(cfg config.Config) error {
+	if err := validateListenAddr(strings.TrimSpace(cfg.APIListen)); err != nil {
+		return err
+	}
+	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
+	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return err
+	}
+	if err := db.Check(cfg); err != nil {
+		return err
+	}
+	_, err := buildTLSConfig(cfg.TLS)
+	return err
 }
 
 func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
@@ -135,6 +159,9 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	mux.Handle("GET /api/folders/list", wrap(folderFilesHandler))
 	mux.Handle("POST /api/file", wrap(fileHandler))
 	mux.Handle("POST /api/sendOrder", wrap(sendOrderHandler))
+	// How many accepted orders are not written yet: asked before a restart,
+	// which would drop them (the queue is in memory).
+	mux.Handle("GET /api/sendOrder", wrap(handlers.NewSendOrderQueueHandler(deps.SendOrderQueue)))
 	mux.Handle("GET /api/sendOrder/{jobId}", wrap(sendOrderStatusHandler))
 	// Synchronous, unlike sendOrder: the caller needs the receipt number. It
 	// extends its own write deadline to handlers.ReceiptWriteDeadline.

@@ -34,8 +34,13 @@ it a reboot can leave the API dead.
 
 ### Non-interactive install
 
-For a machine with no desktop session, or to script a rollout, use
-`cmd/cutover-seed` instead of steps 4–5:
+**`digi-erp-connector-provision.exe`** (installed next to the daemon) is the supported
+way: it discovers the machine, writes the configuration, installs the procedures,
+can move the connector off `sa`, opens the firewall rule, sets the dependency and
+recovery, and restarts the service only when its order queue is empty, proving the
+port afterwards. See [provisioning.md](provisioning.md).
+
+The older `cmd/cutover-seed` still works, instead of steps 4–5:
 
 ```powershell
 cutover-seed.exe -listen "127.0.0.1:8080" -erp hasavshevet `

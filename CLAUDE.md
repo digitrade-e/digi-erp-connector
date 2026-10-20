@@ -11,9 +11,10 @@ A Go application providing a local HTTP REST API gateway between the main app an
 - **erp-connector** (Go) — supplied the architecture and all ERP features.
 - **electron-mssql-app** (Node/Electron, legacy) — supplied the SQL access model: **named saved queries**. The backend never sends raw SQL; it registers queries by name via CRUD and executes them with parameters.
 
-Two binaries:
+Three binaries:
 - **`digi-erp-connectord`** — background daemon / Windows service; runs the REST API server
 - **`digi-erp-connector`** — Windows-only native UI (`walk` library) for config management and service control
+- **`digi-erp-connector-provision`** — headless discover / apply / verify / restore, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068, `docs/provisioning.md`)
 
 **Supported ERPs:** Hasavshevet (complete), SAP (price/stock query implemented), Priority (not implemented)
 **Primary target OS:** Windows. Linux supported for daemon only.
@@ -29,6 +30,8 @@ cmd/
     actions.go          ← configuration button handlers
     service_control.go  ← service start/stop/restart, daemon discovery
   digi-erp-connectord/  ← Background daemon/service
+  digi-erp-connector-provision/ ← entry point of internal/provision: headless
+                          discover / apply / verify / restore (docs/provisioning.md)
   cutover-seed/         ← operator tool: seed config/secret/queries for a
                           replacement install (not part of the service)
 
@@ -45,6 +48,7 @@ internal/
       price_stock.go    ← POST /api/priceAndStockHandler
       send_order.go     ← POST /api/sendOrder (async queue)
       send_order_status.go ← GET /api/sendOrder/{jobId}
+      send_order_queue.go  ← GET /api/sendOrder (queued/running counts, asked before a restart)
       send_receipt.go   ← POST /api/sendReceipt (synchronous, strict decode)
     middleware/
       auth.go           ← verifies the issued token on every route
@@ -72,6 +76,10 @@ internal/
     filelock/           ← OS lock on a file (flock / LockFileEx): one receipt writer per DataDir
     dataacl/            ← protected DACL on DataDir + config.yaml (Windows; no-op elsewhere)
   secrets/              ← Windows DPAPI (machine scope)
+  provision/            ← discover / apply / verify / restore behind a System
+                          interface (Windows: service manager, registry, TCP
+                          table, firewall via fixed PowerShell); pre-images in
+                          DataDir/provision/<changeSet>/
 ```
 
 Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/, receipts/, history/receipts/). Linux: `/etc/digi-erp-connector/`. On Windows the daemon gives it a **protected DACL** at every start (SYSTEM + Administrators Full Control, the service account only if it is not an admin, OWNER RIGHTS READ_CONTROL only; children carry the same as inherited ACEs) via `dataacl.ProtectTree`, run BEFORE server.log is opened and BEFORE config.Load (`cmd/digi-erp-connectord/dataacl.go`). **It works by handle only** (FILE_FLAG_OPEN_REPARSE_POINT, ancestors held without FILE_SHARE_DELETE, GetSecurityInfo / SetKernelObjectSecurity, no MARTA propagation — never reintroduce SetNamedSecurityInfo here: as SYSTEM a path can be redirected), refuses reparse points, multiply-linked files, entries resolving elsewhere and untrusted owners (fail closed), writes only what differs (a steady-state start only reads), sets SYSTEM as owner when running as SYSTEM, trusts owners that are Administrators members directly or via nested groups (NetUserGetLocalGroups, fail closed when unresolvable or orphaned) and then hands those entries to BUILTIN\Administrators (needsClaim) so the domain is needed at most once; the SCM restarts a refused service after 1 / 5 / every 30 min. **A refused start opens no file in DataDir**: the reason goes to the Windows Event Log and the service exits with service-specific code 2 (`autostart.ExitDataDirRefused`). server.log is kept only when it is provably the daemon's own object (`.server-log-id` file-ID marker); otherwise it is moved aside, or the daemon logs to `server-<UTC>.log` if it cannot be. The elevated GUI walks at launch before opening its logs and before **every** save — a failed walk refuses the save with nothing written — and hands what it created to Administrators (`ClaimForAdministrators`; `cmd/digi-erp-connector/config_acl.go`, `gui_logs.go`). Off Windows the receipt import stubs return an error, so model (b) records `failed`, never `ok`.
@@ -92,6 +100,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 | `/api/file` | POST | Path-validated binary file streaming |
 | `/api/priceAndStockHandler` | POST | Hasavshevet or SAP price/stock fetch |
 | `/api/sendOrder` | POST | Validates order, enqueues, `202 + jobId` |
+| `/api/sendOrder` | GET | `{queued, running}`: accepted orders not written yet — a restart drops them (in-memory queue) |
 | `/api/sendOrder/{jobId}` | GET | Poll job status (queued/running/done/failed) |
 | `/api/sendReceipt` | POST | **Synchronous** (≤120 s): one KUPAIN receipt per `idempotencyKey` → `200 {receiptNumber, written, idempotencyKey, import, warnings}`; flat §4.6a body (16 keys, all present, none null), strict decode (also refuses duplicate and wrong-case keys); 400 only for the request's content (the backend stops on it); 503 when `sendReceiptDir` unset (`RECEIPTS_NOT_CONFIGURED`), the number store unusable (`RECEIPT_NUMBER_STORE_UNAVAILABLE`), the import lock busy (`RECEIPT_WRITER_BUSY`), the body not readable to its end (`RECEIPT_REQUEST_READ_FAILED`) or another process holding the data dir (`RECEIPT_DATA_IN_USE`). `docs/hasavshevet-send-receipt.md` |
 

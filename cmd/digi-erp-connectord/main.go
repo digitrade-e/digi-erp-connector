@@ -9,13 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 )
-
-func dbPasswordKey(erp config.ERPType) string {
-	return "db_password_" + string(erp)
-}
 
 func main() {
 	if runAsService() {

@@ -59,3 +59,10 @@ type SendOrderStatusResponse struct {
 	WrittenFiles []string `json:"writtenFiles,omitempty"`
 	Error        string   `json:"error,omitempty"`
 }
+
+// SendOrderQueueResponse counts the orders accepted and not yet written
+// (GET /api/sendOrder). Both 0 means a restart loses nothing.
+type SendOrderQueueResponse struct {
+	Queued  int `json:"queued"`
+	Running int `json:"running"`
+}

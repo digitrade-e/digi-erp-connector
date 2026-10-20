@@ -73,6 +73,7 @@ Server timeouts are set on `http.Server`: 5s read-header, 10s read, 60s write,
 cmd/
   digi-erp-connectord/   daemon: lifecycle, service integration
   digi-erp-connector/    GUI: form.go, form_config.go, actions.go, service_control.go
+  digi-erp-connector-provision/  entry point of internal/provision (provisioning.md)
   cutover-seed/          operator tool: seed config/secret/queries for a new install
 
 internal/
@@ -141,9 +142,11 @@ Windows, `/etc/digi-erp-connector/` on Linux:
 
 | File | Written by | Notes |
 |---|---|---|
-| `config.yaml` | GUI, cutover-seed | 0600; holds the API credentials in plaintext |
+| `config.yaml` | GUI, cutover-seed, provision | 0600; holds the API credentials in plaintext |
 | `queries.json` | the CRUD endpoints | drop-in compatible with electron-mssql-app |
-| `secrets/db_password_<erp>.bin` | GUI, cutover-seed | DPAPI machine scope |
+| `secrets/db_password_<erp>.bin` | GUI, cutover-seed, provision | DPAPI machine scope |
+| `provision/<changeSet>/` | provision | pre-images (the last five): config.yaml, the DB secret, the TLS pair, the firewall rule, the dependencies |
+| `tls/cert.pem`, `tls/key.pem` | provision | a self-signed pair when the spec asks for one |
 | `server.log`, `ui.log` | daemon, GUI | no secrets, ever |
 
 `lastOrderNumber.json` is the exception: it lives in `sendOrderDir`, beside the

@@ -130,6 +130,13 @@ func (a AuthConfig) TTL() time.Duration {
 	return d
 }
 
+// DBPasswordKey is the secrets-store key of erp's database password
+// (secrets/db_password_<erp>.bin). One definition: the daemon reads what the
+// GUI and digi-erp-connector-provision write.
+func DBPasswordKey(erp ERPType) string {
+	return "db_password_" + string(erp)
+}
+
 // QueriesConfig tunes execution of saved queries (the /api/sqlqueries runner).
 type QueriesConfig struct {
 	TimeoutSeconds int `yaml:"timeoutSeconds,omitempty"` // 0 → default (30s)

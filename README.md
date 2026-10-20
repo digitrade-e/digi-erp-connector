@@ -35,7 +35,8 @@ predecessor `erp-connector`. See [.claude/docs/01-project-origin.md](.claude/doc
 |---|---|
 | `digi-erp-connectord` | The service. Runs the REST API. No UI. |
 | `digi-erp-connector` | Windows GUI: configuration, DB test, service control. Serves no traffic. |
-| `cutover-seed` | Operator tool: provision `config.yaml`, the DB secret and `queries.json` non-interactively. |
+| `digi-erp-connector-provision` | Headless configuration: discover the machine, apply a spec (config, DB secret, procedures, least-privilege login, TLS, firewall, service), verify, restore. JSON in and out; what digi-mcp runs over WinRM. See [docs/provisioning.md](docs/provisioning.md). |
+| `cutover-seed` | Operator tool: provision `config.yaml`, the DB secret and `queries.json` non-interactively; the only way to seed the receipt number store (`-receipt-seed N`). Not in the installer. |
 
 ## Documentation
 

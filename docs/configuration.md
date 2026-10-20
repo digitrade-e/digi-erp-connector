@@ -243,8 +243,8 @@ Follow-up (not in this release): `history\receipts\` and the moved-aside
 | Key | Default | Meaning |
 |---|---|---|
 | `driver` | `mssql` | Only MSSQL is supported. |
-| `host` | `localhost` | **Required.** Hostname or `host\instance`. |
-| `port` | `1433` | **Required**, 1–65535. |
+| `host` | `localhost` | **Required.** Hostname, IP, `.` or `(local)`, optionally `\instance` — anything else is refused at start (the driver would refuse it on connect, quoting the DSN with the password in its error). With an instance and no port the connector asks the SQL Server Browser (UDP 1434) where the instance listens — the way to reach a **dynamic** port, which moves when SQL Server restarts. (Until plan 068 P1 this form never connected: the DSN escaped the backslash and the driver refused it.) |
+| `port` | `1433` | 1–65535. **Required** unless `host` names an instance: then empty or 0 means "ask the SQL Server Browser", and a number connects there directly. |
 | `user` | — | **Required.** SQL login. |
 | `database` | `""` | Initial catalog. Required when `erp: hasavshevet`. |
 | `encrypt` | `false` | Emit `encrypt=true` in the DSN. When false the option is omitted entirely and the driver default applies. |

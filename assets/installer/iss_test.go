@@ -116,3 +116,20 @@ func TestInstallerSetsRestartOnFailure(t *testing.T) {
 		t.Errorf("failureflag line %q; want the flag set to 1", flag)
 	}
 }
+
+// Plan 068: digi-mcp runs digi-erp-connector-provision.exe from the install
+// folder over WinRM, so the installer must put it there next to the daemon.
+func TestInstallerShipsTheProvisionTool(t *testing.T) {
+	var define, file bool
+	for _, l := range issLines(t) {
+		if strings.TrimSpace(l) == `#define ProvisionExe "digi-erp-connector-provision.exe"` {
+			define = true
+		}
+		if strings.HasPrefix(l, `Source: "{#BuildDir}\{#ProvisionExe}"; DestDir: "{app}"`) {
+			file = true
+		}
+	}
+	if !define || !file {
+		t.Errorf("the provision tool is not installed: define %v, [Files] line %v", define, file)
+	}
+}
