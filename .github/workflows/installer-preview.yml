@@ -1,0 +1,65 @@
+name: installer-preview
+
+# Builds the Windows installer for a pull request and keeps it as a workflow
+# artifact: no tag, no release. A branch whose merge preconditions need a real
+# Windows box (an upgrade over the running release, sc / icacls checks) gets an
+# installer to test with, without merging to main, which auto-tags a public
+# release.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build Windows executables
+        shell: bash
+        env:
+          # The PR head, not the merge commit actions/checkout builds.
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin
+          # GET /api/ping answers this, so the box under test proves which build runs.
+          version_flag="-X github.com/digitrade-e/digi-erp-connector/internal/buildinfo.Version=preview-pr${{ github.event.pull_request.number }}-${SHA:0:7}"
+          go build -trimpath -ldflags "-s -w -H=windowsgui ${version_flag}" -o "dist/bin/digi-erp-connector.exe" ./cmd/digi-erp-connector
+          go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          # Numeric on purpose: Inno's version resource needs digits. 0.0.<PR> can
+          # never be mistaken for a release (those are v1.x.y).
+          $appVersion = "0.0.${{ github.event.pull_request.number }}"
+          iscc /DAppVersion=$appVersion /DBuildDir="$PWD\\dist\\bin" /DOutputDir="$PWD\\dist" assets\\installer\\digi-erp-connector.iss
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum digi-erp-connector-setup-*.exe bin/*.exe > SHA256SUMS
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-pr${{ github.event.pull_request.number }}
+          path: |
+            dist/digi-erp-connector-setup-*.exe
+            dist/SHA256SUMS
+          retention-days: 14
