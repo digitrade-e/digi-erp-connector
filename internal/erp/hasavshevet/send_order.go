@@ -368,7 +368,7 @@ func (s *Sender) resolveAccount(ctx context.Context, req OrderRequest) (accountI
 }
 
 func (s *Sender) queryAccount(ctx context.Context, dbName, userExtID string) (accountInfo, error) {
-	if !isSafeDBName(dbName) {
+	if !IsSafeDBName(dbName) {
 		return accountInfo{}, fmt.Errorf("invalid dbName %q", dbName)
 	}
 	query := fmt.Sprintf(
@@ -398,7 +398,7 @@ func (s *Sender) queryAccount(ctx context.Context, dbName, userExtID string) (ac
 // queryRate fetches the latest exchange rate for currencyCode.
 // Returns 1.0 when no rate is found (matches legacy fallback).
 func (s *Sender) queryRate(ctx context.Context, dbName, currencyCode string) (float64, error) {
-	if !isSafeDBName(dbName) {
+	if !IsSafeDBName(dbName) {
 		return 1.0, fmt.Errorf("invalid dbName %q", dbName)
 	}
 	query := fmt.Sprintf(
@@ -466,9 +466,9 @@ func validateOrderRequest(req OrderRequest) error {
 	return nil
 }
 
-// isSafeDBName returns true when name contains only alphanumeric and underscore chars.
+// IsSafeDBName reports whether a database name is safe to bracket-quote into SQL: true when name contains only alphanumeric and underscore chars.
 // Mirrors the legacy Node ensureDbNameSafe pattern to prevent SQL injection via dbName.
-func isSafeDBName(name string) bool {
+func IsSafeDBName(name string) bool {
 	if name == "" {
 		return false
 	}

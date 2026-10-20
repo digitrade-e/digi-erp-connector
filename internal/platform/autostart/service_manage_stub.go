@@ -20,3 +20,15 @@ func StartWindowsService(_ string) error {
 func StopWindowsService(_ string, _ time.Duration) error {
 	return ErrWindowsServiceUnsupported
 }
+
+func WindowsServiceInfo(_ string) (ServiceInfo, error) {
+	return ServiceInfo{}, ErrWindowsServiceUnsupported
+}
+
+func SetWindowsServiceDependencies(_ string, _ []string) error {
+	return ErrWindowsServiceUnsupported
+}
+
+func EnsureWindowsServiceRecovery(_ string) (bool, error) {
+	return false, ErrWindowsServiceUnsupported
+}

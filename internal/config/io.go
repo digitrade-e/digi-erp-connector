@@ -27,11 +27,31 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("read config %s: %w", p, err)
 	}
 
-	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
+	cfg, err := Parse(b)
+	if err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", p, err)
 	}
 	return cfg, nil
+}
+
+// Parse reads config.yaml's bytes: what Load does after reading the file.
+func Parse(b []byte) (Config, error) {
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Marshal is the exact bytes Save writes for cfg. digi-erp-connector-provision
+// compares them with the file on disk, so an apply that changes nothing
+// writes nothing.
+func Marshal(cfg Config) ([]byte, error) {
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	return out, nil
 }
 
 func LoadOrDefault() (Config, error) {
@@ -56,9 +76,9 @@ func Save(cfg Config) error {
 		return err
 	}
 
-	out, err := yaml.Marshal(cfg)
+	out, err := Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return err
 	}
 	return atomicfile.Write(p, out, 0o600)
 }
