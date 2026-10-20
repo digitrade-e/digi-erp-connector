@@ -270,3 +270,33 @@ func TestPingRejectsNilHandle(t *testing.T) {
 		t.Error("Ping(nil) should return an error rather than panicking")
 	}
 }
+
+// A db.host the driver's URL parser refuses is refused here instead: the
+// driver would fail on connect, quoting the DSN — password URL-escaped — in
+// the error the daemon logs and the GUI shows.
+func TestBuildDSNRefusesAHostTheDriverCannotParse(t *testing.T) {
+	for _, host := range []string{"my host", "a/b", "sa@evil", "host%20x", `\WIZSOFT`} {
+		cfg := baseConfig()
+		cfg.DB.Host = host
+		_, err := OpenLazy(cfg, "P@ss word!x", DefaultOptions())
+		if err == nil {
+			t.Errorf("%q: accepted", host)
+			continue
+		}
+		if msg := err.Error(); strings.Contains(msg, "word") || strings.Contains(msg, "P%40ss") {
+			t.Errorf("%q: the error carries the password: %s", host, msg)
+		}
+	}
+	for _, host := range []string{"localhost", ".", "(local)", `.\SQLEXPRESS`, "TSDC", "sql-01.corp.local", "my_host", "10.0.0.5", "::1", `127.0.0.1\WIZSOFT`} {
+		cfg := baseConfig()
+		cfg.DB.Host = host
+		_, dsn, err := buildDSN(cfg, "pw")
+		if err != nil {
+			t.Errorf("%q: %v", host, err)
+			continue
+		}
+		if _, err := msdsn.Parse(dsn); err != nil {
+			t.Errorf("%q: the driver refuses %q: %v", host, dsn, err)
+		}
+	}
+}

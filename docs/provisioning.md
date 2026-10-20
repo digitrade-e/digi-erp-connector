@@ -40,10 +40,12 @@ the run. Exit codes: 0 done, 1 refused (the `refusal` says why, with a `fix`), 2
     "database": "groopy_new",
     "user": "sa", "password": "…",        // the credential the client gave
     "leastPrivilege": true,               // create erp_connector_read; sa is used once and not stored
-    "allowSa": false                      // keep sa as the connector's login (refused otherwise)
+    "rotateLogin": false,                 // give an existing erp_connector_read a new password (see below)
+    "allowSa": false,                     // keep sa as the connector's login (refused otherwise)
+    "encrypt": true, "trustServerCertificate": true   // optional: left out keeps the box's
   },
-  "sendOrderDir": "C:\\digiorders",
-  "importer": { "mode": "none" },         // or {"mode":"hasExe","hasExePath","hasParamFile"} or {"mode":"bat","hasBatFile"}
+  "sendOrderDir": "C:\\digiorders",      // left out keeps the box's; "" turns orders off
+  "importer": { "mode": "none" },         // or {"mode":"hasExe","hasExePath","hasParamFile"} or {"mode":"bat","hasBatFile"}; left out keeps the box's
   "auth": { "username": "digi-hub", "password": "…" },     // the one credential; at least 16 characters
   "firewall": { "allowFrom": ["34.154.127.241"] },          // optional; ruleName defaults to digi-erp-connector
   "service": { "dependOn": ["MSSQL$WIZSOFT"] },             // optional
@@ -56,18 +58,32 @@ the run. Exit codes: 0 done, 1 refused (the `refusal` says why, with a `fix`), 2
 so a bare name such as `digi_perm.bat` is looked up there. `apply` refuses a file
 that is not on the machine (`importer_missing`).
 
-A field that is left out keeps what the machine has: a missing `tls`, `firewall` or
-`service` means "leave it alone", not "remove it". Everything not in the spec —
+A field that is left out keeps what the machine has: a missing `tls`, `firewall`,
+`service`, `sendOrderDir`, `importer`, `encrypt` or `trustServerCertificate` means
+"leave it alone", not "remove it" or "false". Everything else not in the spec —
 receipts, image folders, query limits, `erpUser`, the token lifetime, the signing
-secret — stays as it was.
+secret — stays as it was. Orders with no importer must still say `{"mode":"none"}`:
+`apply` refuses to leave it unstated (`importer_required`).
+
+**The least-privilege login is given a password only when that is safe.** It is
+created when it does not exist. A login that already works with the stored password
+is kept. It gets a new password only with `rotateLogin`, in two cases: it exists and
+this connector does not use it (another connector, or the hand script, may), or its
+stored password no longer logs in. A password set in SQL Server cannot be taken back,
+so after a rotation a rollback or a `restore` keeps the new password whenever the
+config they put back logs in as that login.
 
 ## What `apply` does, in order
 
-Nothing is written before every check has passed:
+Only one run at a time: `apply` and `restore` hold `provision\.lock`, and a second
+run is refused (`busy`). Nothing is written before every check has passed:
 
 1. The whole spec is valid; the resulting config passes the daemon's own startup
    checks (`api.CheckConfig`); the order folder and the importer files exist;
-   `config.yaml` is what `expect` says.
+   `config.yaml` is what `expect` says; a firewall rule of the spec's name, if
+   there is one, was made by this tool (`firewall_foreign` otherwise); the
+   least-privilege login may be used as planned (above); and a move of
+   `sendOrderDir` can take the order counter along (below).
 2. **The order queue is empty.** The queue lives in memory, so a restart would lose
    accepted orders. `apply` logs in to the running connector with the credential in
    `config.yaml` and reads `GET /api/sendOrder`. If it cannot read the queue (a
@@ -77,12 +93,16 @@ Nothing is written before every check has passed:
 
 Then:
 
-4. **Pre-image** to `provision\<changeSet>\`: `config.yaml`, the DB secrets, the TLS
-   pair, the firewall rule, the service's dependencies. The first capture of a
-   change set wins, so re-running it never overwrites the state from before it began.
-   The last five pre-images are kept. They hold `config.yaml`, credential in clear,
-   under the data directory's DACL.
-5. The data directory gets the daemon's DACL.
+4. The data directory gets the daemon's DACL.
+5. **Pre-images**: `config.yaml`, the DB secrets, the TLS pair, the firewall rule,
+   the service's dependencies.
+   - `provision\<changeSet>\` is the state before the change set's *first* run: a
+     re-run never overwrites it, and it is what `restore` puts back.
+   - `provision\<changeSet>\run\` is the state before *this* run: it is what a
+     failure rolls back to, and it is deleted when the run ends.
+   - A run that changed nothing keeps no pre-image, so it never pushes a real
+     restore point out. The last five are kept. They hold `config.yaml`, credential
+     in clear, under the data directory's DACL.
 6. Hasavshevet: `GPRICE_Bulk` and `GetOnHandStockForSkus` are created where missing.
 7. `leastPrivilege`: `erp_connector_read` is created or given a new password (born
    here, kept only in DPAPI and SQL Server), with the grants of
@@ -92,16 +112,23 @@ Then:
    erp-manager checks the host name, so the address in its `baseUrl` must be one of
    them. A pair that already covers the hosts and has more than a year left is kept.
 9. The DB secret through DPAPI, read back. Then `config.yaml`.
-10. The firewall rule: inbound TCP on `apiListen`'s port, from `allowFrom` only. If every
-    firewall profile is off, the result says the rule filters nothing (`firewall_inert`).
+10. The firewall rule: inbound TCP on `apiListen`'s port, from `allowFrom` only,
+    tagged with the group `digi-erp-connector`. A rule of that name without the group
+    is the client's and is never changed or removed. If every firewall profile is
+    off, the result says the rule filters nothing (`firewall_inert`).
 11. The service's dependencies and its recovery (restart after 1, 5 and 30 minutes,
     also on non-crash failures).
 12. **Restart, only if needed**: when something the service reads changed, when it runs
     a config older than `config.yaml`, or when it is not running. `apply` asks the
-    order queue again right before the stop.
+    order queue again right before the stop. **The order counter moves with
+    `sendOrderDir`**: `lastOrderNumber.json` is copied to the new folder while the
+    service is stopped. A folder without it would start again at 1 and hand
+    Hasavshevet numbers it already has. If both folders hold different counters,
+    `apply` refuses (`order_number_conflict`).
 13. **Port proof**: within 30 s the connector must log in with the new credential and
-    answer `/api/ping`. `/api/health` is reported. If the proof fails, everything
-    from step 4 is put back and the service is started on it again (`rolledBack`).
+    answer `/api/ping`. `/api/health` is reported. If the proof fails, this run's
+    pre-image is put back, and the service ends as it was before the run: running on
+    the restored config, or stopped (`rolledBack`).
 
 A second identical `apply` changes nothing: no write, no new password, no restart.
 
@@ -124,8 +151,11 @@ A second identical `apply` changes nothing: no write, no new password, no restar
 | `procedures_failed`, `least_privilege_failed` | the login lacks the rights for that step |
 | `secret_roundtrip`, `write_failed` | the secret or a file could not be written |
 | `firewall_failed`, `service_failed` | the firewall or the service manager refused |
+| `firewall_foreign` | a rule of the spec's name exists and this tool did not make it |
+| `order_number_conflict` | the old and the new order folder hold different order counters |
+| `busy` | another run holds `provision\.lock` |
 | `port_proof_failed` | the restarted connector did not answer; the pre-image was put back |
-| `preimage_missing` | `restore` was given an unknown change set |
+| `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
 | `unsupported_os` | not Windows |
 
 ## What it does not do
@@ -133,12 +163,17 @@ A second identical `apply` changes nothing: no write, no new password, no restar
 - **No SQL from the input.** The only values written into SQL are a database name
   that passed `hasavshevet.IsSafeDBName` and a generated password from a quote-free
   alphabet.
-- **It never removes a SQL login.** `restore` puts the old config back, which stops
-  using `erp_connector_read`, and the login stays. A credential only moves forward.
+- **It never removes a SQL login.** `restore` puts the old config back, and the login
+  stays. A credential only moves forward: when the config put back still uses the
+  login, its current password is kept.
 - **It never turns a firewall profile on.** That would change the client's whole
   server.
 - **It does not replace `cutover-seed` yet.** `cutover-seed -receipt-seed N` is still
   the only way to create the receipt number store (hasavshevet-send-receipt.md).
+
+`restore` also works when `config.yaml` no longer reads — that is what it is for — but
+then the running connector's order queue cannot be asked, so it needs
+`--assume-idle`.
 
 ## Running it by hand
 

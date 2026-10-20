@@ -45,14 +45,19 @@ type Spec struct {
 	ERP       string `json:"erp"` // hasavshevet | sap
 	// APIListen must be an IP literal that is not loopback: the Hub and the
 	// tenant call this node from outside.
-	APIListen    string        `json:"apiListen"`
-	TLS          *TLSSpec      `json:"tls,omitempty"`
-	DB           DBSpec        `json:"db"`
-	SendOrderDir string        `json:"sendOrderDir,omitempty"`
-	Importer     *ImporterSpec `json:"importer,omitempty"`
-	Auth         AuthSpec      `json:"auth"`
-	Firewall     *FirewallSpec `json:"firewall,omitempty"`
-	Service      *ServiceSpec  `json:"service,omitempty"`
+	APIListen string   `json:"apiListen"`
+	TLS       *TLSSpec `json:"tls,omitempty"`
+	DB        DBSpec   `json:"db"`
+	// SendOrderDir: nil keeps the box's; "" turns orders off. Moving it moves
+	// lastOrderNumber.json too (Apply carries it), or order numbers would
+	// start again at 1.
+	SendOrderDir *string `json:"sendOrderDir,omitempty"`
+	// Importer: nil keeps the box's. Orders with no importer must say
+	// {"mode":"none"}: Apply refuses to leave it unstated.
+	Importer *ImporterSpec `json:"importer,omitempty"`
+	Auth     AuthSpec      `json:"auth"`
+	Firewall *FirewallSpec `json:"firewall,omitempty"`
+	Service  *ServiceSpec  `json:"service,omitempty"`
 	// AssumeIdle lets Apply restart a running service whose order queue it
 	// cannot read (a daemon older than GET /api/sendOrder, or one still on a
 	// config whose credential is gone). digi-mcp sets it only when nothing on
@@ -65,13 +70,15 @@ type Spec struct {
 type DBSpec struct {
 	// Host is a host or host\instance. With an instance and no Port the
 	// connector finds the instance through the SQL Server Browser.
-	Host                   string `json:"host"`
-	Port                   int    `json:"port,omitempty"`
-	Database               string `json:"database"`
-	User                   string `json:"user"`
-	Password               string `json:"password"`
-	Encrypt                bool   `json:"encrypt,omitempty"`
-	TrustServerCertificate bool   `json:"trustServerCertificate,omitempty"`
+	Host     string `json:"host"`
+	Port     int    `json:"port,omitempty"`
+	Database string `json:"database"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	// Encrypt and TrustServerCertificate: nil keeps the box's (BFL needs
+	// both on against its self-signed SQL certificate).
+	Encrypt                *bool `json:"encrypt,omitempty"`
+	TrustServerCertificate *bool `json:"trustServerCertificate,omitempty"`
 	// AllowSa keeps sa as the connector's own login. Without it (and without
 	// LeastPrivilege) sa is refused.
 	AllowSa bool `json:"allowSa,omitempty"`
@@ -79,6 +86,11 @@ type DBSpec struct {
 	// LeastPrivilegeLogin with a password born here; the connector then logs
 	// in as that login and User's password is not stored.
 	LeastPrivilege bool `json:"leastPrivilege,omitempty"`
+	// RotateLogin lets Apply give LeastPrivilegeLogin a new password when it
+	// exists and either this connector does not use it (another connector or
+	// a person may) or its stored password no longer logs in. Without it
+	// Apply only creates the login, or keeps one that works.
+	RotateLogin bool `json:"rotateLogin,omitempty"`
 }
 
 // ImporterSpec is how Hasavshevet imports the order files: has.exe with a
@@ -253,28 +265,24 @@ func (s Spec) validateDB() *Refusal {
 }
 
 func (s Spec) validateOrders() *Refusal {
-	dir := strings.TrimSpace(s.SendOrderDir)
-	if dir != "" {
-		if s.ERP != "hasavshevet" {
-			return refuse(CodeSpecInvalid, "leave sendOrderDir empty: only Hasavshevet takes order files", "sendOrderDir is set for erp %s", s.ERP)
+	if s.SendOrderDir != nil {
+		dir := strings.TrimSpace(*s.SendOrderDir)
+		if dir != "" && s.ERP != "hasavshevet" {
+			return refuse(CodeSpecInvalid, "leave sendOrderDir out or empty: only Hasavshevet takes order files", "sendOrderDir is set for erp %s", s.ERP)
 		}
-		if !filepath.IsAbs(dir) {
+		if dir != "" && !filepath.IsAbs(dir) {
 			return refuse(CodeSpecInvalid, "use an absolute path", "sendOrderDir %q is not absolute", dir)
 		}
 	}
 	imp := s.Importer
 	if imp == nil {
-		if dir != "" {
-			return refuse(CodeImporterRequired, `name has.exe and its parameter file ("mode": "hasExe"), a BAT ("bat"), or say "none" — orders are then written and imported by hand`,
-				"orders are configured but the importer is not named")
-		}
 		return nil
 	}
 	if !importerModes[imp.Mode] {
 		return refuse(CodeSpecInvalid, "use none, hasExe or bat", "importer.mode %q is not known", imp.Mode)
 	}
-	if dir == "" && imp.Mode != "none" {
-		return refuse(CodeSpecInvalid, "set sendOrderDir, or importer none", "an importer is named but orders are not configured")
+	if s.ERP != "hasavshevet" && imp.Mode != "none" {
+		return refuse(CodeSpecInvalid, "only Hasavshevet has an importer", "importer %s is set for erp %s", imp.Mode, s.ERP)
 	}
 	abs := func(field, p string) *Refusal {
 		if !filepath.IsAbs(strings.TrimSpace(p)) {
@@ -392,6 +400,25 @@ func hasControl(s string) bool {
 		}
 	}
 	return false
+}
+
+// Validate checks a discover credential before it goes anywhere near a DSN:
+// a host that is not a host would make the driver's URL parser quote the DSN,
+// password included, in its error.
+func (d DiscoverDB) Validate() *Refusal {
+	if d.Host != "" {
+		server, instance := db.SplitInstance(d.Host)
+		if !serverRe.MatchString(server) || (instance != "" && !instanceRe.MatchString(instance)) {
+			return refuse(CodeSpecInvalid, `use a host name or IP, optionally host\instance`, "db.host is not a host")
+		}
+	}
+	if d.Port < 0 || d.Port > 65535 {
+		return refuse(CodeSpecInvalid, "use a port from 1 to 65535, or none", "db.port %d is not a port", d.Port)
+	}
+	if strings.TrimSpace(d.User) == "" || hasControl(d.User) || d.Password == "" || hasControl(d.Password) {
+		return refuse(CodeSpecInvalid, "send the login and its password", "db.user or db.password is missing or not text")
+	}
+	return nil
 }
 
 // secrets lists the spec's secret values, for Redact.

@@ -13,16 +13,22 @@ type psRule struct {
 	Protocol      string   `json:"protocol"`
 	LocalPort     []string `json:"localPort"`
 	RemoteAddress []string `json:"remoteAddress"`
+	Group         string   `json:"group"`
 }
 
 // ruleFromPS reads the rules of one display name as FirewallRule: nil when
-// there is none, and a rule that matches nothing (port 0) when it is not one
-// inbound TCP allow on one port — SetFirewallRule then replaces it.
+// there is none. Ours only when every one carries firewallGroup. A set that is
+// not one inbound TCP allow on one port matches nothing (port 0), so
+// SetFirewallRule replaces it — which it does only when it is ours.
 func ruleFromPS(name string, rules []psRule) *FirewallRule {
 	if len(rules) == 0 {
 		return nil
 	}
-	odd := &FirewallRule{Name: name}
+	ours := true
+	for _, r := range rules {
+		ours = ours && r.Group == firewallGroup
+	}
+	odd := &FirewallRule{Name: name, Ours: ours}
 	if len(rules) != 1 {
 		return odd
 	}
@@ -41,5 +47,5 @@ func ruleFromPS(name string, rules []psRule) *FirewallRule {
 			remote = append(remote, a)
 		}
 	}
-	return &FirewallRule{Name: name, Enabled: r.Enabled, Port: port, RemoteAddress: canonicalSources(remote)}
+	return &FirewallRule{Name: name, Enabled: r.Enabled, Port: port, RemoteAddress: canonicalSources(remote), Ours: ours}
 }

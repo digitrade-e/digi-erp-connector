@@ -20,18 +20,24 @@ import (
 // directory's DACL.
 const keepPreimages = 5
 
-// manifest describes one change set's pre-image: what was there before it
-// wrote anything. The first capture of a change set wins — a re-run must not
-// overwrite the state from before the change set began.
+// A pre-image is what was there before something wrote: files (relative to
+// the data directory; an absent one is restored by removing it), the
+// service's dependencies and the firewall rule.
+//
+// There are two per change set:
+//   - provision\<changeSet>\ is the state before the change set's FIRST run.
+//     A re-run never overwrites it: it is what Restore puts back.
+//   - provision\<changeSet>\run\ is the state before the CURRENT run, taken
+//     afresh each time: it is what a failing run rolls back to. Rolling a
+//     re-run back to the first run's state would leave the files and the
+//     running service apart.
 type manifest struct {
-	ChangeSet string    `json:"changeSet"`
-	Created   time.Time `json:"created"`
-	Tool      string    `json:"tool"`
-	// Files are paths relative to the data directory. A file that was absent
-	// is restored by removing it.
-	Files    []preFile    `json:"files"`
-	Service  *preService  `json:"service,omitempty"`
-	Firewall *preFirewall `json:"firewall,omitempty"`
+	ChangeSet string       `json:"changeSet"`
+	Created   time.Time    `json:"created"`
+	Tool      string       `json:"tool"`
+	Files     []preFile    `json:"files"`
+	Service   *preService  `json:"service,omitempty"`
+	Firewall  *preFirewall `json:"firewall,omitempty"`
 }
 
 type preFile struct {
@@ -49,20 +55,24 @@ type preFirewall struct {
 	Rule *FirewallRule `json:"rule"` // nil: there was no rule of that name
 }
 
+// preimage is a manifest and the folder its file copies are in.
+type preimage struct {
+	dir string
+	m   manifest
+}
+
 func provisionDir(dataDir string) string { return filepath.Join(dataDir, "provision") }
 
 func preimageDir(dataDir, changeSet string) string {
 	return filepath.Join(provisionDir(dataDir), changeSet)
 }
 
-// capturePreimage records files (relative to dataDir), the service's
-// dependencies and the firewall rule, unless this change set already has a
-// pre-image. It reports whether it wrote one.
-func capturePreimage(dataDir, changeSet string, files []string, svc *preService, fw *preFirewall, now time.Time) (bool, error) {
-	dir := preimageDir(dataDir, changeSet)
-	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err == nil {
-		return false, nil
-	}
+func runDir(dataDir, changeSet string) string {
+	return filepath.Join(preimageDir(dataDir, changeSet), "run")
+}
+
+// capture writes a pre-image into dir.
+func capture(dataDir, dir, changeSet string, files []string, svc *preService, fw *preFirewall, now time.Time) error {
 	m := manifest{ChangeSet: changeSet, Created: now.UTC(), Tool: buildinfo.Version, Service: svc, Firewall: fw}
 	for _, rel := range dedupe(files) {
 		b, err := os.ReadFile(filepath.Join(dataDir, rel))
@@ -70,10 +80,10 @@ func capturePreimage(dataDir, changeSet string, files []string, svc *preService,
 		case errors.Is(err, os.ErrNotExist):
 			m.Files = append(m.Files, preFile{Path: rel})
 		case err != nil:
-			return false, fmt.Errorf("read %s for the pre-image: %w", rel, err)
+			return fmt.Errorf("read %s for the pre-image: %w", rel, err)
 		default:
 			if err := atomicfile.Write(filepath.Join(dir, "files", rel), b, 0o600); err != nil {
-				return false, err
+				return err
 			}
 			sum := sha256.Sum256(b)
 			m.Files = append(m.Files, preFile{Path: rel, Present: true, SHA256: hex.EncodeToString(sum[:])})
@@ -81,30 +91,52 @@ func capturePreimage(dataDir, changeSet string, files []string, svc *preService,
 	}
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
+		return err
+	}
+	// The manifest goes last: a capture that stopped half way has none.
+	return atomicfile.Write(filepath.Join(dir, "manifest.json"), out, 0o600)
+}
+
+// capturePreimage takes the change set's pre-image unless it has one, and
+// always the run's. It reports whether it took the change set's.
+func capturePreimage(dataDir, changeSet string, files []string, svc *preService, fw *preFirewall, now time.Time) (bool, error) {
+	first := false
+	dir := preimageDir(dataDir, changeSet)
+	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); errors.Is(err, os.ErrNotExist) {
+		if err := os.RemoveAll(dir); err != nil { // a capture that stopped half way
+			return false, err
+		}
+		if err := capture(dataDir, dir, changeSet, files, svc, fw, now); err != nil {
+			return false, err
+		}
+		first = true
+	} else if err != nil {
 		return false, err
 	}
-	// The manifest goes last: a capture that stopped half way has none, and
-	// the next run captures again.
-	return true, atomicfile.Write(filepath.Join(dir, "manifest.json"), out, 0o600)
+	run := runDir(dataDir, changeSet)
+	if err := os.RemoveAll(run); err != nil {
+		return first, err
+	}
+	return first, capture(dataDir, run, changeSet, files, svc, fw, now)
 }
 
-func loadPreimage(dataDir, changeSet string) (manifest, error) {
-	var m manifest
-	b, err := os.ReadFile(filepath.Join(preimageDir(dataDir, changeSet), "manifest.json"))
+func loadPreimage(dir string) (preimage, error) {
+	p := preimage{dir: dir}
+	b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
-		return m, err
+		return p, err
 	}
-	if err := json.Unmarshal(b, &m); err != nil {
-		return m, fmt.Errorf("the pre-image manifest does not decode: %w", err)
+	if err := json.Unmarshal(b, &p.m); err != nil {
+		return p, fmt.Errorf("the pre-image manifest does not decode: %w", err)
 	}
-	return m, nil
+	return p, nil
 }
 
-// restoreFiles puts the pre-image's files back, and removes the ones that
-// were not there. It reports whether anything changed.
-func restoreFiles(dataDir string, m manifest) (bool, error) {
+// restoreFiles puts a pre-image's files back, and removes the ones that were
+// not there. It reports whether anything changed.
+func restoreFiles(dataDir string, p preimage) (bool, error) {
 	changed := false
-	for _, f := range m.Files {
+	for _, f := range p.m.Files {
 		dst := filepath.Join(dataDir, f.Path)
 		cur, curErr := os.ReadFile(dst)
 		if !f.Present {
@@ -116,7 +148,7 @@ func restoreFiles(dataDir string, m manifest) (bool, error) {
 			}
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(preimageDir(dataDir, m.ChangeSet), "files", f.Path))
+		b, err := os.ReadFile(filepath.Join(p.dir, "files", f.Path))
 		if err != nil {
 			return changed, fmt.Errorf("read the pre-image of %s: %w", f.Path, err)
 		}
@@ -131,51 +163,38 @@ func restoreFiles(dataDir string, m manifest) (bool, error) {
 	return changed, nil
 }
 
-// prunePreimages keeps the keepPreimages newest pre-images (and always
-// current's) and removes the rest.
+// prunePreimages keeps the keepPreimages newest change sets' pre-images (and
+// always current's) and removes the rest.
 func prunePreimages(dataDir, current string) error {
-	entries, err := os.ReadDir(provisionDir(dataDir))
+	all, err := listPreimages(dataDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		return err
 	}
-	type dated struct {
-		name string
-		at   time.Time
-	}
-	var all []dated
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == current {
+	kept := 0
+	for _, name := range all {
+		if name == current {
 			continue
 		}
-		m, err := loadPreimage(dataDir, e.Name())
-		at := m.Created
-		if err != nil {
-			if info, ierr := e.Info(); ierr == nil {
-				at = info.ModTime()
-			}
-		}
-		all = append(all, dated{e.Name(), at})
-	}
-	slices.SortFunc(all, func(a, b dated) int { return b.at.Compare(a.at) })
-	for i, d := range all {
-		if i < keepPreimages-1 {
+		if kept < keepPreimages-1 {
+			kept++
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(provisionDir(dataDir), d.name)); err != nil {
+		if err := os.RemoveAll(preimageDir(dataDir, name)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// preimages lists the change sets with a pre-image, newest first.
-func preimages(dataDir string) []string {
+// listPreimages lists the change sets with a pre-image folder, newest first;
+// a folder whose manifest cannot be read sorts by its own time.
+func listPreimages(dataDir string) ([]string, error) {
 	entries, err := os.ReadDir(provisionDir(dataDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	type dated struct {
 		name string
@@ -183,14 +202,33 @@ func preimages(dataDir string) []string {
 	}
 	var all []dated
 	for _, e := range entries {
-		if m, err := loadPreimage(dataDir, e.Name()); err == nil && e.IsDir() {
-			all = append(all, dated{e.Name(), m.Created})
+		if !e.IsDir() || !changeSetRe.MatchString(e.Name()) {
+			continue
 		}
+		at := time.Time{}
+		if p, err := loadPreimage(preimageDir(dataDir, e.Name())); err == nil {
+			at = p.m.Created
+		} else if info, ierr := e.Info(); ierr == nil {
+			at = info.ModTime()
+		}
+		all = append(all, dated{e.Name(), at})
 	}
 	slices.SortFunc(all, func(a, b dated) int { return b.at.Compare(a.at) })
 	out := make([]string, 0, len(all))
 	for _, d := range all {
 		out = append(out, d.name)
+	}
+	return out, nil
+}
+
+// preimages lists the change sets Restore can put back, newest first.
+func preimages(dataDir string) []string {
+	all, _ := listPreimages(dataDir)
+	var out []string
+	for _, name := range all {
+		if _, err := loadPreimage(preimageDir(dataDir, name)); err == nil {
+			out = append(out, name)
+		}
 	}
 	return out
 }

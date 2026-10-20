@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,18 @@ func IsConfigured(cfg config.Config) bool {
 	return server != "" &&
 		strings.TrimSpace(cfg.DB.User) != "" &&
 		(cfg.DB.Port > 0 || instance != "")
+}
+
+// Check refuses a database configuration the connector cannot use, without
+// contacting anything: what OpenLazy would refuse, which stops the daemon. A
+// config with no database is fine. The GUI's save and api.CheckConfig call it,
+// so neither leaves a config the service will not start on.
+func Check(cfg config.Config) error {
+	if !IsConfigured(cfg) {
+		return nil
+	}
+	_, _, err := buildDSN(cfg, "")
+	return err
 }
 
 // SplitInstance separates db.host into the server and a named instance:
@@ -91,7 +104,9 @@ func OpenLazy(cfg config.Config, password string, opt Options) (*sql.DB, error) 
 
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
-		return nil, err
+		// Not err: the driver's parse error quotes the DSN, password
+		// included, and the daemon logs what this returns.
+		return nil, errors.New("the db settings do not make a valid connection string (check db.host, db.port and db.user)")
 	}
 
 	if opt.MaxOpenConns > 0 {
@@ -121,6 +136,14 @@ func Ping(ctx context.Context, db *sql.DB, timeout time.Duration) error {
 	return db.PingContext(ctx)
 }
 
+// hostRe is what db.host's server part may be besides an IP: a host name
+// (NetBIOS names may carry _), "." or "(local)". Anything else makes the
+// driver refuse the DSN — not at Open but on connect, with the DSN, password
+// URL-escaped, in the error the daemon logs and the GUI shows.
+var hostRe = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?|\.|\(local\))$`)
+
+func validHost(h string) bool { return net.ParseIP(h) != nil || hostRe.MatchString(h) }
+
 // buildDSN puts a named instance in the URL path (sqlserver://host/INSTANCE),
 // the form go-mssqldb reads as host\INSTANCE. It used to go into the host
 // part, where the backslash was escaped to %5C and the driver refused the DSN
@@ -136,6 +159,9 @@ func buildDSN(cfg config.Config, password string) (driverName string, dsn string
 
 	if host == "" {
 		return "", "", errors.New("db.host is required")
+	}
+	if !validHost(host) {
+		return "", "", errors.New("db.host is not a host name or IP address")
 	}
 	if port < 0 || port > 65535 || (port == 0 && instance == "") {
 		return "", "", errors.New("db.port is invalid")
