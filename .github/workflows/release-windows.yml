@@ -67,6 +67,11 @@ jobs:
           version_flag="-X github.com/digitrade-e/digi-erp-connector/internal/buildinfo.Version=${VERSION}"
           go build -trimpath -ldflags "-s -w -H=windowsgui ${version_flag}" -o "dist/bin/digi-erp-connector.exe" ./cmd/digi-erp-connector
           go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
+          # A console program: it prints one JSON object (plan 068).
+          go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connector-provision.exe" ./cmd/digi-erp-connector-provision
+          # digi-mcp runs these over WinRM only when their sha256 is listed in a
+          # release's SHA256SUMS (plan 068, lint L25).
+          (cd dist/bin && sha256sum digi-erp-connector.exe digi-erp-connectord.exe digi-erp-connector-provision.exe > ../SHA256SUMS)
 
       - name: Build installer
         shell: powershell
@@ -80,5 +85,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          files: dist/digi-erp-connector-setup-*.exe
+          files: |
+            dist/digi-erp-connector-setup-*.exe
+            dist/SHA256SUMS
           generate_release_notes: true

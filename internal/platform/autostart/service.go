@@ -201,7 +201,7 @@ type ServiceInfo struct {
 	ProcessID    uint32   `json:"processId,omitempty"`
 	// ProcessStart is when the running process started (zero when it is not
 	// running): a config.yaml written after it is not what the service runs.
-	ProcessStart time.Time `json:"processStart,omitempty"`
+	ProcessStart time.Time `json:"processStart,omitzero"`
 	// RecoveryPlanned: the failure actions are the plan (recoveryMatches).
 	RecoveryPlanned bool `json:"recoveryPlanned"`
 }

@@ -49,6 +49,9 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) ([]byte, 
 	}
 	cmd, rest := args[0], args[1:]
 	env.ensureDefaults()
+	if u, ok := env.Sys.(interface{ Unsupported() error }); ok && cmd != "version" {
+		return envelope(cmd, nil, refuse(CodeUnsupported, "run it on the Windows machine the connector is installed on", "%v", u.Unsupported()), nil), ExitRefused
+	}
 
 	var (
 		result  any
