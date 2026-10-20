@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -167,7 +166,7 @@ func persistConfig(cfg config.Config, password string, logSvc logger.LoggerServi
 	// An empty field means "keep the stored password", so only overwrite when
 	// something was actually typed.
 	if password != "" {
-		if err := secrets.Set(dbPasswordKey(cfg.ERP), []byte(password)); err != nil {
+		if err := secrets.Set(config.DBPasswordKey(cfg.ERP), []byte(password)); err != nil {
 			return "", fmt.Errorf("failed to save password: %w", err)
 		}
 	}
@@ -213,25 +212,17 @@ func ensureHasavshevetProcedures(cfg config.Config, password string, logSvc logg
 	}
 	defer dbConn.Close()
 
-	procedures := []struct {
-		name   string
-		ensure func(context.Context, *sql.DB) (bool, error)
-	}{
-		{"GPRICE_Bulk", hasavshevet.EnsureGPriceBulkProcedure},
-		{"GetOnHandStockForSkus", hasavshevet.EnsureOnHandStockForSkusProcedure},
-	}
-
-	for _, p := range procedures {
-		created, err := p.ensure(ctx, dbConn)
-		if err != nil {
-			logSvc.Error("failed to initialize "+p.name, err)
-			return fmt.Errorf("failed to initialize %s: %w", p.name, err)
-		}
-		if created {
-			logSvc.Success(p.name + " created")
+	results, err := hasavshevet.EnsureProcedures(ctx, dbConn)
+	for _, r := range results {
+		if r.Created {
+			logSvc.Success(r.Name + " created")
 		} else {
-			logSvc.Info(p.name + " already exists")
+			logSvc.Info(r.Name + " already exists")
 		}
+	}
+	if err != nil {
+		logSvc.Error("Hasavshevet procedure setup failed", err)
+		return err
 	}
 	return nil
 }

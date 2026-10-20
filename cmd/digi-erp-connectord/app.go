@@ -140,8 +140,8 @@ func (a *serverApp) Start() error {
 	a.logSvc = logSvc
 	bootstrapLog.Info("logger.New(cfg) returned")
 
-	logSvc.Info(fmt.Sprintf("calling secrets.Get for db password (key=%s)", dbPasswordKey(cfg.ERP)))
-	dbPassword, dbPassErr := secrets.Get(dbPasswordKey(cfg.ERP))
+	logSvc.Info(fmt.Sprintf("calling secrets.Get for db password (key=%s)", config.DBPasswordKey(cfg.ERP)))
+	dbPassword, dbPassErr := secrets.Get(config.DBPasswordKey(cfg.ERP))
 	if dbPassErr != nil {
 		logSvc.Error("failed to load db password", dbPassErr)
 	}
