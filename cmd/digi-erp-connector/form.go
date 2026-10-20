@@ -10,8 +10,6 @@ package main
 //	service_control.go start/stop/restart of the daemon service
 
 import (
-	"strconv"
-
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
@@ -222,7 +220,7 @@ func (f *mainForm) populateFromConfig(cfg config.Config) {
 	f.debugCheck.SetChecked(cfg.Debug)
 	f.setComboByValue(f.driverCombo, config.DBDriverOptions(), string(cfg.DB.Driver))
 	f.hostEdit.SetText(cfg.DB.Host)
-	f.portEdit.SetText(strconv.Itoa(cfg.DB.Port))
+	f.portEdit.SetText(portText(cfg.DB.Port))
 	f.userEdit.SetText(cfg.DB.User)
 	f.dbNameEdit.SetText(cfg.DB.Database)
 	f.erpUserEdit.SetText(cfg.ERPUser)
