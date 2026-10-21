@@ -108,6 +108,11 @@ var testHookBeforeEntry func(path string)
 // second handle (tests swap the entry there).
 var testHookBeforeClaim func(path string)
 
+// testSetOwnerSystem makes ProtectTree hand the directory to SYSTEM as it does
+// when it runs as SYSTEM (tests run as an administrator holding
+// SeRestorePrivilege).
+var testSetOwnerSystem bool
+
 // testIndirectOverride, if set, answers the nested-membership question in
 // place of the real lookup (tests stand in for a domain).
 var testIndirectOverride func(sid string) (bool, error)

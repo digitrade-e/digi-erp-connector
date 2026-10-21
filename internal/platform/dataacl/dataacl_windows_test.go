@@ -942,3 +942,93 @@ func TestProtectTree_RefusesAnEntrySwappedBeforeTheClaim(t *testing.T) {
 		t.Fatalf("ProtectTree = %v; want ErrOutsideTree", err)
 	}
 }
+
+// rendered is sddl as the OS prints it back (SY, BA, OW aliases), the form
+// the walk compares.
+func rendered(t *testing.T, sddl func(account string, container bool) (string, error), container bool) string {
+	t.Helper()
+	text, err := sddl("", container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
+}
+
+// The b4l write node (192.168.0.7), 2026-10-20: the first start after the
+// upgrade to 1.0.19 wrote the directory's DACL and then made SYSTEM its owner.
+// Every start after that found the directory and every file created since
+// then "differing" — it re-applied the DACL and moved its own server.log aside
+// each time. A walk must leave a steady state behind it, owner change
+// included: a file the OS creates afterwards inherits exactly the child DACL,
+// and the next walk writes nothing.
+func TestProtectTree_SteadyAfterTheOwnerBecomesSystem(t *testing.T) {
+	if !enablePrivilege(t, "SeRestorePrivilege") {
+		t.Skip("SeRestorePrivilege not held: SYSTEM cannot be assigned as owner here")
+	}
+	testSetOwnerSystem = true
+	t.Cleanup(func() { testSetOwnerSystem = false })
+	dir := filepath.Join(t.TempDir(), "data")
+	mkfile(t, filepath.Join(dir, "config.yaml"))
+
+	rep := protectTree(t, dir)
+	if !rep.OwnerSet || rep.OwnerErr != nil {
+		t.Fatalf("first run %+v; want SYSTEM made the owner", rep)
+	}
+	root, _ := daclOf(t, dir)
+	t.Logf("the directory after the owner change: %s", root)
+	want := rendered(t, SDDL, true)
+	if !sameDACL(root, want) {
+		t.Errorf("the directory's DACL after the owner change is %s; want %s", root, want)
+	}
+
+	// What the daemon does next: open server.log, write .server-log-id.
+	later := filepath.Join(dir, "server.log")
+	mkfile(t, later)
+	got, _ := daclOf(t, later)
+	child := rendered(t, ChildSDDL, false)
+	if !sameDACL(got, child) {
+		t.Errorf("a file created after the walk carries %s; want %s", got, child)
+	}
+
+	rep = protectTree(t, dir)
+	if rep.RootSet || rep.Reset != 0 || rep.OwnerSet {
+		t.Errorf("the next start %+v (reset %v); want nothing written", rep, rep.ResetPaths)
+	}
+}
+
+// The same for the GUI, which hands what it created to Administrators: after
+// a claim the next walk writes nothing, and a file created in between
+// inherits the child DACL.
+func TestProtectTree_SteadyAfterAClaim(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	mkfile(t, filepath.Join(dir, "config.yaml"))
+	opt := TreeOptions{ClaimForAdministrators: true}
+	rep, err := ProtectTree(dir, opt)
+	if err != nil {
+		t.Fatalf("ProtectTree: %v", err)
+	}
+	if rep.Claimed == 0 {
+		t.Skipf("nothing to claim here (owner %s): the claim path is not exercised", ownerOf(t, dir))
+	}
+	later := filepath.Join(dir, "ui.log")
+	mkfile(t, later)
+	got, _ := daclOf(t, later)
+	child := rendered(t, ChildSDDL, false)
+	if !sameDACL(got, child) {
+		t.Errorf("a file created after the claim carries %s; want %s", got, child)
+	}
+	if _, err := ProtectTree(dir, opt); err != nil { // claims ui.log
+		t.Fatalf("ProtectTree: %v", err)
+	}
+	rep, err = ProtectTree(dir, opt)
+	if err != nil {
+		t.Fatalf("ProtectTree: %v", err)
+	}
+	if rep.RootSet || rep.Reset != 0 || rep.Claimed != 0 {
+		t.Errorf("third run %+v (reset %v); want nothing written", rep, rep.ResetPaths)
+	}
+}
