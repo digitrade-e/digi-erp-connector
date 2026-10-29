@@ -372,6 +372,13 @@ func (a *applier) checkFilesExist() error {
 			return refuse(CodeImporterMissing, "name a file that exists (discover lists candidates)", "importer file %s is not on this machine", p)
 		}
 	}
+	if a.s.Options != nil && a.s.Options.ImageFolders != nil {
+		for _, d := range a.tgt.ImageFolders {
+			if info, err := os.Stat(d); err != nil || !info.IsDir() {
+				return refuse(CodeImageFolderMissing, "name folders that exist on this machine", "image folder %s is not a folder on this machine", d)
+			}
+		}
+	}
 	return nil
 }
 
@@ -753,6 +760,8 @@ func configDiff(cur, tgt config.Config) string {
 	add("importer", cur.HasExePath != tgt.HasExePath || cur.HasParamFile != tgt.HasParamFile || cur.HasBatFile != tgt.HasBatFile)
 	add("auth", cur.Auth != tgt.Auth)
 	add("tls", cur.TLS != tgt.TLS)
+	add("options", !slices.Equal(cur.ImageFolders, tgt.ImageFolders) || cur.ERPUser != tgt.ERPUser ||
+		cur.Debug != tgt.Debug || cur.Queries != tgt.Queries)
 	if len(out) == 0 {
 		return "rewritten in the connector's format"
 	}

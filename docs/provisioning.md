@@ -56,9 +56,20 @@ UTF-8 as mojibake; every JSON reader decodes it back. Exit codes: 0 done, 1 refu
   "firewall": { "allowFrom": ["198.51.100.241"] },          // optional; ruleName defaults to digi-erp-connector
   "service": { "dependOn": ["MSSQL$WIZSOFT"] },             // optional
   "assumeIdle": false,                    // restart even when the order queue cannot be read
-  "expect": { "configSha256": "…" }       // optional: refuse if config.yaml changed since discover
+  "expect": { "configSha256": "…" },      // optional: refuse if config.yaml changed since discover
+  "options": {                            // optional; each field left out keeps the box's
+    "imageFolders": ["D:\\images"],       // absolute folders that exist, at most 16; [] serves none
+    "erpUser": "39",                      // the Hasavshevet user; "" clears it
+    "debug": false,
+    "queryTimeoutSeconds": 30,            // 1-600
+    "queryMaxRows": 10000,                // 1-100000
+    "tokenTTL": "30m"                     // a duration from 5m to 24h; "" is the default (30m)
+  }
 }
 ```
+
+`options` covers the GUI's remaining settings, so a box can be configured with no
+GUI at all. A missing image folder is refused (`image_folder_missing`).
 
 `hasParamFile` is passed to has.exe as written, and has.exe runs from `sendOrderDir`,
 so a bare name such as `digi_perm.bat` is looked up there. `apply` refuses a file
