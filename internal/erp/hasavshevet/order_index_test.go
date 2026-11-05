@@ -85,6 +85,7 @@ func TestOrderIndex_UnreadableEntries(t *testing.T) {
 		"fraction number":  `{"key":"4711-release","number":7.5,"state":"written","reservedAt":"x"}`,
 		"data after entry": valid + ` {}`,
 		"array":            `[` + valid + `]`,
+		"negative retries": `{"key":"4711-release","number":7,"state":"retryable","retries":-1,"reservedAt":"x"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			ix := newTestOrderIndex(t)
@@ -97,8 +98,12 @@ func TestOrderIndex_UnreadableEntries(t *testing.T) {
 			if e, found, err := ix.load(key); !errors.Is(err, ErrOrderIndexUnreadable) {
 				t.Errorf("load = %+v, %v, %v; want ErrOrderIndexUnreadable", e, found, err)
 			}
-			if _, err := ix.all(); !errors.Is(err, ErrOrderIndexUnreadable) {
-				t.Errorf("all = %v; want ErrOrderIndexUnreadable", err)
+			// all() reports it and goes on: recovery skips a damaged entry.
+			entries, problems, err := ix.all()
+			if err != nil || len(entries) != 0 || len(problems) != 1 || !errors.Is(problems[0], ErrOrderIndexUnreadable) {
+				t.Errorf("all = %v, %v, %v; want the entry reported as unreadable and skipped", entries, problems, err)
+			} else if !strings.Contains(problems[0].Error(), ix.pathFor(orderIndexStem(key))) {
+				t.Errorf("the problem %q does not name the file", problems[0])
 			}
 		})
 	}
@@ -109,11 +114,17 @@ func TestOrderIndex_UnreadableEntries(t *testing.T) {
 	if _, found, err := ix.load(key); err != nil || !found {
 		t.Fatalf("the valid entry = %v, %v", found, err)
 	}
+	// So does a retryable one — the state a person may also set by hand.
+	_ = os.WriteFile(ix.pathFor(orderIndexStem(key)), []byte(`{"key":"4711-release","number":7,"state":"retryable","retries":2,"reservedAt":"x"}`), 0o600)
+	if e, found, err := ix.load(key); err != nil || !found || e.State != orderRetryable || e.Retries != 2 {
+		t.Fatalf("a retryable entry = %+v, %v, %v", e, found, err)
+	}
 }
 
-// all() is what recovery reads: every entry sorted by number, atomicfile's
-// leftover temp files and other names skipped, and two keys holding one number
-// — which no correct run produces — refused.
+// all() is what recovery reads: every readable entry sorted by number,
+// atomicfile's leftover temp files and other names skipped, and anything wrong
+// — an unreadable entry, two keys holding one number, which no correct run
+// produces — reported rather than fatal.
 func TestOrderIndex_All(t *testing.T) {
 	ix := newTestOrderIndex(t)
 	for i, n := range []int64{30, 10, 20} {
@@ -129,9 +140,9 @@ func TestOrderIndex_All(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(ix.dir, "sub.json"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := ix.all()
-	if err != nil {
-		t.Fatalf("all: %v", err)
+	entries, problems, err := ix.all()
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("all: %v, %v", problems, err)
 	}
 	var got []int64
 	for _, e := range entries {
@@ -144,12 +155,23 @@ func TestOrderIndex_All(t *testing.T) {
 	if err := ix.save(&orderIndexEntry{Key: "kd", Number: 20, State: orderWritten}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ix.all(); !errors.Is(err, ErrOrderIndexUnreadable) {
-		t.Errorf("two keys holding order 20 = %v; want ErrOrderIndexUnreadable", err)
+	entries, problems, err = ix.all()
+	if err != nil || len(entries) != 4 || len(problems) != 1 || !errors.Is(problems[0], ErrOrderIndexUnreadable) {
+		t.Errorf("two keys holding order 20 = %d entries, %v, %v; want it reported", len(entries), problems, err)
 	}
 
 	missing := orderIndex{dir: filepath.Join(t.TempDir(), "nothing-here")}
-	if entries, err := missing.all(); err != nil || len(entries) != 0 {
-		t.Errorf("an index never written = %v, %v; want empty", entries, err)
+	if entries, problems, err := missing.all(); err != nil || len(entries)+len(problems) != 0 {
+		t.Errorf("an index never written = %v, %v, %v; want empty", entries, problems, err)
+	}
+
+	// A directory that cannot be listed is an error — but not "this key's
+	// entry is unreadable", which the route answers as 500 for one key.
+	notADir := orderIndex{dir: filepath.Join(t.TempDir(), "file")}
+	if err := os.WriteFile(notADir.dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := notADir.all(); err == nil || errors.Is(err, ErrOrderIndexUnreadable) {
+		t.Errorf("an unlistable index = %v; want an error that is not ErrOrderIndexUnreadable", err)
 	}
 }

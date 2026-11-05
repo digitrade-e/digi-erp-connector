@@ -122,9 +122,11 @@ connector, or restart it yourself.
 | Files appear but nothing is imported | No `hasBatFile`/`hasExePath` configured, so nothing runs after the files are written. |
 | `503 QUEUE_FULL` | More than 64 orders queued. The worker is serial by design; investigate why the importer is slow. |
 | Order numbers restarted from a low number | `lastOrderNumber.json` is missing from `sendOrderDir`. Restore it, or seed it from the previous install before going live. (A counter behind the order index is moved past it at startup, with a warning.) |
-| `503 ORDER_NOT_QUEUED` | The log says which: `lastOrderNumber.json` exists but is unreadable (it is never reset to 1 — repair it), the order index cannot be written, or its recovery failed. Nothing was reserved. |
-| `500 ORDER_INDEX_UNREADABLE` | An order index entry (`DataDir/orders/index/*.json`) is damaged; the log names the file. Stop the service and repair it. **Never delete it** — the next retry of that `historyId` would become a second order. |
-| A repeat of an order answers `"status":"unknown"` / log `ORDER OUTCOME UNKNOWN` | The connector stopped between accepting the order and recording its outcome. It is never written again. Check `sendOrderDir/history/<n>` and Hashavshevet (Asmahta `<n>`); record the outcome by setting `state` in the entry with the service stopped. |
+| `503 ORDER_COUNTER_UNREADABLE` | `lastOrderNumber.json` exists but holds no usable number. It is never reset to 1: repair it (`{"lastOrderNumber": N}`, N at least the highest folder under `sendOrderDir/history/`). Known `historyId`s are still answered meanwhile. |
+| `503 ORDER_NOT_QUEUED` | The order index could not be written (disk, permissions) or recovered (the log says why). Nothing was reserved; a retry with the same `historyId` is safe. |
+| `500 ORDER_INDEX_UNREADABLE`, or log `ORDER INDEX ENTRY SKIPPED` | One key's entry in `DataDir/orders/index/` is damaged; only that key is refused. See [A damaged order index entry](#a-damaged-order-index-entry). |
+| A repeat of an order answers `"status":"unknown"` / log `ORDER OUTCOME UNKNOWN` | The connector stopped between accepting the order and recording its outcome. See [An order whose outcome is unknown](#an-order-whose-outcome-is-unknown). |
+| A repeat answers `"status":"queued","replay":true` for an order that had failed | Expected: it failed before any file was written (`retryable` — e.g. `IMOVEIN.doc` held by the importer, the account lookup failed), so the repeat queued it again under its first number. |
 | Two orders interfered with each other | Should be impossible — the queue is single-worker. If the customer has *another* process importing IMOVEIN files from the same directory, that is the collision. Give the connector its own directory. |
 
 ## File endpoint returns INVALID_FILE_PATH
@@ -166,3 +168,54 @@ Capture the responses of every saved query before and after the change and diff
 them — see [operations.md](operations.md#verifying-a-change-did-not-alter-behaviour).
 Beware live data: re-capture both sides close together, or a genuine data change
 looks like a regression.
+
+## The order index (DIG-1291)
+
+Everything below is done **with the service stopped** (first check
+`GET /api/sendOrder` answers `{"queued":0,"running":0}`). An entry is
+`DataDir/orders/index/<sha256(historyId)>.json`. To find it:
+
+- from the log: `server.log` names the file on every reservation (`sendOrder
+  historyId="…": order N reserved and queued (index <file>)`), on a 500 and on
+  `ORDER INDEX ENTRY SKIPPED`; `historyId=` and `orderNumber=` appear together
+  on the worker's `processing order` line;
+- from a `historyId`, in PowerShell:
+  `-join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes('<historyId>')) | % { $_.ToString('x2') })`
+
+"Order `n` was written" means `sendOrderDir\history\<n>\IMOVEIN_<n>.doc`
+exists (the history copy is written after `IMOVEIN.doc` and `.prm`, and the
+importer runs after all four). An empty `history\<n>` folder means nothing was
+written. One caveat: if something other than the connector imports
+`IMOVEIN.doc` from `sendOrderDir` on its own (no `hasBatFile` / `hasExePath`
+configured), check Hashavshevet (Asmahta `n`) in every case below.
+
+### A damaged order index entry
+
+1. Read the file and the log to learn its `historyId` and number `n`.
+2. If you know `n` and `history\<n>\IMOVEIN_<n>.doc` exists: the order was
+   written. Rewrite the entry by hand (`{"key": "<historyId>", "number": n,
+   "state": "written", "reservedAt": "<any text>"}`) so its repeats answer it.
+3. If you know `n` and there is no `IMOVEIN_<n>.doc`: nothing reached
+   Hashavshevet. Either rewrite it with `"state": "retryable"` (the next repeat
+   writes it under `n` — preferred: the number and the key stay together), or
+   move the file out of `orders\index\` (the next repeat becomes a new order
+   under a new number; `n` stays unused).
+4. If you cannot learn `n`: look the order up in Hashavshevet (customer, date,
+   items). Found → step 2 with its Asmahta. Not found → move the file aside.
+
+Never delete an entry without these checks: a repeat of a key with no entry is
+a new order — a second Hashavshevet document if the first was written.
+
+### An order whose outcome is unknown
+
+The entry is still `reserved` after a restart. The connector never writes it
+again on its own.
+
+- No `history\<n>\IMOVEIN_<n>.doc` → the connector never ran the importer for
+  it: set `"state": "retryable"` in the entry. The next repeat of the
+  `historyId` writes it under order `n`.
+- `IMOVEIN_<n>.doc` exists → the files were written and the importer may have
+  run. Check Hashavshevet (Asmahta `n`): there → set `"state": "written"`; not
+  there → import the history copy by hand ([Recover from failed
+  import](hasavshevet-send-order.md#recover-from-failed-import)) and set
+  `"state": "written"`.

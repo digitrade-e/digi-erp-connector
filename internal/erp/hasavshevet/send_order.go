@@ -14,6 +14,22 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
 
+// ErrOrderNotWritten marks a processing error raised before the first order
+// file was opened for writing: nothing of the order is on disk and no importer
+// ran, so it may be tried again under the same number (the key index's
+// retryable state). Any error after that point may leave a file behind and is
+// final for its key. errors.Is finds it; the error's text is unchanged.
+var ErrOrderNotWritten = errors.New("order not written")
+
+type orderNotWrittenError struct{ err error }
+
+func (e *orderNotWrittenError) Error() string        { return e.err.Error() }
+func (e *orderNotWrittenError) Unwrap() error        { return e.err }
+func (e *orderNotWrittenError) Is(target error) bool { return target == ErrOrderNotWritten }
+
+// notWritten marks err as raised before any order file was written.
+func notWritten(err error) error { return &orderNotWrittenError{err: err} }
+
 // OrderRequest is the internal representation of a send-order request,
 // translated from the API DTO before enqueueing.
 // DBName is not part of the request; the Sender resolves it from config.
@@ -129,14 +145,17 @@ func (s *Sender) nextOrderNumber() (int64, error) {
 
 // processOrderWithNumber executes the full send-order flow using a pre-reserved
 // order number. If orderNum is zero, it reserves one before continuing.
+//
+// Every error until the first order file is opened for writing is marked
+// ErrOrderNotWritten (see there); from then on a file may exist.
 func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, orderNum int64) (*OrderResult, error) {
 	if strings.TrimSpace(s.cfg.SendOrderDir) == "" {
-		return nil, errors.New("sendOrderDir is not configured")
+		return nil, notWritten(errors.New("sendOrderDir is not configured"))
 	}
 
 	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field spec)
 	if err := validateOrderRequest(req); err != nil {
-		return nil, err
+		return nil, notWritten(err)
 	}
 
 	// 2. Concurrency-safe order number (reserved at queue submit when possible).
@@ -144,7 +163,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		var err error
 		orderNum, err = s.nextOrderNumber()
 		if err != nil {
-			return nil, err
+			return nil, notWritten(err)
 		}
 	}
 
@@ -155,7 +174,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	// 3. Account details: supplied by the caller, or looked up in the ERP database
 	account, err := s.resolveAccount(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, notWritten(err)
 	}
 
 	// 4. Currency rate (non-fatal; default 1.0 matches legacy behaviour)
@@ -172,7 +191,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	hdr, moves := buildIMOVEIN(orderNum, account, req, rate)
 	docBytes, err := generateDOC(hdr, moves)
 	if err != nil {
-		return nil, fmt.Errorf("generate DOC: %w", err)
+		return nil, notWritten(fmt.Errorf("generate DOC: %w", err))
 	}
 	prmBytes := generatePRM()
 
@@ -180,7 +199,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	dir := s.cfg.SendOrderDir
 	historyDir := filepath.Join(dir, "history", fmt.Sprintf("%d", orderNum))
 	if err := os.MkdirAll(historyDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create history dir: %w", err)
+		return nil, notWritten(fmt.Errorf("create history dir: %w", err))
 	}
 
 	// 7. Write files
@@ -198,8 +217,15 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 
 	var writtenFiles []string
 	for _, f := range toWrite {
-		if err := os.WriteFile(f.path, f.data, 0o644); err != nil {
-			return nil, fmt.Errorf("write %s: %w", f.path, err)
+		opened, err := writeOrderFile(f.path, f.data)
+		if err != nil {
+			err = fmt.Errorf("write %s: %w", f.path, err)
+			if !opened && len(writtenFiles) == 0 {
+				// IMOVEIN.doc could not even be opened (e.g. a sharing
+				// violation while the importer holds it): nothing is written.
+				return nil, notWritten(err)
+			}
+			return nil, err
 		}
 		writtenFiles = append(writtenFiles, f.path)
 	}
@@ -240,6 +266,20 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 			Phone:      account.Phone,
 		},
 	}, nil
+}
+
+// writeOrderFile is os.WriteFile that says whether the file was opened: once
+// it is (and truncated), a failed write may leave part of the order in it.
+func writeOrderFile(path string, data []byte) (opened bool, err error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return false, err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return true, err
 }
 
 // buildIMOVEIN maps a validated OrderRequest to the stockHeader + []stockMove

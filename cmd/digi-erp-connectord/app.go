@@ -31,6 +31,10 @@ const windowsServiceName = "digi-erp-connectord"
 // shutdown (a receipt being written can hold that up to 120 s).
 const orderDrainTimeout = 120 * time.Second
 
+// workerExitWait bounds how long Stop waits, after cancelling the order
+// worker, for it to record the orders it never started.
+const workerExitWait = 5 * time.Second
+
 type serverApp struct {
 	cfg         config.Config
 	logSvc      logger.LoggerService
@@ -258,7 +262,8 @@ func (a *serverApp) Start() error {
 //     receipt being written, an order being accepted;
 //  2. the order queue is closed and the worker finishes every order already
 //     queued (each was answered 202), for up to orderDrainTimeout;
-//  3. only then is the worker's context cancelled;
+//  3. only then is the worker's context cancelled; it records every order it
+//     did not start as retryable (DIG-1291), and Stop waits briefly for that;
 //  4. the receipt writer is closed, releasing the receipt data-directory lock
 //     for the next connector process — waiting for the import lock no longer
 //     than ctx allows (a hung order import holds it; the OS then releases the
@@ -285,6 +290,17 @@ func (a *serverApp) Stop(ctx context.Context) {
 	}
 	if a.queueCancel != nil {
 		a.queueCancel()
+		// The worker records every order it did not start as retryable before
+		// it exits; wait for that, so those orders are not left "unknown" by
+		// the process exiting first. Its own short bound, not ctx: after a
+		// drain that used up the budget ctx is already over, and recording
+		// takes milliseconds (a cancelled import ends with its context).
+		if a.orderQueue != nil {
+			select {
+			case <-a.orderQueue.Done():
+			case <-time.After(workerExitWait):
+			}
+		}
 	}
 	if a.receiptWriter != nil {
 		if err := a.receiptWriter.CloseContext(ctx); err != nil && a.logSvc != nil {

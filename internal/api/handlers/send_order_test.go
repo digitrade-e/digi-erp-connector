@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -347,5 +349,82 @@ func TestSendOrderStatusHandler_AnswersFromTheIndexAfterRestart(t *testing.T) {
 	NewSendOrderStatusHandler(restarted)(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status of an unknown job = %d; want 404", w.Code)
+	}
+}
+
+// A key whose order failed before anything was written is retryable: the
+// resend is queued again under the SAME number — 202, the first jobId,
+// replay: true, status queued — and no new number is taken. (Planted by hand
+// here, which is also the documented way back for an "unknown" order.)
+func TestSendOrderHandler_RetryableKeyIsQueuedAgainUnderItsNumber(t *testing.T) {
+	root := t.TempDir()
+	q := newIndexedTestQueue(t, root)
+	h := NewSendOrderHandler(q, true)
+	if w := sendOrderRequest(t, h, validOrderBody()); w.Code != http.StatusAccepted {
+		t.Fatalf("first POST = %d", w.Code)
+	}
+	restarted := newIndexedTestQueue(t, root)
+	entry := `{"key":"HID-001","number":1,"state":"retryable","error":"open IMOVEIN.doc: sharing violation","reservedAt":"2026-11-05T10:00:00Z"}`
+	if err := os.WriteFile(orderIndexFile(root, "HID-001"), []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := sendOrderRequest(t, NewSendOrderHandler(restarted, true), validOrderBody())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("resend = %d %s; want 202", w.Code, w.Body.String())
+	}
+	if m := decodeBody(t, w); m["jobId"] != "1" || m["status"] != "queued" || m["replay"] != true {
+		t.Errorf("resend answer = %v; want job 1, queued, replay true", m)
+	}
+	if restarted.Pending() != 1 {
+		t.Errorf("queued %d; want the order queued again once", restarted.Pending())
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "orders", "lastOrderNumber.json"))
+	if !strings.Contains(string(b), `"lastOrderNumber": 1`) {
+		t.Errorf("counter = %s; a retry must not take a new number", b)
+	}
+}
+
+// Each refusal says what it is, and only a transient one tells the caller to
+// retry with the same historyId.
+func TestWriteSendOrderError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		status    int
+		code      string
+		saysRetry bool
+	}{
+		{"this key's entry unreadable", fmt.Errorf("%w: /data/orders/index/ab.json: bad", hasavshevet.ErrOrderIndexUnreadable), 500, "ORDER_INDEX_UNREADABLE", false},
+		{"queue full", fmt.Errorf("%w (capacity 64)", hasavshevet.ErrQueueFull), 503, "QUEUE_FULL", false},
+		{"queue closed", hasavshevet.ErrQueueClosed, 503, "QUEUE_FULL", false},
+		{"counter unreadable", fmt.Errorf("recover the order index: %w: /x/lastOrderNumber.json", hasavshevet.ErrOrderCounterUnreadable), 503, "ORDER_COUNTER_UNREADABLE", false},
+		{"index not writable", errors.New("persist order index entry for order 7: disk full"), 503, "ORDER_NOT_QUEUED", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeSendOrderError(w, tc.err)
+			if w.Code != tc.status {
+				t.Errorf("status = %d; want %d", w.Code, tc.status)
+			}
+			var body struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+				Error   string `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Code != tc.code {
+				t.Errorf("code = %q; want %q", body.Code, tc.code)
+			}
+			text := w.Body.String()
+			if got := strings.Contains(text, "retry with the same historyId"); got != tc.saysRetry {
+				t.Errorf("says retry = %v; want %v (%s)", got, tc.saysRetry, text)
+			}
+			if strings.Contains(text, "/data/") || strings.Contains(text, "lastOrderNumber.json:") {
+				t.Errorf("the answer echoes a path: %s", text)
+			}
+		})
 	}
 }

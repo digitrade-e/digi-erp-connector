@@ -58,7 +58,7 @@ func (h *orderHarness) newQueue() *OrderQueue {
 	return q
 }
 
-func (h *orderHarness) start(q *OrderQueue) {
+func (h *orderHarness) start(q *OrderQueue) context.CancelFunc {
 	h.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel and wait for the worker, before TempDir's cleanup removes the
@@ -72,6 +72,7 @@ func (h *orderHarness) start(q *OrderQueue) {
 		}
 	})
 	q.Start(ctx)
+	return cancel
 }
 
 // stop drains a started queue, as the daemon's Stop does before a restart.
@@ -118,7 +119,8 @@ func keyedOrder(key string) OrderRequest {
 	return r
 }
 
-// failingOrder fails in the worker: no account details and no database.
+// failingOrder fails in the worker before any file is written: no account
+// details and no database. Its key is retryable, not failed.
 func failingOrder(key string) OrderRequest {
 	r := keyedOrder(key)
 	r.Account = nil
@@ -296,16 +298,19 @@ func TestOrderQueue_WorkerSuccessMarksTheEntryWritten(t *testing.T) {
 	}
 }
 
-// A failure is recorded on the entry and answered as failed with the same
-// jobId — never written again under that key (a re-release is a new key).
+// A failure once a file may exist is recorded on the entry and answered as
+// failed with the same jobId — never written again under that key (a
+// re-release is a new key).
 func TestOrderQueue_WorkerFailureIsRecordedAndNeverRequeued(t *testing.T) {
 	h := newOrderHarness(t)
 	q := h.queue(true)
-	acc := mustAccept(t, q, failingOrder("4711-rel-a"))
+	unblock := h.block("IMOVEIN.prm") // IMOVEIN.doc is written, IMOVEIN.prm is not
+	acc := mustAccept(t, q, keyedOrder("4711-rel-a"))
 	waitForStatus(t, q, acc.JobID, JobStatusFailed)
+	unblock()
 
 	e := h.entry("4711-rel-a")
-	if e.State != orderFailed || e.Number != 1 || !strings.Contains(e.Error, "account") || len(e.Files) != 0 {
+	if e.State != orderFailed || e.Number != 1 || !strings.Contains(e.Error, "IMOVEIN.prm") || len(e.Files) != 0 {
 		t.Fatalf("entry after failure = %+v; want failed, number 1, the error text", e)
 	}
 	// Even a repeat whose body would now succeed answers the recorded failure.
@@ -316,8 +321,11 @@ func TestOrderQueue_WorkerFailureIsRecordedAndNeverRequeued(t *testing.T) {
 		}
 	}
 	time.Sleep(50 * time.Millisecond)
-	if queued, running := q.Unfinished(); queued+running != 0 || h.counter() != 1 || h.historyDirs() != 0 {
-		t.Errorf("unfinished %d/%d, counter %d, history %d; want nothing re-queued", queued, running, h.counter(), h.historyDirs())
+	if _, err := os.Stat(h.historyDoc(1)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the failed order was written again: %v", err)
+	}
+	if queued, running := q.Unfinished(); queued+running != 0 || h.counter() != 1 {
+		t.Errorf("unfinished %d/%d, counter %d; want nothing re-queued", queued, running, h.counter())
 	}
 }
 
@@ -327,9 +335,11 @@ func TestOrderQueue_ReplayAfterRestartAnswersFromTheIndex(t *testing.T) {
 	h := newOrderHarness(t)
 	q := h.queue(true)
 	done := mustAccept(t, q, keyedOrder("rel-done"))
-	failed := mustAccept(t, q, failingOrder("rel-failed"))
 	waitForStatus(t, q, done.JobID, JobStatusDone)
+	unblock := h.block("IMOVEIN.prm") // a failure after IMOVEIN.doc is written: final
+	failed := mustAccept(t, q, keyedOrder("rel-failed"))
 	waitForStatus(t, q, failed.JobID, JobStatusFailed)
+	unblock()
 	h.stop(q)
 
 	q2 := h.queue(true) // the restart
@@ -350,8 +360,8 @@ func TestOrderQueue_ReplayAfterRestartAnswersFromTheIndex(t *testing.T) {
 	if n := h.counter(); n != 2 {
 		t.Errorf("counter = %d; want 2", n)
 	}
-	if h.historyDirs() != 1 {
-		t.Errorf("history folders = %d; want 1 — a replay wrote again", h.historyDirs())
+	if _, err := os.Stat(h.historyDoc(2)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the failed order was written by a replay: %v", err)
 	}
 	if next := mustAccept(t, q2, keyedOrder("rel-new")); next.JobID != "3" || next.Replay {
 		t.Errorf("a new key after restart = %+v; want job 3", next)
@@ -446,17 +456,17 @@ func TestOrderQueue_UnreadableEntryRefusesItsKey(t *testing.T) {
 		t.Errorf("another key = %+v; want job 2", acc)
 	}
 
-	// After a restart recovery cannot account for the damaged entry (it may own
-	// the highest number), so nothing new is issued until a person repairs it.
+	// After a restart recovery skips the damaged entry (logged) and the other
+	// keys keep working; the damaged key is still refused.
 	q2 := h.newQueue()
-	if err := q2.Recover(); !errors.Is(err, ErrOrderIndexUnreadable) {
-		t.Fatalf("Recover over an unreadable entry = %v; want ErrOrderIndexUnreadable", err)
+	if err := q2.Recover(); err != nil {
+		t.Fatalf("Recover over an unreadable entry = %v; want it skipped", err)
 	}
-	if _, err := q2.Accept(keyedOrder("rel-c")); !errors.Is(err, ErrOrderIndexUnreadable) {
-		t.Errorf("a new key after a failed recovery = %v; want ErrOrderIndexUnreadable", err)
+	if _, err := q2.Accept(keyedOrder("rel-a")); !errors.Is(err, ErrOrderIndexUnreadable) {
+		t.Errorf("the damaged key after a restart = %v; want ErrOrderIndexUnreadable", err)
 	}
-	if n := h.counter(); n != 2 {
-		t.Errorf("counter = %d; want 2", n)
+	if acc := mustAccept(t, q2, keyedOrder("rel-c")); acc.JobID != "3" {
+		t.Errorf("a new key after a restart = %+v; want job 3", acc)
 	}
 }
 

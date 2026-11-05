@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -387,9 +389,34 @@ func TestBuildOrderQueue_IndexOnAndRecoveredAtStartup(t *testing.T) {
 	}
 }
 
-// A failed recovery is logged and does not stop the daemon; sendOrder refuses
-// until it succeeds.
+// A failed recovery (here: lastOrderNumber.json unreadable while the index
+// holds orders) is logged and does not stop the daemon; new orders are refused
+// until it succeeds, while a known historyId is still answered.
 func TestBuildOrderQueue_FailedRecoveryIsNotFatal(t *testing.T) {
+	cfg, sendDir, dataDir := orderCfg(t)
+	first := buildOrderQueue(cfg, nil, dataDir, &quietLogger{})
+	if _, err := first.Accept(testOrder("rel-a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sendDir, "lastOrderNumber.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := &quietLogger{}
+	q := buildOrderQueue(cfg, nil, dataDir, log)
+	if q == nil || len(log.errors) != 1 || !strings.Contains(log.errors[0], "recovery") {
+		t.Fatalf("queue %v, errors %v; want a queue and the recovery failure logged", q, log.errors)
+	}
+	if _, err := q.Accept(testOrder("rel-b")); !errors.Is(err, hasavshevet.ErrOrderCounterUnreadable) {
+		t.Errorf("a new order after a failed recovery = %v; want ErrOrderCounterUnreadable", err)
+	}
+	if acc, err := q.Accept(testOrder("rel-a")); err != nil || acc.JobID != "1" || !acc.Replay {
+		t.Errorf("a known historyId = %+v, %v; want job 1 answered", acc, err)
+	}
+}
+
+// One damaged index entry no longer stops orders after a restart: recovery
+// skips it and logs nothing as an error.
+func TestBuildOrderQueue_DamagedEntryIsSkipped(t *testing.T) {
 	cfg, _, dataDir := orderCfg(t)
 	idx := hasavshevet.OrderIndexDir(dataDir)
 	if err := os.MkdirAll(idx, 0o700); err != nil {
@@ -400,11 +427,53 @@ func TestBuildOrderQueue_FailedRecoveryIsNotFatal(t *testing.T) {
 	}
 	log := &quietLogger{}
 	q := buildOrderQueue(cfg, nil, dataDir, log)
-	if q == nil || len(log.errors) != 1 || !strings.Contains(log.errors[0], "recovery") {
-		t.Fatalf("queue %v, errors %v; want a queue and the recovery failure logged", q, log.errors)
+	if len(log.errors) != 0 {
+		t.Fatalf("errors logged: %v", log.errors)
 	}
-	if _, err := q.Accept(hasavshevet.OrderRequest{HistoryID: "k"}); !errors.Is(err, hasavshevet.ErrOrderIndexUnreadable) {
-		t.Errorf("Accept after a failed recovery = %v; want ErrOrderIndexUnreadable", err)
+	if acc, err := q.Accept(testOrder("rel-a")); err != nil || acc.JobID != "1" {
+		t.Errorf("a new order = %+v, %v; want job 1", acc, err)
+	}
+}
+
+// Stop after the drain timed out: the orders still queued were never started,
+// and Stop waits for the worker to record them retryable before it returns, so
+// their resend writes them under the same numbers instead of "unknown".
+func TestStop_LeavesUnstartedOrdersRetryable(t *testing.T) {
+	cfg, _, dataDir := orderCfg(t)
+	queue := buildOrderQueue(cfg, nil, dataDir, &quietLogger{})
+	queueCtx, queueCancel := context.WithCancel(context.Background())
+	t.Cleanup(queueCancel)
+	queue.Start(queueCtx)
+	app := &serverApp{logSvc: &quietLogger{}, orderQueue: queue, queueCancel: queueCancel}
+
+	release, err := hasavshevet.HoldImports(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := queue.Accept(testOrder("rel-a")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	app.Stop(ctx) // the drain gives up at ctx's deadline: the importer is held
+
+	sum := sha256.Sum256([]byte("rel-a"))
+	b, err := os.ReadFile(filepath.Join(hasavshevet.OrderIndexDir(dataDir), hex.EncodeToString(sum[:])+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"state": "retryable"`) {
+		t.Errorf("entry after Stop = %s; want retryable", b)
+	}
+}
+
+func testOrder(historyID string) hasavshevet.OrderRequest {
+	return hasavshevet.OrderRequest{
+		DocumentType: "ORDER", UserExtID: "1234", DueDate: "2026-11-05", CreatedDate: "2026-11-05",
+		HistoryID: historyID, Currency: "ILS", Total: 50,
+		Account: &hasavshevet.AccountDetails{AccountKey: "1234", FullName: "Test"},
+		Details: []hasavshevet.OrderLineItem{{Title: "Widget", SKU: "1001", Quantity: 1, SinglePrice: 50, TotalPrice: 50}},
 	}
 }
 

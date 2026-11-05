@@ -51,7 +51,8 @@ HTTP POST /api/sendOrder
     7. Write IMOVEIN.doc/.prm       — to SendOrderDir (active files)
     8. Write IMOVEIN_N.doc/.prm     — to SendOrderDir/history/<N>/ (audit)
     9. runImporter()                — exec has.exe (Windows); no-op elsewhere
-   10. index entry → written (files) or failed (error), then the job status
+   10. index entry → written (files), retryable (failed before any file) or
+       failed (error), then the job status
 ```
 
 ---
@@ -141,8 +142,8 @@ The Go store will continue from where the legacy app left off.
 
 A **missing** file starts at 1 (a fresh install). A file that exists but holds
 no usable number (not JSON, no `lastOrderNumber`, `null`, a string, a fraction,
-a negative) is refused and left as found: no order is accepted (`503
-ORDER_NOT_QUEUED`, the reason in the log) until a person repairs it. Until
+a negative) is refused and left as found: no new order is accepted (`503
+ORDER_COUNTER_UNREADABLE`, the reason in the log) until a person repairs it. Until
 DIG-1291 such a file silently restarted at 1. Other fields in a legacy file are
 ignored. The file is written by atomic rename.
 
@@ -161,30 +162,49 @@ opaque string: compared byte for byte, never trimmed or re-cased.
 key. The file name is the key's SHA-256 (the key is free text, so it never
 becomes a path); the raw key is stored inside and checked against the name on
 every read. Fields: `key`, `number`, `state`, `requestSha256`, `files`,
-`error`, `reservedAt`, `finishedAt` — no order content. Directories 0700 and
-files 0600 on Unix; on Windows the data directory's protected DACL applies.
+`error`, `retries`, `reservedAt`, `finishedAt` — no order content. Directories
+0700 and files 0600 on Unix; on Windows the data directory's protected DACL
+applies. Every reservation is logged — `sendOrder historyId="…": order N
+reserved and queued (index <file>)` — which is how a person maps a key to its
+number and file.
 
 | `state` | Meaning | A repeat of the key answers |
 |---|---|---|
 | `reserved` | number owned; queued or being written | `queued` / `running` (from memory) — or **`unknown`** after a restart |
 | `written` | files written (importer run, if any) | `done` |
-| `failed` | the worker gave up; the error text is kept | `failed` — never written again |
+| `retryable` | failed **before any file was written**, or never started (the connector stopped first); the error text is kept | **queues it again under the same number** → `queued` |
+| `failed` | failed once a file may exist (IMOVEIN.doc written, a later file not); the error text is kept | `failed` — never written again |
 
 **A repeat** (same `historyId`) answers `202` with the **first** `jobId`, the
-order's current `status` and `"replay": true`; it reserves no number, queues
-nothing, writes no file, needs no queue slot. A first answer has no `replay` key
-(its shape is unchanged). A repeat whose body differs from the first is still
-answered with the first order and logged as a warning. A **failed** order is
-never retried under its key: a re-release is a new key from the B2B. ⚠ So a
-`202` is not by itself "the order was written": read `status` (`failed`,
-`unknown`), or poll `GET /api/sendOrder/{jobId}`.
+order's current `status` and `"replay": true`; it reserves no number and writes
+nothing — with one exception, below. It needs no queue slot, no counter and no
+recovery (a known key is answered even while `lastOrderNumber.json` is
+unreadable). A first answer has no `replay` key (its shape is unchanged). A
+repeat whose body differs from the first is still answered with the first order
+and logged as a warning. ⚠ So a `202` is not by itself "the order was written":
+read `status` (`failed`, `unknown`), or poll `GET /api/sendOrder/{jobId}`.
+
+**Retryable** — most failures happen before anything is written: validation,
+the customer account (no details, database unreachable), building the file, the
+history folder, or `IMOVEIN.doc` that cannot even be opened (a Windows sharing
+violation while the importer holds it). The worker marks those
+(`ErrOrderNotWritten`) and the entry `retryable`; so are orders still queued
+when the worker is stopped (the drain timed out: `Stop` waits for that record).
+A repeat of the key (the B2B's resend reuses it) queues the order again **under
+its first number** — no new number, no gap — and answers `202 {"status":
+"queued", "replay": true}`. The entry is saved `reserved` before the job is
+sent, so racing repeats queue it once. A repeat uses its own body (the entry
+holds none). A full queue answers `QUEUE_FULL` and leaves it retryable. Once
+`IMOVEIN.doc` has been opened a file may hold part of the order, so any later
+failure is `failed`, final for the key: a re-release is a new key from the B2B.
 
 **`unknown`** — an entry still `reserved` when the connector starts: the order
 was accepted, and whether its files were written (and imported) was never
-recorded. It is never written again; startup logs `ORDER OUTCOME UNKNOWN` with
-the key, the number and where to look (`sendOrderDir/history/<n>`, Hashavshevet
-by Asmahta). A person decides; to record the outcome, stop the service and set
-`state` to `written` or `failed` in the entry by hand.
+recorded. It is never written again on its own; startup logs `ORDER OUTCOME
+UNKNOWN` with the key, the number and where to look. The supported way back is
+in [troubleshooting.md](troubleshooting.md): with no
+`sendOrderDir/history/<n>/IMOVEIN_<n>.doc`, set `state` to `retryable` and the
+next repeat writes it under order `n`.
 
 **Order of writes** — under the queue's lock, so two POSTs of one key never
 both miss the index: read the counter (`Peek`) → save the entry (`reserved`) →
@@ -193,27 +213,43 @@ disk before the counter moves on, so a number is never owned by nobody, and
 never by two keys:
 
 - crash after the entry, before the counter: at startup `Recover` moves the
-  counter past every number the index holds (warning logged); the key answers
+  counter past the highest number issued (warning logged); the key answers
   `unknown`;
 - the counter cannot be written: the order still goes ahead under its number
   (the index owns it), and no new order is accepted until the counter has been
   moved past it;
-- the counter moved back (a restore, a hand edit): moved forward past the
-  index, with a warning, before any number is issued.
+- the counter moved back (a restore, a hand edit): moved forward, with a
+  warning, before any number is issued — at startup, and while running (any
+  number at or below the highest issued is refused, and the next attempt
+  recovers first).
 
-The worker saves `written` / `failed` **before** the job's in-memory status
-changes. A crash after the files are written but before that save leaves the
-entry `reserved` → `unknown` after the restart (never written twice).
+"The highest number issued" is the highest readable index entry, or the
+highest folder under `sendOrderDir/history/` if higher: orders written before
+the index existed, or whose entry is damaged, still hold their numbers.
+
+The worker saves `written` / `retryable` / `failed` **before** the job's
+in-memory status changes. A crash after the files are written but before that
+save leaves the entry `reserved` → `unknown` after the restart (never written
+twice).
 
 **An entry that cannot be read** (bad JSON, an unknown field, another key, a bad
-number or state, data after it) refuses its key: `500 ORDER_INDEX_UNREADABLE`,
-never `202`, never a second number. At startup any unreadable entry — or two
-keys holding one number — fails recovery: every new order is refused until a
-person repairs the file (it may own the highest number). Never delete an index
-file to "unblock" a 500: that turns the next retry into a second document.
+number or state, data after it) refuses its own key: `500
+ORDER_INDEX_UNREADABLE`, never `202`, never a second number. It costs only that
+key: at startup recovery logs it (`ORDER INDEX ENTRY SKIPPED: <file>: <reason>`)
+and skips it, and every other order goes on — the counter still moves past the
+history folders, so the damaged entry's number is not reissued once its order
+was written. Two keys holding one number are logged the same way. Never delete
+an index file to "unblock" a 500 — see troubleshooting.md for what is safe.
 
 **Status after a restart** — `GET /api/sendOrder/{jobId}` answers a jobId the
-memory no longer has from the index (`done`, `failed`, `unknown`).
+memory no longer has from the index (`done`, `failed` — also for `retryable` —
+and `unknown`).
+
+**Windows** — a rename over an index entry (or any file written through
+`atomicfile`) fails while another process holds the target open without
+sharing delete access (Defender, a backup agent, a reader); it is retried for
+up to about 0.8 s on `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION` before
+the write fails.
 
 **Back up both** with the install: `DataDir/orders/index/` and
 `sendOrderDir/lastOrderNumber.json`. Never restore the counter backwards, and
@@ -291,10 +327,14 @@ Check `digi-erp-connectord` log file for `[OK] order complete` or `[ERROR]` line
 - **has.exe exit ≠ 0**: check `output` in the log; consult Hasavshevet error logs
   in `SendOrderDir` (Masofon generates diagnostic files on import failure).
 - **`QUEUE_FULL`**: reduce request rate or increase `defaultQueueSize` in source.
-- **`ORDER_INDEX_UNREADABLE`** (500): an index entry is damaged (the log names
-  the file). Stop the service, repair it from a backup or by hand; never delete it.
-- **`ORDER_NOT_QUEUED`** (503): the counter is unreadable, the index cannot be
-  written, or recovery failed — the log says which. Nothing was reserved.
+- **`ORDER_INDEX_UNREADABLE`** (500): this key's index entry is damaged (the
+  log names the file). See troubleshooting.md; never just delete it.
+- **`ORDER_COUNTER_UNREADABLE`** (503): `lastOrderNumber.json` exists but holds
+  no usable number. No new order until a person repairs it; known keys are
+  still answered.
+- **`ORDER_NOT_QUEUED`** (503): the index could not be written or recovered —
+  the log says why. Nothing was reserved; retrying with the same `historyId` is
+  safe.
 - **A repeat answers `unknown`**: see [Idempotency](#idempotency--historyid-dig-1291).
 
 ### Recover from failed import

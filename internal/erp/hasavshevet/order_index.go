@@ -26,16 +26,19 @@ const maxOrderErrorText = 1000
 
 // orderState is how far an order got, as far as the index knows.
 //
-//	reserved: the number is owned by the key; the order is queued, being
-//	          written, or — found after a restart — its outcome is unknown.
-//	written:  the worker wrote the IMOVEIN files (and ran the importer, if any).
-//	failed:   the worker gave up; the key is never written again.
+//	reserved:  the number is owned by the key; the order is queued, being
+//	           written, or — found after a restart — its outcome is unknown.
+//	written:   the worker wrote the IMOVEIN files (and ran the importer, if any).
+//	retryable: the worker failed before writing any file (ErrOrderNotWritten),
+//	           or never started it; a repeat queues it again under its number.
+//	failed:    the worker failed once a file may exist; never written again.
 type orderState string
 
 const (
-	orderReserved orderState = "reserved"
-	orderWritten  orderState = "written"
-	orderFailed   orderState = "failed"
+	orderReserved  orderState = "reserved"
+	orderWritten   orderState = "written"
+	orderRetryable orderState = "retryable"
+	orderFailed    orderState = "failed"
 )
 
 // orderIndexEntry is DataDir/orders/index/<sha256(key)>.json: what a repeat
@@ -49,6 +52,7 @@ type orderIndexEntry struct {
 	RequestHash string     `json:"requestSha256,omitempty"`
 	Files       []string   `json:"files,omitempty"`
 	Error       string     `json:"error,omitempty"`
+	Retries     int        `json:"retries,omitempty"` // times a repeat queued it again
 	ReservedAt  string     `json:"reservedAt"`
 	FinishedAt  string     `json:"finishedAt,omitempty"`
 }
@@ -120,19 +124,20 @@ func (ix orderIndex) save(e *orderIndexEntry) error {
 	return nil
 }
 
-// all returns every entry, sorted by number. Any unreadable entry fails the
-// whole call: recovery must not proceed past a key it cannot account for. So
-// do two entries holding one number — two keys answering the same order —
-// which no correct run produces.
-func (ix orderIndex) all() ([]*orderIndexEntry, error) {
+// all returns every readable entry, sorted by number, and every problem
+// found on the way — an entry that cannot be read (named by its path), two
+// entries holding one number — each wrapping ErrOrderIndexUnreadable. A
+// problem costs its own key, not the whole index: recovery logs and skips it,
+// and a load of that key keeps refusing. err is only for a directory that
+// cannot be listed.
+func (ix orderIndex) all() (entries []*orderIndexEntry, problems []error, err error) {
 	dirEntries, err := os.ReadDir(ix.dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("%w: read %s: %v", ErrOrderIndexUnreadable, ix.dir, err)
+		return nil, nil, fmt.Errorf("list the order index %s: %w", ix.dir, err)
 	}
-	var out []*orderIndexEntry
 	for _, de := range dirEntries {
 		name := de.Name()
 		// Skip atomicfile's in-flight temp files (".<stem>.json.tmp-*"), which
@@ -142,20 +147,21 @@ func (ix orderIndex) all() ([]*orderIndexEntry, error) {
 		}
 		e, found, err := ix.loadStem(strings.TrimSuffix(name, ".json"))
 		if err != nil {
-			return nil, err
+			problems = append(problems, err)
+			continue
 		}
 		if found {
-			out = append(out, e)
+			entries = append(entries, e)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
-	for i := 1; i < len(out); i++ {
-		if out[i].Number == out[i-1].Number {
-			return nil, fmt.Errorf("%w: historyIds %q and %q both hold order %d",
-				ErrOrderIndexUnreadable, out[i-1].Key, out[i].Key, out[i].Number)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Number < entries[j].Number })
+	for i := 1; i < len(entries); i++ {
+		if entries[i].Number == entries[i-1].Number {
+			problems = append(problems, fmt.Errorf("%w: historyIds %q and %q both hold order %d",
+				ErrOrderIndexUnreadable, entries[i-1].Key, entries[i].Key, entries[i].Number))
 		}
 	}
-	return out, nil
+	return entries, problems, nil
 }
 
 func decodeOrderIndexEntry(b []byte, stem string) (*orderIndexEntry, error) {
@@ -178,9 +184,12 @@ func decodeOrderIndexEntry(b []byte, stem string) (*orderIndexEntry, error) {
 		return nil, fmt.Errorf("order number %d is out of range", e.Number)
 	}
 	switch e.State {
-	case orderReserved, orderWritten, orderFailed:
+	case orderReserved, orderWritten, orderRetryable, orderFailed:
 	default:
 		return nil, fmt.Errorf("unknown state %q", e.State)
+	}
+	if e.Retries < 0 {
+		return nil, fmt.Errorf("retries %d is negative", e.Retries)
 	}
 	return &e, nil
 }
