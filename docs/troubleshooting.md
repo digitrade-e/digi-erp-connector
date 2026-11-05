@@ -196,10 +196,12 @@ configured), check Hashavshevet (Asmahta `n`) in every case below.
    written. Rewrite the entry by hand (`{"key": "<historyId>", "number": n,
    "state": "written", "reservedAt": "<any text>"}`) so its repeats answer it.
 3. If you know `n` and there is no `IMOVEIN_<n>.doc`: nothing reached
-   Hashavshevet. Either rewrite it with `"state": "retryable"` (the next repeat
-   writes it under `n` — preferred: the number and the key stay together), or
-   move the file out of `orders\index\` (the next repeat becomes a new order
-   under a new number; `n` stays unused).
+   Hashavshevet. First search `server.log` for `both hold order <n>`: if another
+   `historyId` holds `n` too, do not set `retryable` — sort out which key owns
+   `n` first. Otherwise either rewrite it with `"state": "retryable"` (the next
+   repeat writes it under `n` — preferred: the number and the key stay
+   together), or move the file out of `orders\index\` (the next repeat becomes
+   a new order under a new number; `n` stays unused).
 4. If you cannot learn `n`: look the order up in Hashavshevet (customer, date,
    items). Found → step 2 with its Asmahta. Not found → move the file aside.
 
@@ -212,10 +214,17 @@ The entry is still `reserved` after a restart. The connector never writes it
 again on its own.
 
 - No `history\<n>\IMOVEIN_<n>.doc` → the connector never ran the importer for
-  it: set `"state": "retryable"` in the entry. The next repeat of the
-  `historyId` writes it under order `n`.
+  it: check `server.log` for `both hold order <n>` (as in step 3 above), then
+  set `"state": "retryable"` in the entry. The next repeat of the `historyId`
+  writes it under order `n`.
 - `IMOVEIN_<n>.doc` exists → the files were written and the importer may have
   run. Check Hashavshevet (Asmahta `n`): there → set `"state": "written"`; not
   there → import the history copy by hand ([Recover from failed
   import](hasavshevet-send-order.md#recover-from-failed-import)) and set
   `"state": "written"`.
+
+The connector backs these edits up: it never queues a `retryable` entry again
+when `history\<n>\IMOVEIN_<n>.doc` already exists or another entry holds `n`.
+It logs `ORDER NOT QUEUED AGAIN: order <n> (historyId=…) is retryable, but …`
+with the reason, answers the repeat as `failed` and leaves the entry as it is —
+fix the entry by the steps above.

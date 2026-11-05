@@ -73,8 +73,11 @@ type OrderQueue struct {
 	mu   sync.RWMutex
 	jobs map[string]*JobResult
 	// byNumber maps every order number the key index holds to its entry's
-	// file stem (guarded by mu): how Status answers a job after a restart.
-	byNumber map[int64]string
+	// file stem (guarded by mu): how Status answers a job after a restart, and
+	// how a re-queue checks that its number is its own. sharedNumbers holds the
+	// numbers two readable entries both claim (recovery logs them).
+	byNumber      map[int64]string
+	sharedNumbers map[int64]bool
 
 	// closeMu guards closed and every send on ch, so Submit never sends on a
 	// closed channel and Stop never closes it twice. It also serialises every
@@ -89,6 +92,9 @@ type OrderQueue struct {
 	// back to false when the counter could not be moved past a number the
 	// index owns, so no new number is issued until recovery has repaired it.
 	recovered bool
+	// scanned is guarded by closeMu: a recovery has read the index into
+	// byNumber, even if it then failed on the counter.
+	scanned bool
 	// highest is the highest order number known to be issued (guarded by
 	// closeMu): readable index entries and sendOrderDir/history/<n> at
 	// recovery, then every number reserved since. The counter must offer more.
@@ -116,12 +122,13 @@ type Acceptance struct {
 // NewOrderQueue creates a new queue. Call Start to begin processing.
 func NewOrderQueue(sender *Sender, log logger.LoggerService) *OrderQueue {
 	return &OrderQueue{
-		ch:       make(chan orderJob, defaultQueueSize),
-		sender:   sender,
-		log:      log,
-		jobs:     make(map[string]*JobResult),
-		byNumber: make(map[int64]string),
-		done:     make(chan struct{}),
+		ch:            make(chan orderJob, defaultQueueSize),
+		sender:        sender,
+		log:           log,
+		jobs:          make(map[string]*JobResult),
+		byNumber:      make(map[int64]string),
+		sharedNumbers: make(map[int64]bool),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -171,12 +178,39 @@ func (q *OrderQueue) recoverLocked() error {
 		q.log.Warn(fmt.Sprintf("ORDER INDEX ENTRY SKIPPED: %v. Its historyId is answered 500 ORDER_INDEX_UNREADABLE until a person repairs or moves the file (docs/troubleshooting.md); every other order goes on.", p))
 	}
 	byNumber := make(map[int64]string, len(entries))
+	shared := make(map[int64]bool)
 	var highestEntry *orderIndexEntry
 	for _, e := range entries {
+		if stem, dup := byNumber[e.Number]; dup && stem != orderIndexStem(e.Key) {
+			shared[e.Number] = true
+		}
 		byNumber[e.Number] = orderIndexStem(e.Key)
 		highestEntry = e // sorted by number
 	}
 	sendDir := q.sender.cfg.SendOrderDir
+
+	// The map first: a re-queue needs it and no counter, so it is in place
+	// even when the counter step below fails.
+	q.mu.Lock()
+	q.byNumber = byNumber
+	q.sharedNumbers = shared
+	var unknown []*orderIndexEntry
+	for _, e := range entries {
+		if _, inMemory := q.jobs[strconv.FormatInt(e.Number, 10)]; e.State == orderReserved && !inMemory {
+			unknown = append(unknown, e)
+		}
+	}
+	q.mu.Unlock()
+	q.scanned = true
+	for _, e := range unknown {
+		n := strconv.FormatInt(e.Number, 10)
+		q.log.Warn(fmt.Sprintf("ORDER OUTCOME UNKNOWN: order %d (historyId=%q, reserved %s) was accepted but the connector stopped before recording whether it was written. "+
+			"It will NOT be written again on its own; a repeat of the key answers status \"unknown\". If %s does not exist the connector never ran the importer for it: "+
+			"set \"state\" to \"retryable\" in %s and the next repeat writes it under order %d. If it exists, check Hashavshevet (Asmahta %d) first (docs/troubleshooting.md).",
+			e.Number, e.Key, e.ReservedAt, filepath.Join(sendDir, "history", n, "IMOVEIN_"+n+".doc"),
+			q.index.pathFor(orderIndexStem(e.Key)), e.Number, e.Number))
+	}
+
 	highestHistory, err := highestHistoryNumber(sendDir)
 	if err != nil {
 		return fmt.Errorf("recover the order index: %w", err)
@@ -211,24 +245,6 @@ func (q *OrderQueue) recoverLocked() error {
 		}
 	}
 	q.highest = highest
-
-	q.mu.Lock()
-	q.byNumber = byNumber
-	var unknown []*orderIndexEntry
-	for _, e := range entries {
-		if _, inMemory := q.jobs[strconv.FormatInt(e.Number, 10)]; e.State == orderReserved && !inMemory {
-			unknown = append(unknown, e)
-		}
-	}
-	q.mu.Unlock()
-	for _, e := range unknown {
-		n := strconv.FormatInt(e.Number, 10)
-		q.log.Warn(fmt.Sprintf("ORDER OUTCOME UNKNOWN: order %d (historyId=%q, reserved %s) was accepted but the connector stopped before recording whether it was written. "+
-			"It will NOT be written again on its own; a repeat of the key answers status \"unknown\". If %s does not exist the connector never ran the importer for it: "+
-			"set \"state\" to \"retryable\" in %s and the next repeat writes it under order %d. If it exists, check Hashavshevet (Asmahta %d) first (docs/troubleshooting.md).",
-			e.Number, e.Key, e.ReservedAt, filepath.Join(sendDir, "history", n, "IMOVEIN_"+n+".doc"),
-			q.index.pathFor(orderIndexStem(e.Key)), e.Number, e.Number))
-	}
 	q.recovered = true
 	return nil
 }
@@ -443,6 +459,19 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 // reserved BEFORE the job is sent, so a racing repeat sees it queued and never
 // queues it twice. No counter is involved. Caller holds closeMu.
 func (q *OrderQueue) requeueLocked(e *orderIndexEntry, req OrderRequest) (Acceptance, error) {
+	// The guard below needs the index map. Recovery fills it before its
+	// counter step, so a counter it cannot read does not stop a re-queue.
+	if !q.recovered {
+		if err := q.recoverLocked(); err != nil && !q.scanned {
+			return Acceptance{}, err
+		}
+	}
+	if reason := q.requeueConflict(e); reason != "" {
+		q.log.Error(fmt.Sprintf("ORDER NOT QUEUED AGAIN: order %d (historyId=%q) is retryable, but %s. Writing it would make a second document with Asmahta %d; answering it as failed. "+
+			"A person must check the entry %s (docs/troubleshooting.md § The order index).",
+			e.Number, e.Key, reason, e.Number, q.index.pathFor(orderIndexStem(e.Key))), nil)
+		return Acceptance{JobID: strconv.FormatInt(e.Number, 10), Status: JobStatusFailed, Replay: true}, nil
+	}
 	if len(q.ch) >= cap(q.ch) {
 		return Acceptance{}, fmt.Errorf("%w (capacity %d)", ErrQueueFull, defaultQueueSize)
 	}
@@ -467,6 +496,28 @@ func (q *OrderQueue) requeueLocked(e *orderIndexEntry, req OrderRequest) (Accept
 		e.Key, e.Number, lastErr, e.Retries))
 	acc.Replay = true
 	return acc, nil
+}
+
+// requeueConflict says why a retryable entry's number is not safely its own
+// to write, or "" when it is: a history copy of the order already exists (a
+// hand edit gone wrong, a number reissued), or another entry holds the number.
+func (q *OrderQueue) requeueConflict(e *orderIndexEntry) string {
+	n := strconv.FormatInt(e.Number, 10)
+	doc := filepath.Join(q.sender.cfg.SendOrderDir, "history", n, "IMOVEIN_"+n+".doc")
+	if _, err := os.Lstat(doc); err == nil {
+		return doc + " already exists"
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("%s cannot be checked (%v)", doc, err)
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if q.sharedNumbers[e.Number] {
+		return "two index entries hold order " + n
+	}
+	if stem, ok := q.byNumber[e.Number]; ok && stem != orderIndexStem(e.Key) {
+		return "another historyId's entry holds order " + n
+	}
+	return ""
 }
 
 // jobActive reports whether order n is queued or running in this process.

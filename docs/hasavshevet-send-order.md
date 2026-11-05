@@ -194,9 +194,21 @@ A repeat of the key (the B2B's resend reuses it) queues the order again **under
 its first number** — no new number, no gap — and answers `202 {"status":
 "queued", "replay": true}`. The entry is saved `reserved` before the job is
 sent, so racing repeats queue it once. A repeat uses its own body (the entry
-holds none). A full queue answers `QUEUE_FULL` and leaves it retryable. Once
-`IMOVEIN.doc` has been opened a file may hold part of the order, so any later
-failure is `failed`, final for the key: a re-release is a new key from the B2B.
+holds none). A full queue answers `QUEUE_FULL` and leaves it retryable. A
+retryable entry whose number is not safely its own — `history/<n>/IMOVEIN_<n>.doc`
+already exists, or another entry holds `n` (a hand edit gone wrong, a number
+reissued) — is never queued again: the repeat is answered `failed` and the log
+says `ORDER NOT QUEUED AGAIN` with the reason. Once `IMOVEIN.doc` has been
+opened a file may hold part of the order, so any later failure is `failed`,
+final for the key: a re-release is a new key from the B2B.
+
+⚠ **`failed` does not say whether a resend will write it.** The status
+endpoint and a repeat's answer show a `retryable` order as `failed`, the same
+word as a final failure, so a poller cannot tell the two apart. The caller's
+rule must be **resend once on `failed`** (same `historyId`): a retryable order
+is then queued again (the answer says `queued`), a final one answers `failed`
+again, and that second `failed` is final. For the B2B this is plan 075 P1-4
+(the outcome) and P1-5 (resend).
 
 **`unknown`** — an entry still `reserved` when the connector starts: the order
 was accepted, and whether its files were written (and imported) was never
@@ -242,8 +254,8 @@ was written. Two keys holding one number are logged the same way. Never delete
 an index file to "unblock" a 500 — see troubleshooting.md for what is safe.
 
 **Status after a restart** — `GET /api/sendOrder/{jobId}` answers a jobId the
-memory no longer has from the index (`done`, `failed` — also for `retryable` —
-and `unknown`).
+memory no longer has from the index (`done`, `failed` — also for `retryable`,
+see the ⚠ above — and `unknown`).
 
 **Windows** — a rename over an index entry (or any file written through
 `atomicfile`) fails while another process holds the target open without

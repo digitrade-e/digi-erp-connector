@@ -3,6 +3,7 @@ package hasavshevet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -380,5 +381,137 @@ func TestOrderQueue_RetryableEntryWithALiveJobIsNotQueuedTwice(t *testing.T) {
 	}
 	if p := q.Pending(); p != 1 {
 		t.Errorf("queue holds %d jobs; the live job was queued again", p)
+	}
+}
+
+// plantEntry writes an index entry by hand, as an operator's edit would.
+func (h *orderHarness) plantEntry(key string, n int64, state orderState) {
+	h.t.Helper()
+	b := fmt.Sprintf(`{"key":%q,"number":%d,"state":%q,"reservedAt":"2026-11-05T10:00:00Z"}`, key, n, state)
+	if err := os.MkdirAll(OrderIndexDir(h.dataDir), 0o700); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.WriteFile(h.entryPath(key), []byte(b), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *orderHarness) errored(substr string) bool {
+	h.log.mu.Lock()
+	defer h.log.mu.Unlock()
+	for _, e := range h.log.errors {
+		if strings.Contains(e, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// A retryable entry whose number already has a history copy (a mistaken hand
+// edit, a number reissued) is never queued again: that would be a second
+// document with Asmahta n. Refused loudly, answered as failed.
+func TestOrderQueue_RetryRefusedWhenTheHistoryCopyExists(t *testing.T) {
+	h := newOrderHarness(t)
+	h.plantEntry("rel-a", 1, orderRetryable)
+	if err := os.MkdirAll(filepath.Dir(h.historyDoc(1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.historyDoc(1), []byte("written"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	q := h.queue(false)
+	acc := mustAccept(t, q, keyedOrder("rel-a"))
+	if acc.JobID != "1" || acc.Status != JobStatusFailed || !acc.Replay {
+		t.Fatalf("repeat = %+v; want job 1 answered failed, replay", acc)
+	}
+	if q.Pending() != 0 {
+		t.Error("the order was queued again over an existing history copy")
+	}
+	if !h.errored("IMOVEIN_1.doc already exists") {
+		t.Errorf("the refusal was not logged loudly: %v", h.log.errors)
+	}
+	if e := h.entry("rel-a"); e.State != orderRetryable || e.Retries != 0 {
+		t.Errorf("entry = %+v; a refusal must not change it", e)
+	}
+}
+
+// A retryable entry for a number another key holds is never queued again.
+// In process: the other key reserved the number (its entry is in byNumber).
+func TestOrderQueue_RetryRefusedWhenAnotherKeyHoldsTheNumber(t *testing.T) {
+	h := newOrderHarness(t)
+	q := h.queue(true)
+	unblock := h.block("IMOVEIN.prm") // rel-a fails final, with no history copy
+	waitForStatus(t, q, mustAccept(t, q, keyedOrder("rel-a")).JobID, JobStatusFailed)
+	unblock()
+	h.plantEntry("rel-b", 1, orderRetryable) // a mistaken hand edit: rel-a's number
+
+	acc := mustAccept(t, q, keyedOrder("rel-b"))
+	if acc.JobID != "1" || acc.Status != JobStatusFailed || !acc.Replay {
+		t.Fatalf("repeat = %+v; want job 1 answered failed, replay", acc)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(h.historyDoc(1)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("order 1 was written for a second key: %v", err)
+	}
+	if !h.errored("rel-b") {
+		t.Errorf("the refusal was not logged loudly: %v", h.log.errors)
+	}
+}
+
+// After a restart: two entries hold one number (recovery logs it). Neither is
+// queued again, whichever the index map happened to keep.
+func TestOrderQueue_RetryRefusedWhenTwoEntriesHoldTheNumber(t *testing.T) {
+	for _, other := range []orderState{orderWritten, orderRetryable} {
+		t.Run(string(other), func(t *testing.T) {
+			h := newOrderHarness(t)
+			h.plantEntry("rel-a", 1, other)
+			h.plantEntry("rel-b", 1, orderRetryable)
+			q := h.queue(false)
+			if !h.log.warned("both hold order 1") {
+				t.Error("recovery did not report the shared number")
+			}
+			for _, key := range []string{"rel-a", "rel-b"} {
+				acc := mustAccept(t, q, keyedOrder(key))
+				if acc.JobID != "1" || acc.Replay != true || acc.Status == JobStatusQueued {
+					t.Errorf("repeat of %s = %+v; want job 1 answered, not queued", key, acc)
+				}
+			}
+			if q.Pending() != 0 {
+				t.Errorf("queued %d; a shared number must not be written again", q.Pending())
+			}
+		})
+	}
+}
+
+// The guard needs the index map; a retry while recovery cannot finish (the
+// counter is unreadable) still scans the index first — and still needs no
+// counter.
+func TestOrderQueue_RetryWithAnUnreadableCounterStillChecksTheIndex(t *testing.T) {
+	h := newOrderHarness(t)
+	h.plantEntry("rel-a", 1, orderWritten)
+	h.plantEntry("rel-b", 1, orderRetryable)
+	h.plantEntry("rel-c", 2, orderRetryable)
+	h.setCounter(`{`)
+	q := h.newQueue()
+	if err := q.Recover(); !errors.Is(err, ErrOrderCounterUnreadable) {
+		t.Fatalf("Recover = %v; want ErrOrderCounterUnreadable", err)
+	}
+	if acc := mustAccept(t, q, keyedOrder("rel-b")); acc.Status != JobStatusFailed || q.Pending() != 0 {
+		t.Errorf("rel-b = %+v, queued %d; want refused (order 1 is shared)", acc, q.Pending())
+	}
+	if acc := mustAccept(t, q, keyedOrder("rel-c")); acc.JobID != "2" || acc.Status != JobStatusQueued || q.Pending() != 1 {
+		t.Errorf("rel-c = %+v, queued %d; want job 2 queued again without a counter", acc, q.Pending())
+	}
+}
+
+// A queue whose recovery never ran (it failed before reading the index, or
+// was never called) reads the index before it re-queues anything.
+func TestOrderQueue_RetryOnAQueueNeverRecoveredScansTheIndexFirst(t *testing.T) {
+	h := newOrderHarness(t)
+	h.plantEntry("rel-a", 1, orderWritten)
+	h.plantEntry("rel-b", 1, orderRetryable)
+	q := h.newQueue() // no Recover
+	if acc := mustAccept(t, q, keyedOrder("rel-b")); acc.Status != JobStatusFailed || q.Pending() != 0 {
+		t.Errorf("rel-b = %+v, queued %d; want refused (order 1 is shared)", acc, q.Pending())
 	}
 }
