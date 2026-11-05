@@ -156,7 +156,9 @@ The order index sits in the data directory; a backup needs both.
 
 All four are rewritten while the service is live, so all four go through
 `atomicfile.Write` (temp file → fsync → rename). A half-written `config.yaml`
-would stop the daemon from starting at all.
+would stop the daemon from starting at all. On Windows the rename is retried
+for up to about 0.8 s while another process holds the target open without
+sharing delete access (`ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION`).
 
 ## Concurrency
 
