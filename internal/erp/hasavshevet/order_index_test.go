@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -168,19 +167,11 @@ func TestOrderIndex_All(t *testing.T) {
 
 	// A directory that cannot be listed is an error — but not "this key's
 	// entry is unreadable", which the route answers as 500 for one key.
-	t.Run("unlistable directory", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			// A file planted where the directory should be is how this case is
-			// made; Windows' os.ReadDir does not refuse it the way POSIX does
-			// (CI run 42023053481: no error), and chmod cannot help there.
-			t.Skip("cannot make an unlistable directory on Windows")
-		}
-		notADir := orderIndex{dir: filepath.Join(t.TempDir(), "file")}
-		if err := os.WriteFile(notADir.dir, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := notADir.all(); err == nil || errors.Is(err, ErrOrderIndexUnreadable) {
-			t.Errorf("an unlistable index = %v; want an error that is not ErrOrderIndexUnreadable", err)
-		}
-	})
+	notADir := orderIndex{dir: filepath.Join(t.TempDir(), "file")}
+	if err := os.WriteFile(notADir.dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := notADir.all(); err == nil || errors.Is(err, ErrOrderIndexUnreadable) {
+		t.Errorf("an unlistable index = %v; want an error that is not ErrOrderIndexUnreadable", err)
+	}
 }
