@@ -148,9 +148,11 @@ Windows, `/etc/digi-erp-connector/` on Linux:
 | `provision/<changeSet>/` | provision | pre-images (the last five): config.yaml, the DB secret, the TLS pair, the firewall rule, the dependencies |
 | `tls/cert.pem`, `tls/key.pem` | provision | a self-signed pair when the spec asks for one |
 | `server.log`, `ui.log` | daemon, GUI | no secrets, ever |
+| `orders/index/<sha256>.json` | the order queue | one per `historyId`: its order number and outcome (DIG-1291) |
 
 `lastOrderNumber.json` is the exception: it lives in `sendOrderDir`, beside the
 IMOVEIN files, so an order-number sequence travels with the files it numbers.
+The order index sits in the data directory; a backup needs both.
 
 All four are rewritten while the service is live, so all four go through
 `atomicfile.Write` (temp file → fsync → rename). A half-written `config.yaml`

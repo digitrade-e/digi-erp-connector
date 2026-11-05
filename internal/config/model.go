@@ -203,6 +203,13 @@ type ReceiptCardNamesConfig struct {
 	Brand  map[string]string `yaml:"brand,omitempty"`
 }
 
+// OrdersConfigured reports whether this installation writes orders: it needs
+// erp: hasavshevet and a sendOrderDir. Derived rather than a separate switch,
+// so the two can never disagree.
+func (c Config) OrdersConfigured() bool {
+	return c.ERP == ERPHasavshevet && strings.TrimSpace(c.SendOrderDir) != ""
+}
+
 // ReceiptsConfigured reports whether this installation writes receipts: it
 // needs erp: hasavshevet and a sendReceiptDir. Derived, like orders, so a
 // switch and the folder can never disagree.

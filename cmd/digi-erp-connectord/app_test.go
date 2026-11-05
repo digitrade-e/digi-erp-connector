@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -336,5 +337,86 @@ func TestStop_DoesNotHangOnAHeldImportLock(t *testing.T) {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop hung on the held import lock")
+	}
+}
+
+// orderCfg is an orders-configured install: sendOrderDir and a data directory.
+func orderCfg(t *testing.T) (config.Config, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	sendDir, dataDir := filepath.Join(root, "orders"), filepath.Join(root, "data")
+	for _, d := range []string{sendDir, dataDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return config.Config{ERP: config.ERPHasavshevet, SendOrderDir: sendDir}, sendDir, dataDir
+}
+
+// The daemon turns the historyId index on and recovers it before serving: an
+// order whose entry was saved just before a crash moves the counter past it.
+func TestBuildOrderQueue_IndexOnAndRecoveredAtStartup(t *testing.T) {
+	cfg, sendDir, dataDir := orderCfg(t)
+	first := buildOrderQueue(cfg, nil, dataDir, &quietLogger{})
+	order := hasavshevet.OrderRequest{
+		DocumentType: "ORDER", UserExtID: "1234", DueDate: "2026-11-05", CreatedDate: "2026-11-05",
+		HistoryID: "4711-3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17", Currency: "ILS", Total: 50,
+		Account: &hasavshevet.AccountDetails{AccountKey: "1234", FullName: "Test"},
+		Details: []hasavshevet.OrderLineItem{{Title: "Widget", SKU: "1001", Quantity: 1, SinglePrice: 50, TotalPrice: 50}},
+	}
+	if acc, err := first.Accept(order); err != nil || acc.JobID != "1" || acc.Replay {
+		t.Fatalf("first Accept = %+v, %v; want job 1", acc, err)
+	}
+	// The crash window: the entry owns 1, the counter is back at 0.
+	if err := os.WriteFile(filepath.Join(sendDir, "lastOrderNumber.json"), []byte(`{"lastOrderNumber": 0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	log := &quietLogger{}
+	restarted := buildOrderQueue(cfg, nil, dataDir, log)
+	if len(log.errors) != 0 {
+		t.Fatalf("errors logged: %v", log.errors)
+	}
+	b, _ := os.ReadFile(filepath.Join(sendDir, "lastOrderNumber.json"))
+	if !strings.Contains(string(b), `"lastOrderNumber": 1`) {
+		t.Errorf("counter after startup = %s; want 1", b)
+	}
+	acc, err := restarted.Accept(order)
+	if err != nil || acc.JobID != "1" || !acc.Replay || acc.Status != hasavshevet.JobStatusUnknown {
+		t.Errorf("repeat after restart = %+v, %v; want job 1, unknown, replay", acc, err)
+	}
+}
+
+// A failed recovery is logged and does not stop the daemon; sendOrder refuses
+// until it succeeds.
+func TestBuildOrderQueue_FailedRecoveryIsNotFatal(t *testing.T) {
+	cfg, _, dataDir := orderCfg(t)
+	idx := hasavshevet.OrderIndexDir(dataDir)
+	if err := os.MkdirAll(idx, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(idx, strings.Repeat("0", 64)+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := &quietLogger{}
+	q := buildOrderQueue(cfg, nil, dataDir, log)
+	if q == nil || len(log.errors) != 1 || !strings.Contains(log.errors[0], "recovery") {
+		t.Fatalf("queue %v, errors %v; want a queue and the recovery failure logged", q, log.errors)
+	}
+	if _, err := q.Accept(hasavshevet.OrderRequest{HistoryID: "k"}); !errors.Is(err, hasavshevet.ErrOrderIndexUnreadable) {
+		t.Errorf("Accept after a failed recovery = %v; want ErrOrderIndexUnreadable", err)
+	}
+}
+
+// A node that does not write orders gets no index (the route answers 501
+// before the queue is reached) and nothing is created in its data directory.
+func TestBuildOrderQueue_NotConfiguredCreatesNothing(t *testing.T) {
+	dataDir := t.TempDir()
+	q := buildOrderQueue(config.Config{ERP: config.ERPHasavshevet}, nil, dataDir, &quietLogger{})
+	if q == nil {
+		t.Fatal("no queue")
+	}
+	if entries, _ := os.ReadDir(dataDir); len(entries) != 0 {
+		t.Errorf("data directory holds %d entries; want none", len(entries))
 	}
 }

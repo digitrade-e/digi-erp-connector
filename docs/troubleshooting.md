@@ -121,7 +121,10 @@ connector, or restart it yourself.
 | `202` then the job reports `failed` | `GET /api/sendOrder/{jobId}` gives the reason; `server.log` has the detail. Most often `sendOrderDir` is empty or not writable, or the importer returned non-zero. |
 | Files appear but nothing is imported | No `hasBatFile`/`hasExePath` configured, so nothing runs after the files are written. |
 | `503 QUEUE_FULL` | More than 64 orders queued. The worker is serial by design; investigate why the importer is slow. |
-| Order numbers restarted from a low number | `lastOrderNumber.json` is missing from `sendOrderDir`. Restore it, or seed it from the previous install before going live. |
+| Order numbers restarted from a low number | `lastOrderNumber.json` is missing from `sendOrderDir`. Restore it, or seed it from the previous install before going live. (A counter behind the order index is moved past it at startup, with a warning.) |
+| `503 ORDER_NOT_QUEUED` | The log says which: `lastOrderNumber.json` exists but is unreadable (it is never reset to 1 — repair it), the order index cannot be written, or its recovery failed. Nothing was reserved. |
+| `500 ORDER_INDEX_UNREADABLE` | An order index entry (`DataDir/orders/index/*.json`) is damaged; the log names the file. Stop the service and repair it. **Never delete it** — the next retry of that `historyId` would become a second order. |
+| A repeat of an order answers `"status":"unknown"` / log `ORDER OUTCOME UNKNOWN` | The connector stopped between accepting the order and recording its outcome. It is never written again. Check `sendOrderDir/history/<n>` and Hashavshevet (Asmahta `<n>`); record the outcome by setting `state` in the entry with the service stopped. |
 | Two orders interfered with each other | Should be impossible — the queue is single-worker. If the customer has *another* process importing IMOVEIN files from the same directory, that is the collision. Give the connector its own directory. |
 
 ## File endpoint returns INVALID_FILE_PATH

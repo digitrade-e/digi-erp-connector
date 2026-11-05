@@ -67,8 +67,9 @@ See `saved-queries.md` for the full model.
 
 ## Orders (Hasavshevet)
 
-`POST /api/sendOrder` → `202 {"status":"queued","jobId":"<orderNumber>"}`; `VALIDATION_ERROR`, `QUEUE_FULL` (503).
-`GET /api/sendOrder/{jobId}` → `{"jobId","status":"queued|running|done|failed","orderNumber","writtenFiles"}`; `NOT_FOUND`.
+`POST /api/sendOrder` → `202 {"status":"queued","jobId":"<orderNumber>"}`; `VALIDATION_ERROR`, `QUEUE_FULL` (503), `ORDER_INDEX_UNREADABLE` (500), `ORDER_NOT_QUEUED` (503).
+`historyId` is the idempotency key (DIG-1291): a repeat answers `202 {"status":"queued|running|done|failed|unknown","jobId":"<first orderNumber>","replay":true,...}` and writes nothing — see [hasavshevet-send-order.md](hasavshevet-send-order.md#idempotency--historyid-dig-1291).
+`GET /api/sendOrder/{jobId}` → `{"jobId","status":"queued|running|done|failed|unknown","orderNumber","writtenFiles"}`; `NOT_FOUND`. After a restart a jobId is answered from the order index.
 `GET /api/sendOrder` → `{"queued","running"}`: orders accepted (202) and not written yet. The queue is in memory, so a restart with either above 0 loses them; `digi-erp-connector-provision` asks before it restarts the service. `QUEUE_UNAVAILABLE` (503).
 
 ## Receipts (Hasavshevet)
@@ -126,6 +127,8 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `FOLDER_LIST_FAILED` | 500 | A configured folder could not be listed (removed? permissions?). |
 | `VALIDATION_ERROR` | 400 | Order or receipt request failed validation. For receipts `details.field` names the key (`name`, `remarks`, `body` for the document as a whole) — see [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md#request-fields). |
 | `QUEUE_FULL` | 503 | More than 64 orders queued. |
+| `ORDER_INDEX_UNREADABLE` | 500 | The order index entry for this `historyId` is damaged (or, after a restart, any entry is, or two keys hold one number). Nothing queued, no number given. A person must look; never delete index files. |
+| `ORDER_NOT_QUEUED` | 503 | `lastOrderNumber.json` is unreadable, the order index cannot be written, or its recovery failed. Nothing reserved; retry with the same `historyId`. |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |

@@ -188,13 +188,7 @@ func (a *serverApp) Start() error {
 			"customer details to be supplied in the request.")
 	}
 
-	// Build the send-order queue for Hasavshevet.
-	// Order number file lives next to IMOVEIN files for self-contained directory.
-	numStorePath := filepath.Join(cfg.SendOrderDir, "lastOrderNumber.json")
-	numStore := hasavshevet.NewOrderNumberStore(numStorePath)
-	sender := hasavshevet.NewSender(dbConn, cfg, numStore, logSvc)
-
-	queue := hasavshevet.NewOrderQueue(sender, logSvc)
+	queue := buildOrderQueue(cfg, dbConn, paths.DataDir(), logSvc)
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	queue.Start(queueCtx)
 	a.orderQueue = queue
@@ -303,6 +297,33 @@ func (a *serverApp) Stop(ctx context.Context) {
 	if a.logSvc != nil {
 		_ = a.logSvc.Close()
 	}
+}
+
+// buildOrderQueue builds the send-order queue for Hasavshevet. The order
+// counter, lastOrderNumber.json, lives next to the IMOVEIN files in
+// sendOrderDir (the legacy app's place); the historyId → order number index
+// lives in the data directory (DataDir/orders/index, DIG-1291). Back up both.
+//
+// When orders are configured the index is on and recovered before the queue
+// serves: the counter is moved past every number the index holds, and every
+// order whose outcome is unknown is logged. A failed recovery is logged, not
+// fatal: queries and receipts keep working, and sendOrder answers an error
+// (Accept retries recovery) until it succeeds. Without orders configured the
+// route answers 501 before the queue is reached, so no index is created.
+func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, log logger.LoggerService) *hasavshevet.OrderQueue {
+	numStore := hasavshevet.NewOrderNumberStore(filepath.Join(cfg.SendOrderDir, "lastOrderNumber.json"))
+	queue := hasavshevet.NewOrderQueue(hasavshevet.NewSender(dbConn, cfg, numStore, log), log)
+	if !cfg.OrdersConfigured() {
+		return queue
+	}
+	queue.UseKeyIndex(dataDir)
+	if err := queue.Recover(); err != nil {
+		log.Error("order index recovery failed; sendOrder answers an error until it succeeds", err)
+	} else {
+		log.Info(fmt.Sprintf("order index ready: %s (historyId is the idempotency key); counter %s",
+			hasavshevet.OrderIndexDir(dataDir), filepath.Join(strings.TrimSpace(cfg.SendOrderDir), "lastOrderNumber.json")))
+	}
+	return queue
 }
 
 // buildReceiptWriter builds the writer behind POST /api/sendReceipt, or
