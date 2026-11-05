@@ -97,11 +97,15 @@ After an upgrade, `GET /api/ping` returns the installed release in `version`.
 
 What survives an upgrade:
 
-- **Everything in the data directory** — config, queries, secrets, logs, and the
+- **Everything in the data directory** — config, queries, secrets, logs, the
   receipt number store, index, process lock and history (`receipts/`,
-  `history/receipts/`).
-  The installer only writes to `C:\Program Files\…`. Back `receipts/` up with
-  the rest: a lost index turns a receipt retry into a second receipt.
+  `history/receipts/`), and the order index (`orders/index/`, DIG-1291).
+  The installer only writes to `C:\Program Files\…`. Back `receipts/` and
+  `orders/` up with the rest: a lost index turns a retry into a second receipt
+  or a second Hashavshevet order.
+- **`sendOrderDir`** — `lastOrderNumber.json`, the order counter, lives there,
+  not in the data directory. Back it up with the install too, and never restore
+  it backwards (the order index moves it forward at startup, with a warning).
 - **The service definition**, including `depend=` and the recovery actions. The
   installer's `sc create` fails harmlessly when the service already exists. Only a
   full *uninstall* removes the service and therefore the hardening.

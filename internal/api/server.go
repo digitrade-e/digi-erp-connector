@@ -122,10 +122,7 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	priceStockHandler := handlers.NewPriceAndStockHandler(cfg, deps.DB)
 	folderFilesHandler := handlers.NewListFolderFilesHandler(cfg.ImageFolders)
 	fileHandler := handlers.NewFileHandler(cfg.ImageFolders)
-	// Whether this installation can process orders is derived from the config
-	// rather than being a separate switch, so the two can never disagree.
-	ordersConfigured := cfg.ERP == config.ERPHasavshevet && strings.TrimSpace(cfg.SendOrderDir) != ""
-	sendOrderHandler := handlers.NewSendOrderHandler(deps.SendOrderQueue, ordersConfigured)
+	sendOrderHandler := handlers.NewSendOrderHandler(deps.SendOrderQueue, cfg.OrdersConfigured())
 	sendOrderStatusHandler := handlers.NewSendOrderStatusHandler(deps.SendOrderQueue)
 	sendReceiptHandler := handlers.NewSendReceiptHandler(deps.ReceiptWriter, receiptsConfigured, deps.Logger)
 	createQueryHandler := handlers.NewCreateCustomSQLHandler(deps.QueryStore)

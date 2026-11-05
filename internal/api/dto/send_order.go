@@ -52,9 +52,14 @@ type SendOrderMeta struct {
 	DurationMs int64 `json:"durationMs"`
 }
 
-// SendOrderAccepted is returned immediately with 202 when the order is enqueued.
+// SendOrderAccepted is returned immediately with 202 when the order is
+// enqueued — and, for a repeat of a historyId already accepted, with the first
+// order's jobId, its current status (queued, running, done, failed, unknown)
+// and Replay true. The field is omitted on a first answer, which keeps its
+// original shape.
 type SendOrderAccepted struct {
 	Status string        `json:"status"`
 	JobID  string        `json:"jobId"`
+	Replay bool          `json:"replay,omitempty"`
 	Meta   SendOrderMeta `json:"meta"`
 }

@@ -11,13 +11,38 @@
 package atomicfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
+	"time"
 )
 
 // dirPerm is used when the target's directory does not exist yet.
 const dirPerm = 0o755
+
+// The Windows errors a rename over a file someone else holds open returns.
+// Go's os.Open does not share delete access, so a reader in this process (an
+// index lookup), Defender or a backup agent reading the target makes the
+// rename fail until it lets go. They are compared by number, and only on
+// Windows: elsewhere these numbers mean other things.
+const (
+	errorAccessDenied     syscall.Errno = 5  // ERROR_ACCESS_DENIED
+	errorSharingViolation syscall.Errno = 32 // ERROR_SHARING_VIOLATION
+)
+
+// renameAttempts bounds the retries of such a rename: with renameBackoff
+// doubling between attempts it waits at most about 0.8 s in all.
+const renameAttempts = 6
+
+// Seams for tests.
+var (
+	osRename      = os.Rename
+	renameGOOS    = runtime.GOOS
+	renameBackoff = 25 * time.Millisecond
+)
 
 // Write atomically replaces the file at path with data.
 //
@@ -46,12 +71,32 @@ func Write(path string, data []byte, perm os.FileMode) error {
 	// No Remove of the target first: os.Rename replaces an existing file on
 	// both Unix and Windows, and removing it would open a window in which the
 	// file does not exist at all.
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameRetrying(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("atomicfile: replace %s: %w", path, err)
 	}
 
 	return nil
+}
+
+// renameRetrying is os.Rename, retried briefly while Windows reports the
+// target held open (see errorSharingViolation). Any other failure — or the
+// same one once the attempts run out — is returned at once, as before.
+func renameRetrying(oldpath, newpath string) error {
+	delay := renameBackoff
+	var err error
+	for attempt := 1; ; attempt++ {
+		err = osRename(oldpath, newpath)
+		if err == nil || attempt == renameAttempts || !transientRenameError(renameGOOS, err) {
+			return err
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
+}
+
+func transientRenameError(goos string, err error) bool {
+	return goos == "windows" && (errors.Is(err, errorAccessDenied) || errors.Is(err, errorSharingViolation))
 }
 
 // writeAndClose writes data, flushes it to the device and closes the file. It

@@ -22,10 +22,12 @@ var ErrStoreUnavailable = errors.New("receipt number store unavailable")
 
 // ReceiptNumberStore is the file-backed source of KUPAIN receipt numbers (F3).
 //
-// Unlike OrderNumberStore it fails closed. That store restarts at 1 when its
-// file is missing or corrupt, which for orders is an inconvenience; for
-// receipts it would reissue numbers already printed on legal documents. So the
-// file must be created by an explicit seed (cutover-seed -receipt-seed N), and
+// It fails closed further than OrderNumberStore. That store refuses a corrupt
+// file too, but starts at 1 when its file is missing — a fresh install, and for
+// orders the key index and sendOrderDir/history move it past any number
+// already issued; for receipts a restart at 1 would reissue numbers already
+// printed on legal documents. So the file must be created by an explicit seed
+// (cutover-seed -receipt-seed N), and
 // anything else — missing, unparsable, zero, negative, fractional, a string, an
 // extra field — is ErrStoreUnavailable and the file is left exactly as found.
 //

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -15,6 +16,13 @@ import (
 //
 // Using async processing means the HTTP response is returned immediately;
 // the caller does not block while IMOVEIN files are written and has.exe runs.
+//
+// historyId is the order's idempotency key (DIG-1291) when the queue has the
+// key index: a repeat answers 202 with the first jobId, the order's current
+// status and "replay": true, and writes nothing — except an order that failed
+// before any file was written, which it queues again under the same number
+// (status queued). An index entry that cannot be read answers 500
+// ORDER_INDEX_UNREADABLE — never 202, never a new number.
 //
 // ordersConfigured tells the handler whether this installation can process
 // orders at all — it needs erp: hasavshevet and a sendOrderDir. A node deployed
@@ -163,18 +171,41 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			}
 		}
 
-		lastOrderNumber, err := queue.Submit(orderReq)
+		acc, err := queue.Accept(orderReq)
 		if err != nil {
-			respond.Error(w, http.StatusServiceUnavailable,
-				"Order queue full; try again later", "QUEUE_FULL", nil)
+			writeSendOrderError(w, err)
 			return
 		}
 
 		respond.JSON(w, http.StatusAccepted, dto.SendOrderAccepted{
-			Status: "queued",
-			JobID:  lastOrderNumber,
+			Status: string(acc.Status),
+			JobID:  acc.JobID,
+			Replay: acc.Replay,
 			Meta:   dto.SendOrderMeta{DurationMs: time.Since(start).Milliseconds()},
 		})
+	}
+}
+
+// writeSendOrderError maps an Accept error to a status. Messages are fixed
+// text: the errors name files under the data directory (the queue logs them).
+func writeSendOrderError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, hasavshevet.ErrOrderIndexUnreadable):
+		// Only ever this key's own entry: recovery skips other damaged files.
+		respond.Error(w, http.StatusInternalServerError,
+			"The order index entry for this historyId cannot be read; nothing was queued and no number given until a person repairs it — see the connector log",
+			"ORDER_INDEX_UNREADABLE", nil)
+	case errors.Is(err, hasavshevet.ErrQueueFull), errors.Is(err, hasavshevet.ErrQueueClosed):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"Order queue full; try again later", "QUEUE_FULL", nil)
+	case errors.Is(err, hasavshevet.ErrOrderCounterUnreadable):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The order counter (lastOrderNumber.json) cannot be read; no new order is accepted until a person repairs it — see the connector log",
+			"ORDER_COUNTER_UNREADABLE", nil)
+	default:
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The order was not queued: the order index could not be written or recovered; nothing was reserved — retry with the same historyId (see the connector log)",
+			"ORDER_NOT_QUEUED", nil)
 	}
 }
 
