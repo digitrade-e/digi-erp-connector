@@ -382,9 +382,13 @@ func validateFirewall(f *FirewallSpec) *Refusal {
 	return nil
 }
 
-// parseSource reads an IPv4 address (a /32) or an IPv4 CIDR.
+// parseSource reads an IPv4 address (a /32) or an IPv4 CIDR, written as IPv4: an IPv4-mapped IPv6 form is refused —
+// ::ffff:8.0.0.0/96 parses as an IPv4 network with a mask of 96 bits out of 128, which is every IPv4 address.
 func parseSource(a string) (*net.IPNet, error) {
 	a = strings.TrimSpace(a)
+	if strings.Contains(a, ":") {
+		return nil, errors.New("not an IPv4 address or CIDR")
+	}
 	if !strings.Contains(a, "/") {
 		ip := net.ParseIP(a)
 		if ip == nil || ip.To4() == nil {
