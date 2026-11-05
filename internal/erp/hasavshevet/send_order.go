@@ -49,6 +49,15 @@ type OrderRequest struct {
 	// [dbo].[Accounts]. When set it is used as-is and no lookup happens, which
 	// is what lets a connector with no database build orders.
 	Account *AccountDetails
+
+	// Document fields (DIG-1295, document_fields.go): the tenant's
+	// erp-manager config for the IMOVEIN header. Zero / "" = today's value.
+	// omitempty keeps a request without them hashing as it did before them
+	// (orderRequestHash, the DIG-1291 index).
+	DocumentID int    `json:",omitempty"` // line4
+	Warehouse  int    `json:",omitempty"` // line12
+	VatPercent string `json:",omitempty"` // line18 text, e.g. "17.00"
+	Asmahta2   string `json:",omitempty"` // line8, digits; MyID (line3) stays the order number
 }
 
 // AccountDetails is the caller-supplied form of the account record: the columns
@@ -297,11 +306,12 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		discount = 99.99
 	}
 
-	// Document type → Hasavshevet header DocumentID code
+	// Document type → Hasavshevet header DocumentID code (today's rule; the
+	// request's document fields replace it below).
 	var headerDocID, wareHouse int
 	switch req.DocumentType {
 	case "ORDER":
-		wareHouse = 1
+		wareHouse = defaultWarehouse
 		if req.Currency == `ש"ח` {
 			headerDocID = 30
 		} else {
@@ -309,10 +319,24 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		}
 	case "QUOATE":
 		headerDocID = 40
-		wareHouse = 1
+		wareHouse = defaultWarehouse
 	case "RETURN":
 		headerDocID = 74
-		wareHouse = 1
+		wareHouse = defaultWarehouse
+	}
+	if req.DocumentID != 0 {
+		headerDocID = req.DocumentID
+	}
+	if req.Warehouse != 0 {
+		wareHouse = req.Warehouse
+	}
+	asmahta2 := fmt.Sprintf("%d", orderNum)
+	if req.Asmahta2 != "" {
+		asmahta2 = req.Asmahta2
+	}
+	vat := defaultVatPercent
+	if req.VatPercent != "" {
+		vat = req.VatPercent
 	}
 
 	hdr := stockHeader{
@@ -323,12 +347,12 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		Address:      sanitizeField(account.Address),
 		City:         sanitizeField(account.City),
 		Phone:        sanitizeField(account.Phone),
-		Asmahta2:     fmt.Sprintf("%d", orderNum),
+		Asmahta2:     asmahta2,
 		ShortDate:    shortDate,
 		Agent:        account.Agent,
 		WareHouse:    wareHouse,
 		DiscountPrcR: fmt.Sprintf("%.2f", discount),
-		VatPrc:       "18.00",
+		VatPrc:       vat,
 		Copies:       "1",
 		Currency:     req.Currency,
 		Rate:         fmt.Sprintf("%.4f", rate),
@@ -490,6 +514,10 @@ func validateOrderRequest(req OrderRequest) error {
 	case "ORDER", "QUOATE", "RETURN":
 	default:
 		return fmt.Errorf("invalid documentType %q; allowed: ORDER, QUOATE, RETURN", req.DocumentType)
+	}
+
+	if err := ValidateDocumentFields(req); err != nil {
+		return err
 	}
 
 	for i, d := range req.Details {

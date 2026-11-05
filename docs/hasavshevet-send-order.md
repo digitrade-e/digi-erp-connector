@@ -78,8 +78,11 @@ HTTP POST /api/sendOrder
 | PRM line | Field              | Width | Notes                                 |
 |----------|--------------------|-------|---------------------------------------|
 | line2    | AccountKey         | 15    | Required for some doc types           |
-| line4    | DocumentID         | 2     | **Required** — Hasavshevet doc type   |
-| line8    | Asmahta2 / historyId | 9   | **Required** — external reference    |
+| line3    | MyID               | 9     | Always the connector's order number   |
+| line4    | DocumentID         | 2     | **Required** — Hasavshevet doc type; `documentId`, else the table below |
+| line8    | Asmahta2           | 9     | **Required** — external reference; `asmahta2`, else the order number |
+| line12   | Warehouse          | 9     | `warehouse`, else `1`                 |
+| line18   | VAT %              | 5     | `vatPercent`, else `18.00`            |
 | line22   | ItemKey / SKU      | 20    | **Required**                          |
 | line23   | Quantity           | 10    | **Required, must not be zero**        |
 | line24   | Price              | 10    | originalPrice from request            |
@@ -88,12 +91,50 @@ HTTP POST /api/sendOrder
 
 ### Document type codes
 
+When the request has no `documentId` (see [Document fields](#document-fields-dig-1295)):
+
 | Request `documentType` | Header `line4` | Currency condition |
 |------------------------|----------------|--------------------|
 | `ORDER`                | `30`           | `ש"ח` (ILS)        |
 | `ORDER`                | `32`           | Any other currency |
 | `QUOATE`               | `40`           | —                  |
 | `RETURN`               | `74`           | —                  |
+
+### Document fields (DIG-1295)
+
+The IMOVEIN header's ERP details belong to the tenant, not the connector: they
+are erp-manager configuration (mapping constants per document mode — e.g. BFL:
+ORDER → 31, price offer 40, return 74; warehouse 81, 8 for quotes and returns —
+plan 075 P1-2) sent with each order. All four are **optional**; each one absent
+or `null` keeps today's value, so a request without them writes exactly the
+bytes it always did (pinned by `testdata/imovein/*`, generated from the code
+before DIG-1295).
+
+| Request field | IMOVEIN | Accepted | Written as | Absent |
+|---|---|---|---|---|
+| `documentId` | line4, 2 chars | whole number 1–99 | `31` | the type table above (30 / 32 / 40 / 74) |
+| `warehouse` | line12, 9 chars | whole number 1–999 999 999 | `81` | `1` |
+| `vatPercent` | line18, 5 chars | 0–99.99, at most two decimals | always two decimals: `17` → `17.00`, `18.5` → `18.50` | `18.00` |
+| `asmahta2` | line8, 9 chars | 1–9 digits — the B2B cart id | as sent (`000123` stays `000123`) | the order number |
+
+- Each may be a JSON number or a string (`31` or `"31"`). `documentId` replaces
+  the whole type rule, ORDER's currency switch included. `MyID` (line3) is
+  always the connector's order number, whatever `asmahta2` says.
+- Anything else — a fraction where a whole number belongs, a sign, an
+  exponent, `0` for `documentId` / `warehouse`, a VAT rate that would have to be
+  rounded (`18.555`) or does not fit (`100`), a 10-digit `asmahta2`, `true` — is
+  `400 VALIDATION_ERROR` with `details.field` naming the field, checked before
+  anything is reserved. Nothing is ever cut to fit (the writer would truncate
+  silently, so it is never handed a value that does not fit).
+- Idempotency (DIG-1291) is unchanged: a repeat of a `historyId` answers the
+  first order and writes nothing, whatever document fields it now carries (a
+  different body is logged). A `retryable` order re-queued by a repeat is
+  written from the repeat's body, as before. A request without the fields
+  hashes as it did before them, so replays across the upgrade are not
+  reported as changed.
+- Not here: BFL's legacy writes returns as `TMP_` drafts. That is a choice of
+  file and import flow, not a header field, and waits on BFL's answer (plan 075
+  §8 Q6); nothing in these fields blocks it.
 
 ---
 

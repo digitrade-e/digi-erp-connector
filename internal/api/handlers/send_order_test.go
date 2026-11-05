@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
@@ -424,6 +426,137 @@ func TestWriteSendOrderError(t *testing.T) {
 			}
 			if strings.Contains(text, "/data/") || strings.Contains(text, "lastOrderNumber.json:") {
 				t.Errorf("the answer echoes a path: %s", text)
+			}
+		})
+	}
+}
+
+// IMOVEIN byte spans the document fields land in (0-based, end exclusive),
+// from imovein.go's field widths: line3 MyID, line4 DocumentID, line8
+// Asmahta2, line12 warehouse, line18 VAT.
+var imoveinSpans = map[string][2]int{
+	"line3": {15, 24}, "line4": {24, 26}, "line8": {176, 185}, "line12": {214, 223}, "line18": {497, 502},
+}
+
+func imoveinField(doc []byte, line string) string {
+	s := imoveinSpans[line]
+	return strings.TrimRight(string(doc[s[0]:s[1]]), " ")
+}
+
+// startedIndexedQueue is newIndexedTestQueue with its worker running.
+func startedIndexedQueue(t *testing.T, root string) *hasavshevet.OrderQueue {
+	t.Helper()
+	q := newIndexedTestQueue(t, root)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-q.Done():
+		case <-time.After(10 * time.Second):
+			t.Error("the order worker did not exit")
+		}
+	})
+	q.Start(ctx)
+	return q
+}
+
+func waitDone(t *testing.T, q *hasavshevet.OrderQueue, jobID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if r, ok := q.Status(jobID); ok && (r.Status == hasavshevet.JobStatusDone || r.Status == hasavshevet.JobStatusFailed) {
+			if r.Status != hasavshevet.JobStatusDone {
+				t.Fatalf("job %s failed: %v", jobID, r.Err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s never finished", jobID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The document fields (DIG-1295) reach IMOVEIN: as JSON numbers or strings,
+// and null is the same as absent (today's values).
+func TestSendOrderHandler_DocumentFieldsReachTheFile(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields map[string]any
+		want   map[string]string
+	}{
+		{"numbers", map[string]any{"documentId": 31, "warehouse": 81, "vatPercent": 17, "asmahta2": 26004295},
+			map[string]string{"line4": "31", "line12": "81", "line18": "17.00", "line8": "26004295", "line3": "1"}},
+		{"strings", map[string]any{"documentId": "31", "warehouse": "8", "vatPercent": "18.5", "asmahta2": "000123"},
+			map[string]string{"line4": "31", "line12": "8", "line18": "18.50", "line8": "000123", "line3": "1"}},
+		{"null is absent", map[string]any{"documentId": nil, "warehouse": nil, "vatPercent": nil, "asmahta2": nil},
+			map[string]string{"line4": "30", "line12": "1", "line18": "18.00", "line8": "1", "line3": "1"}},
+		{"absent", map[string]any{},
+			map[string]string{"line4": "30", "line12": "1", "line18": "18.00", "line8": "1", "line3": "1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			q := startedIndexedQueue(t, root)
+			body := validOrderBody()
+			body["account"] = map[string]any{"accountKey": "CUST001", "fullName": "Test Customer"}
+			for k, v := range tc.fields {
+				body[k] = v
+			}
+			w := sendOrderRequest(t, NewSendOrderHandler(q, true), body)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("POST = %d %s; want 202", w.Code, w.Body.String())
+			}
+			waitDone(t, q, "1")
+			doc, err := os.ReadFile(filepath.Join(root, "orders", "history", "1", "IMOVEIN_1.doc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for line, want := range tc.want {
+				if got := imoveinField(doc, line); got != want {
+					t.Errorf("%s = %q; want %q", line, got, want)
+				}
+			}
+		})
+	}
+}
+
+// A bad document field is a 400 VALIDATION_ERROR naming the field, before
+// anything is reserved — never cut to fit or rounded.
+func TestSendOrderHandler_RefusesABadDocumentField(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		value any
+	}{
+		{"documentId", 0}, {"documentId", 100}, {"documentId", 31.5}, {"documentId", "3a"},
+		{"documentId", true}, {"documentId", -1}, {"documentId", ""}, {"documentId", map[string]any{}},
+		{"warehouse", 0}, {"warehouse", 1000000000}, {"warehouse", 1.5}, {"warehouse", "81 "},
+		{"vatPercent", 100}, {"vatPercent", 18.555}, {"vatPercent", "x"}, {"vatPercent", -1}, {"vatPercent", "1e1"}, {"vatPercent", []any{17}},
+		{"asmahta2", 1234567890}, {"asmahta2", "12a"}, {"asmahta2", ""}, {"asmahta2", 12.5}, {"asmahta2", -3}, {"asmahta2", "1234567890"},
+	} {
+		t.Run(fmt.Sprintf("%s=%v", tc.field, tc.value), func(t *testing.T) {
+			root := t.TempDir()
+			q := newIndexedTestQueue(t, root)
+			body := validOrderBody()
+			body[tc.field] = tc.value
+			w := sendOrderRequest(t, NewSendOrderHandler(q, true), body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("POST = %d %s; want 400", w.Code, w.Body.String())
+			}
+			var resp struct {
+				Code    string         `json:"code"`
+				Details map[string]any `json:"details"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Code != "VALIDATION_ERROR" || resp.Details["field"] != tc.field {
+				t.Errorf("answer = %s; want VALIDATION_ERROR on %s", w.Body.String(), tc.field)
+			}
+			if q.Pending() != 0 {
+				t.Error("a refused request was queued")
+			}
+			if _, err := os.Stat(filepath.Join(root, "orders", "lastOrderNumber.json")); !os.IsNotExist(err) {
+				t.Errorf("a refused request reserved a number: %v", err)
 			}
 		})
 	}
