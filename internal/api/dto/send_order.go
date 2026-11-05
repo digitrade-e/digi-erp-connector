@@ -1,5 +1,7 @@
 package dto
 
+import "encoding/json"
+
 // SendOrderRequest is the JSON body for POST /api/sendOrder.
 // Numeric fields that are required-but-zero (discount, total, quantity, prices)
 // are represented as pointers so null vs zero can be distinguished.
@@ -21,6 +23,22 @@ type SendOrderRequest struct {
 	// of its own build orders — see docs/deployment-topologies.md. When the
 	// connector does have a database, anything set here overrides the lookup.
 	Account *SendOrderAccount `json:"account,omitempty"`
+
+	// Document fields (DIG-1295, optional): the IMOVEIN header's ERP details,
+	// set per tenant in erp-manager (mapping constants per document mode).
+	// Each absent or null keeps today's value. Raw, so the handler can take a
+	// JSON number or a string of digits and answer anything else with a
+	// VALIDATION_ERROR naming the field (a typed field would fail the whole
+	// decode instead):
+	//   documentId — Hashavshevet document type, 1-99 (line4)
+	//   warehouse  — header warehouse, 1-999999999 (line12)
+	//   vatPercent — VAT rate, 0-99.99, at most two decimals (line18, "17.00")
+	//   asmahta2   — the external reference (the B2B cart id), 1-9 digits
+	//                (line8); MyID (line3) stays the connector's order number
+	DocumentID json.RawMessage `json:"documentId,omitempty"`
+	Warehouse  json.RawMessage `json:"warehouse,omitempty"`
+	VatPercent json.RawMessage `json:"vatPercent,omitempty"`
+	Asmahta2   json.RawMessage `json:"asmahta2,omitempty"`
 }
 
 // SendOrderAccount mirrors the columns the connector otherwise reads from

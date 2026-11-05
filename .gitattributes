@@ -29,6 +29,10 @@
 # detection would happily "normalise" them; they must stay exactly as written.
 internal/erp/hasavshevet/testdata/kupain/* binary
 
+# Byte-exact IMOVEIN goldens: main's output before DIG-1295's document fields
+# (imovein_golden_test.go). Same rule — never normalised.
+internal/erp/hasavshevet/testdata/imovein/* binary
+
 # The backend's golden sendReceipt payload (DIG-928), copied byte for byte and
 # pinned by sha256 in send_receipt_test.go.
 internal/api/handlers/testdata/receipt/* binary
