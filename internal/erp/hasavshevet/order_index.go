@@ -133,7 +133,13 @@ func (ix orderIndex) save(e *orderIndexEntry) error {
 func (ix orderIndex) all() (entries []*orderIndexEntry, problems []error, err error) {
 	dirEntries, err := os.ReadDir(ix.dir)
 	if err != nil {
+		// Windows reports a FILE where the directory should be as "path not
+		// found", which reads as "no index yet": an index nobody can list must
+		// still be an error there, as it is on Linux (ENOTDIR).
 		if errors.Is(err, os.ErrNotExist) {
+			if fi, statErr := os.Stat(ix.dir); statErr == nil && !fi.IsDir() {
+				return nil, nil, fmt.Errorf("list the order index %s: not a directory", ix.dir)
+			}
 			return nil, nil, nil
 		}
 		return nil, nil, fmt.Errorf("list the order index %s: %w", ix.dir, err)
