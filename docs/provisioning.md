@@ -188,8 +188,8 @@ image folders it names must exist (`image_folder_missing`); then, only when
 `config.yaml` would change, the order queue (`orders_pending`), the change set's
 pre-image, the write, and the restart with the port proved by the box's own
 credential. A failure after the pre-image puts it back. `restore <changeSet>` undoes
-it. Unchanged values write nothing, and restart only a daemon older than the file
-(a hand edit it never loaded). `--check` stops before the first write and reports
+it. Unchanged values write nothing, and restart only a running daemon older than the file
+(a hand edit it never loaded) when it runs; a stopped service stays stopped. `--check` stops before the first write and reports
 `check.config` and `check.restart`. No `config.yaml` is `config_refused`: run
 `apply` first.
 
