@@ -103,12 +103,19 @@ func (a *applier) runOptions(ctx context.Context) error {
 		if changed {
 			c.Config = configDiff(a.cur, a.tgt)
 		}
-		c.Restart = changed || configStale(a.curMod, a.svc.ProcessStart) || a.svc.State != "running"
+		c.Restart = changed || (a.running && configStale(a.curMod, a.svc.ProcessStart))
 		a.res.Check = c
 		return nil
 	}
 	if !changed {
 		a.step("config", false, "")
+		if !a.running {
+			// Nothing to change and nothing to put back: a stopped service is
+			// someone's choice, and starting it here could leave it running
+			// broken with no pre-image to return to.
+			a.step("restart", false, "the service is stopped, and options with nothing to change do not start it")
+			return nil
+		}
 		return a.restartAndProve(ctx)
 	}
 	if err := a.idle(ctx, "before anything is written"); err != nil {

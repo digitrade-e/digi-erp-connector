@@ -218,3 +218,73 @@ func TestApplyOptions_SameValuesStaleDaemonRestarts(t *testing.T) {
 		t.Errorf("a stale daemon was not restarted onto the file: restarted %v", res.Restarted)
 	}
 }
+
+// Review finding: a no-op on a stopped service must not start it — nothing
+// would be rolled back if the proof failed.
+func TestApplyOptions_NoOpLeavesAStoppedServiceStopped(t *testing.T) {
+	sys, fdb, _ := handInstallBox(t)
+	sys.svc.State = "stopped"
+	cur, _ := readConfig(t, sys.dir)
+	env := testEnv(sys, fdb)
+
+	chk, err := ApplyOptions(context.Background(), env, optionsInput(OptionsSpec{Debug: ptr(cur.Debug)}), true)
+	if err != nil || chk.Check == nil || chk.Check.Restart {
+		t.Fatalf("--check = %+v, %v; want no restart for a no-op on a stopped service", chk.Check, err)
+	}
+	res, err := ApplyOptions(context.Background(), env, optionsInput(OptionsSpec{Debug: ptr(cur.Debug)}), false)
+	if err != nil {
+		t.Fatalf("ApplyOptions: %v", err)
+	}
+	if res.Restarted || sys.svc.State != "stopped" || slices.Contains(sys.calls, "start") {
+		t.Errorf("a no-op started a stopped service: restarted %v, state %s, calls %v", res.Restarted, sys.svc.State, sys.calls)
+	}
+}
+
+// Review finding: a failed proof's rollback must leave the DB secret exactly as
+// the pre-image had it, even when the login's stored key is older (the GUI
+// re-typed the secret and never updates the key).
+func TestApplyOptions_RollbackKeepsTheDBSecretInUse(t *testing.T) {
+	sys, fdb, _ := handInstallBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.DB.User = "erp_connector_read"
+	writeConfig(t, sys.dir, cfg)
+	key := config.DBPasswordKey(cfg.ERP)
+	if err := sys.SecretSet(key, []byte("Pw-typed-in-gui-2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SecretSet(loginKey("erp_connector_read"), []byte("Pw-old-stale-1")); err != nil {
+		t.Fatal(err)
+	}
+	sys.onStart = func(c config.Config) { sys.daemon.set(func(d *fakeDaemon) { d.down = c.Debug }) }
+
+	res, err := ApplyOptions(context.Background(), testEnv(sys, fdb), optionsInput(OptionsSpec{Debug: ptr(!cfg.Debug)}), false)
+	wantRefusal(t, err, CodePortProofFailed)
+	if !res.RolledBack {
+		t.Fatal("not rolled back")
+	}
+	if got, _ := sys.SecretGet(key); string(got) != "Pw-typed-in-gui-2" {
+		t.Errorf("the DB secret after the rollback is %q, want the one in use", got)
+	}
+}
+
+// Review finding, restore's side: undoing an options change set on the same
+// box keeps the DB secret in use, not the login's older stored key.
+func TestRestore_KeepsTheDBSecretInUseForTheSameLogin(t *testing.T) {
+	sys, fdb, _ := handInstallBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.DB.User = "erp_connector_read"
+	writeConfig(t, sys.dir, cfg)
+	key := config.DBPasswordKey(cfg.ERP)
+	_ = sys.SecretSet(key, []byte("Pw-typed-in-gui-2"))
+	_ = sys.SecretSet(loginKey("erp_connector_read"), []byte("Pw-old-stale-1"))
+	env := testEnv(sys, fdb)
+	if _, err := ApplyOptions(context.Background(), env, optionsInput(OptionsSpec{QueryMaxRows: ptr(50000)}), false); err != nil {
+		t.Fatalf("ApplyOptions: %v", err)
+	}
+	if _, err := Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-options-0001"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got, _ := sys.SecretGet(key); string(got) != "Pw-typed-in-gui-2" {
+		t.Errorf("the DB secret after restore is %q, want the one in use", got)
+	}
+}
