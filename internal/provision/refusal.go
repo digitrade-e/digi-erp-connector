@@ -26,6 +26,7 @@ const (
 	CodeImporterRequired    = "importer_required"
 	CodeImporterMissing     = "importer_missing"
 	CodeSendOrderDirMissing = "send_order_dir_missing"
+	CodeImageFolderMissing  = "image_folder_missing"
 	CodeAuthPasswordWeak    = "auth_password_weak"
 	CodeFirewallAny         = "firewall_any"
 	CodeConfigRefused       = "config_refused"

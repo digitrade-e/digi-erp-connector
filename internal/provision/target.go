@@ -27,9 +27,9 @@ func secretFile(erp config.ERPType) string {
 func loginKey(login string) string { return "login_" + login }
 
 // buildTarget is the config Apply writes: cur with the spec's fields set and
-// everything else — receipts, image folders, query limits, erpUser, the token
-// lifetime, the signing secret, and every optional spec field left out
-// (encrypt, trustServerCertificate, sendOrderDir, the importer) — as it was.
+// everything else — receipts, the signing secret, and every optional spec
+// field left out (encrypt, trustServerCertificate, sendOrderDir, the importer,
+// each option) — as it was.
 // dbUser is the login the connector will use (the least-privilege login, or
 // the one the client gave).
 func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Config {
@@ -69,6 +69,30 @@ func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Confi
 
 	t.Auth.Username = s.Auth.Username
 	t.Auth.Password = s.Auth.Password
+
+	if o := s.Options; o != nil {
+		if o.ImageFolders != nil {
+			t.ImageFolders = make([]string, 0, len(*o.ImageFolders))
+			for _, d := range *o.ImageFolders {
+				t.ImageFolders = append(t.ImageFolders, filepath.Clean(strings.TrimSpace(d)))
+			}
+		}
+		if o.ERPUser != nil {
+			t.ERPUser = strings.TrimSpace(*o.ERPUser)
+		}
+		if o.Debug != nil {
+			t.Debug = *o.Debug
+		}
+		if o.QueryTimeoutSeconds != nil {
+			t.Queries.TimeoutSeconds = *o.QueryTimeoutSeconds
+		}
+		if o.QueryMaxRows != nil {
+			t.Queries.MaxRows = *o.QueryMaxRows
+		}
+		if o.TokenTTL != nil {
+			t.Auth.TokenTTL = strings.TrimSpace(*o.TokenTTL)
+		}
+	}
 
 	if s.TLS != nil {
 		switch s.TLS.Mode {

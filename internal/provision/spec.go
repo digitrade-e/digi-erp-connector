@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
@@ -66,7 +67,37 @@ type Spec struct {
 	// the Hub points at this node yet.
 	AssumeIdle bool    `json:"assumeIdle,omitempty"`
 	Expect     *Expect `json:"expect,omitempty"`
+	// Options are the GUI's remaining settings. nil, or a nil field inside,
+	// keeps the box's value.
+	Options *OptionsSpec `json:"options,omitempty"`
 }
+
+// OptionsSpec is every config.yaml setting the GUI edits that the fields
+// above do not cover. Each field is a pointer: nil keeps the box's value.
+type OptionsSpec struct {
+	// ImageFolders are the folders /api/folders/list and /api/file serve:
+	// absolute paths of folders on this machine. An empty list serves none.
+	ImageFolders *[]string `json:"imageFolders,omitempty"`
+	// ERPUser is the Hasavshevet user the GUI's "Test user" checks; "" clears it.
+	ERPUser *string `json:"erpUser,omitempty"`
+	Debug   *bool   `json:"debug,omitempty"`
+	// QueryTimeoutSeconds and QueryMaxRows bound every saved query's run.
+	QueryTimeoutSeconds *int `json:"queryTimeoutSeconds,omitempty"`
+	QueryMaxRows        *int `json:"queryMaxRows,omitempty"`
+	// TokenTTL is the issued token's lifetime, a Go duration from 5m to 24h;
+	// "" is the default (30m).
+	TokenTTL *string `json:"tokenTTL,omitempty"`
+}
+
+// Bounds of OptionsSpec.
+const (
+	MaxImageFolders     = 16
+	MaxERPUser          = 64
+	MaxQueryTimeoutSecs = 600
+	MaxQueryRows        = 100000
+	MinTokenTTL         = 5 * time.Minute
+	MaxTokenTTL         = 24 * time.Hour
+)
 
 // DBSpec is the database and the credential the client gave (plan 068 D2).
 type DBSpec struct {
@@ -235,6 +266,47 @@ func (s Spec) Validate() *Refusal {
 	}
 	if s.Expect != nil && s.Expect.ConfigSHA256 != nil && *s.Expect.ConfigSHA256 != "" && !sha256HexRe.MatchString(*s.Expect.ConfigSHA256) {
 		return refuse(CodeSpecInvalid, "send 64 lower-case hex digits, or an empty string for no file", "expect.configSha256 is not a sha256")
+	}
+	return validateOptions(s.Options)
+}
+
+func validateOptions(o *OptionsSpec) *Refusal {
+	if o == nil {
+		return nil
+	}
+	if o.ImageFolders != nil {
+		dirs := *o.ImageFolders
+		if len(dirs) > MaxImageFolders {
+			return refuse(CodeSpecInvalid, fmt.Sprintf("name at most %d folders", MaxImageFolders), "options.imageFolders has %d entries", len(dirs))
+		}
+		seen := map[string]bool{}
+		for _, d := range dirs {
+			d = strings.TrimSpace(d)
+			if d == "" || hasControl(d) || !filepath.IsAbs(d) {
+				return refuse(CodeSpecInvalid, "use absolute folder paths", "options.imageFolders %q is not an absolute path", d)
+			}
+			k := strings.ToLower(filepath.Clean(d))
+			if seen[k] {
+				return refuse(CodeSpecInvalid, "name each folder once", "options.imageFolders names %q twice", d)
+			}
+			seen[k] = true
+		}
+	}
+	if o.ERPUser != nil && (len(*o.ERPUser) > MaxERPUser || hasControl(*o.ERPUser)) {
+		return refuse(CodeSpecInvalid, fmt.Sprintf("use up to %d characters of plain text", MaxERPUser), "options.erpUser is too long or not plain text")
+	}
+	if p := o.QueryTimeoutSeconds; p != nil && (*p < 1 || *p > MaxQueryTimeoutSecs) {
+		return refuse(CodeSpecInvalid, fmt.Sprintf("use 1 to %d seconds", MaxQueryTimeoutSecs), "options.queryTimeoutSeconds %d is out of range", *p)
+	}
+	if p := o.QueryMaxRows; p != nil && (*p < 1 || *p > MaxQueryRows) {
+		return refuse(CodeSpecInvalid, fmt.Sprintf("use 1 to %d rows", MaxQueryRows), "options.queryMaxRows %d is out of range", *p)
+	}
+	if p := o.TokenTTL; p != nil && strings.TrimSpace(*p) != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(*p))
+		if err != nil || d < MinTokenTTL || d > MaxTokenTTL {
+			return refuse(CodeSpecInvalid, `use a duration from 5m to 24h, e.g. "30m", or "" for the default`,
+				"options.tokenTTL %q is not a duration in range", *p)
+		}
 	}
 	return nil
 }
