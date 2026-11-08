@@ -99,6 +99,13 @@ func (f *mainForm) readFormConfig() (config.Config, string, error) {
 		return config.Config{}, "", fmt.Errorf("receipts: %w", err)
 	}
 
+	// The order layout and model (a)'s pickup folder have no widget either, but
+	// the order folder and the BAT do: moving the folder onto the pickup folder,
+	// or naming a BAT beside it, would stop the daemon starting (DIG-1297).
+	if err := cfg.ValidateOrders(); err != nil {
+		return config.Config{}, "", fmt.Errorf("orders: %w", err)
+	}
+
 	return cfg, f.passEdit.Text(), nil
 }
 

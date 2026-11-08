@@ -42,7 +42,7 @@ type ServerDeps struct {
 }
 
 // CheckConfig makes every startup check the daemon makes on the config alone:
-// the listen address, the credential, the receipt keys, a database setting
+// the listen address, the credential, the receipt keys, the order keys, a database setting
 // OpenLazy accepts, and a loadable TLS pair. A writer of config.yaml (digi-erp-connector-provision) passes it
 // before it writes, so it never leaves a box holding a config its own service
 // will not start on — the rule the GUI's save follows. auth.secret is not
@@ -55,6 +55,9 @@ func CheckConfig(cfg config.Config) error {
 		return err
 	}
 	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return err
+	}
+	if err := cfg.ValidateOrders(); err != nil {
 		return err
 	}
 	if err := db.Check(cfg); err != nil {
@@ -92,6 +95,11 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	// Receipts: the same check the GUI makes before it saves (sendReceiptDir
 	// is not sendOrderDir; every card-name override can be written).
 	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
+		return nil, err
+	}
+	// Orders: the layout and model (a)'s pickup folder (DIG-1297) — the same
+	// check the GUI makes before it saves.
+	if err := cfg.ValidateOrders(); err != nil {
 		return nil, err
 	}
 	receiptsConfigured := cfg.ReceiptsConfigured()

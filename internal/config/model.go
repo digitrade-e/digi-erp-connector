@@ -163,6 +163,22 @@ type Config struct {
 	// The BAT is executed from its own directory so relative paths inside it
 	// (e.g. -p"digi.bat") resolve correctly.
 	HasBatFile string `yaml:"hasBatFile"`
+	// SendOrderPickupDir switches orders to model (a) (DIG-1297): each order is
+	// published as ONE file, IMOVEIN_<n>.doc (TMP_IMOVEIN_<n>.doc for a
+	// return), into this folder, where the ERP's own scheduler imports it — on
+	// BFL, WizSched reading C:\xampp\htdocs\herp beside the legacy app. The
+	// connector then writes no .prm there (the scheduler has its own), runs no
+	// importer, and never replaces a file: a name already taken fails the
+	// order. sendOrderDir stays the connector's own folder (counter and
+	// history copies), so it must not be this folder. Empty = today's model:
+	// the fixed IMOVEIN.doc/.prm in sendOrderDir and the configured importer.
+	// Absolute. See docs/hasavshevet-send-order.md § Model (a).
+	SendOrderPickupDir string `yaml:"sendOrderPickupDir,omitempty"`
+	// SendOrderFormat is the IMOVEIN layout the order file is written in:
+	// "official" (empty = official: Hashavshevet's documented 2891-byte record,
+	// today's bytes) or "legacy" (the old Digitrade app's layout, the one a
+	// scheduler set up for it reads: 37 fields, each padded plus one space).
+	SendOrderFormat string `yaml:"sendOrderFormat,omitempty"`
 
 	// SendReceiptDir is the folder Hashavshevet's receipt importer reads
 	// (KUPAIN_{n}.doc + KUPAIN.prm) — POST /api/sendReceipt. Unset means this
@@ -208,6 +224,70 @@ type ReceiptCardNamesConfig struct {
 // so the two can never disagree.
 func (c Config) OrdersConfigured() bool {
 	return c.ERP == ERPHasavshevet && strings.TrimSpace(c.SendOrderDir) != ""
+}
+
+// The values of sendOrderFormat.
+const (
+	OrderFormatOfficial = "official"
+	OrderFormatLegacy   = "legacy"
+)
+
+// OrderFormat is the configured IMOVEIN layout: OrderFormatOfficial when
+// sendOrderFormat is empty. ValidateOrders refuses any other value.
+func (c Config) OrderFormat() string {
+	if f := strings.TrimSpace(c.SendOrderFormat); f != "" {
+		return f
+	}
+	return OrderFormatOfficial
+}
+
+// OrdersPickup reports whether orders are written for a scheduler to pick up
+// (model (a)): orders configured and a sendOrderPickupDir.
+func (c Config) OrdersPickup() bool {
+	return c.OrdersConfigured() && strings.TrimSpace(c.SendOrderPickupDir) != ""
+}
+
+// ValidateOrders — only when orders are configured (erp: hasavshevet and a
+// sendOrderDir; otherwise it accepts anything) — refuses an unknown
+// sendOrderFormat and, for model (a), a pickup folder that is relative, is the
+// sendOrderDir or the sendReceiptDir, or holds the sendOrderDir (the counter
+// and the history copies, customer data, would sit in the folder the ERP's
+// scheduler reads — on a real install under a web root), and an order importer
+// configured beside it (hasBatFile, hasParamFile: two importers for one
+// stream). hasExePath alone is allowed: receipts' model (b) may use it.
+// Folders compare as in ValidateReceipts.
+//
+// The daemon (api.NewServer, api.CheckConfig) and the GUI save path call it.
+func (c Config) ValidateOrders() error {
+	if !c.OrdersConfigured() {
+		return nil
+	}
+	switch strings.TrimSpace(c.SendOrderFormat) {
+	case "", OrderFormatOfficial, OrderFormatLegacy:
+	default:
+		return fmt.Errorf("sendOrderFormat %q is not a layout this connector writes: use %q or %q",
+			strings.TrimSpace(c.SendOrderFormat), OrderFormatOfficial, OrderFormatLegacy)
+	}
+	pickup := strings.TrimSpace(c.SendOrderPickupDir)
+	if pickup == "" {
+		return nil
+	}
+	if !filepath.IsAbs(pickup) {
+		return fmt.Errorf("sendOrderPickupDir %q must be an absolute path", pickup)
+	}
+	fold := runtime.GOOS == "windows"
+	order := strings.TrimSpace(c.SendOrderDir)
+	if sameDir(order, pickup, fold) || insideDir(order, pickup, fold) {
+		return fmt.Errorf("sendOrderPickupDir %q holds the sendOrderDir: the order counter and history copies must not sit in the folder the scheduler reads", pickup)
+	}
+	if receipt := strings.TrimSpace(c.SendReceiptDir); receipt != "" && sameDir(receipt, pickup, fold) {
+		return fmt.Errorf("sendOrderPickupDir %q is the sendReceiptDir: orders and receipts need folders of their own", pickup)
+	}
+	if strings.TrimSpace(c.HasBatFile) != "" || strings.TrimSpace(c.HasParamFile) != "" {
+		return errors.New("sendOrderPickupDir is set together with an order importer (hasBatFile / hasParamFile): " +
+			"with a pickup folder the ERP's scheduler imports and the connector runs none — keep one")
+	}
+	return nil
 }
 
 // ReceiptsConfigured reports whether this installation writes receipts: it
@@ -291,6 +371,17 @@ func sameDir(a, b string, foldCase bool) bool {
 		return strings.EqualFold(ca, cb)
 	}
 	return ca == cb
+}
+
+// insideDir reports whether child lies strictly inside parent, compared like
+// sameDir.
+func insideDir(child, parent string, foldCase bool) bool {
+	c, p := canonicalDir(child), canonicalDir(parent)
+	if foldCase {
+		c, p = strings.ToLower(c), strings.ToLower(p)
+	}
+	rel, err := filepath.Rel(p, c)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func canonicalDir(p string) string {

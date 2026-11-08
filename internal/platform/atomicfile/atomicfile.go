@@ -122,3 +122,32 @@ func writeAndClose(tmp *os.File, data []byte, perm os.FileMode) error {
 	}
 	return tmp.Close()
 }
+
+// WriteNew is Write for a file that must not exist yet: data appears at path
+// whole or not at all, and an existing file there is never replaced — the
+// call then fails with an error matching fs.ErrExist and leaves it alone.
+// Unlike Write it creates no directory: a missing one is an error (the caller
+// writes into a folder someone else owns, where a typo must not be hidden).
+//
+// The temp file is ".<name>.tmp-*" in the same directory, as for Write, and
+// is removed whatever happens. The final step is a rename that refuses to
+// replace (Windows: MoveFileEx without MOVEFILE_REPLACE_EXISTING, retried
+// like Write's while the temp file is held), elsewhere a hard link of the temp
+// file to path (which refuses an existing path) and the temp file's removal.
+func WriteNew(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("atomicfile: create temp file in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // a no-op once it has been renamed away
+
+	if err := writeAndClose(tmp, data, perm); err != nil {
+		return fmt.Errorf("atomicfile: write %s: %w", tmpName, err)
+	}
+	if err := publishNoReplace(tmpName, path); err != nil {
+		return fmt.Errorf("atomicfile: create %s: %w", path, err)
+	}
+	return nil
+}

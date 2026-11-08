@@ -123,6 +123,10 @@ type Sender struct {
 	cfg         config.Config
 	numberStore *OrderNumberStore
 	log         logger.LoggerService
+
+	// Test seams for the importers; nil = runBatFile / runImporter.
+	runBat    func(ctx context.Context, batPath string) (int, string, error)
+	runHasExe func(ctx context.Context, hasExePath, paramFile, workDir string) (int, string, error)
 }
 
 // NewSender creates a Sender. db and numberStore must be non-nil.
@@ -162,8 +166,12 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		return nil, notWritten(errors.New("sendOrderDir is not configured"))
 	}
 
-	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field spec)
+	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field
+	// spec + what the configured layout can hold)
 	if err := validateOrderRequest(req); err != nil {
+		return nil, notWritten(err)
+	}
+	if err := s.ValidateLayout(req); err != nil {
 		return nil, notWritten(err)
 	}
 
@@ -196,13 +204,22 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		}
 	}
 
-	// 5. Build DOC and PRM content
+	// 5. Build DOC and PRM content, in the configured layout
 	hdr, moves := buildIMOVEIN(orderNum, account, req, rate)
-	docBytes, err := generateDOC(hdr, moves)
+	docBytes, prmBytes, err := s.render(hdr, moves)
 	if err != nil {
 		return nil, notWritten(fmt.Errorf("generate DOC: %w", err))
 	}
-	prmBytes := generatePRM()
+
+	// Model (a): one file for the ERP's scheduler, no importer.
+	if s.cfg.OrdersPickup() {
+		writtenFiles, err := s.writePickup(req, orderNum, docBytes, prmBytes)
+		if err != nil {
+			return nil, err
+		}
+		s.log.Success(fmt.Sprintf("order complete orderNumber=%d files=%v (model a: left for the scheduler; no importer run)", orderNum, writtenFiles))
+		return orderResult(orderNum, writtenFiles, account), nil
+	}
 
 	// 6. Ensure output directories exist
 	dir := s.cfg.SendOrderDir
@@ -246,7 +263,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	switch {
 	case strings.TrimSpace(s.cfg.HasBatFile) != "":
 		start := time.Now()
-		exitCode, output, execErr := runBatFile(ctx, s.cfg.HasBatFile)
+		exitCode, output, execErr := s.batRunner()(ctx, s.cfg.HasBatFile)
 		s.log.Info(fmt.Sprintf("digi.bat exit=%d durationMs=%d output=%q orderNumber=%d",
 			exitCode, time.Since(start).Milliseconds(), output, orderNum))
 		if execErr != nil || exitCode != 0 {
@@ -254,7 +271,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		}
 	case strings.TrimSpace(s.cfg.HasExePath) != "":
 		start := time.Now()
-		exitCode, output, execErr := runImporter(ctx, s.cfg.HasExePath, s.cfg.HasParamFile, dir)
+		exitCode, output, execErr := s.hasExeRunner()(ctx, s.cfg.HasExePath, s.cfg.HasParamFile, dir)
 		s.log.Info(fmt.Sprintf("has.exe exit=%d durationMs=%d output=%q orderNumber=%d",
 			exitCode, time.Since(start).Milliseconds(), output, orderNum))
 		if execErr != nil {
@@ -264,6 +281,10 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	}
 
 	s.log.Success(fmt.Sprintf("order complete orderNumber=%d files=%v", orderNum, writtenFiles))
+	return orderResult(orderNum, writtenFiles, account), nil
+}
+
+func orderResult(orderNum int64, writtenFiles []string, account accountInfo) *OrderResult {
 	return &OrderResult{
 		OrderNumber:  orderNum,
 		WrittenFiles: writtenFiles,
@@ -274,7 +295,45 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 			City:       account.City,
 			Phone:      account.Phone,
 		},
-	}, nil
+	}
+}
+
+func (s *Sender) batRunner() func(context.Context, string) (int, string, error) {
+	if s.runBat != nil {
+		return s.runBat
+	}
+	return runBatFile
+}
+
+func (s *Sender) hasExeRunner() func(context.Context, string, string, string) (int, string, error) {
+	if s.runHasExe != nil {
+		return s.runHasExe
+	}
+	return runImporter
+}
+
+// render builds the order's DOC and the PRM that describes it, in the
+// configured layout (sendOrderFormat).
+func (s *Sender) render(hdr stockHeader, moves []stockMove) (doc, prm []byte, err error) {
+	if s.cfg.OrderFormat() == config.OrderFormatLegacy {
+		return generateLegacyDOC(hdr, moves), generateLegacyPRM(), nil
+	}
+	doc, err = generateDOC(hdr, moves)
+	if err != nil {
+		return nil, nil, err
+	}
+	return doc, generatePRM(), nil
+}
+
+// ValidateLayout refuses a request the configured layout cannot hold as
+// written (ValidateLegacyFit); the official layout adds no check here. The
+// route calls it before a number is reserved, the writer again for every
+// other caller. It returns a *FieldError or nil.
+func (s *Sender) ValidateLayout(req OrderRequest) error {
+	if s.cfg.OrderFormat() == config.OrderFormatLegacy {
+		return ValidateLegacyFit(req)
+	}
+	return nil
 }
 
 // writeOrderFile is os.WriteFile that says whether the file was opened: once
