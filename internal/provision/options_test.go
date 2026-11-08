@@ -114,3 +114,54 @@ func TestConfigDiff_NamesOptions(t *testing.T) {
 		t.Errorf("configDiff = %q", got)
 	}
 }
+
+// The bounds as literals: a constant that drifts (100000 is what the b4l box
+// runs) fails here, not on a box.
+func TestSpecValidate_OptionsBoundsExact(t *testing.T) {
+	orders := filepath.Join(os.TempDir(), "orders")
+	abs := filepath.Join(os.TempDir(), "images")
+	folders := make([]string, 16)
+	for i := range folders {
+		folders[i] = filepath.Join(abs, string(rune('a'+i)))
+	}
+	ok := []OptionsSpec{
+		{QueryMaxRows: ptr(100000)}, {QueryMaxRows: ptr(1)},
+		{QueryTimeoutSeconds: ptr(600)}, {QueryTimeoutSeconds: ptr(1)},
+		{ImageFolders: &folders},
+		{ERPUser: ptr(strings.Repeat("u", 64))},
+		{TokenTTL: ptr("5m")}, {TokenTTL: ptr("24h")},
+	}
+	bad := []OptionsSpec{
+		{QueryMaxRows: ptr(100001)}, {QueryTimeoutSeconds: ptr(601)},
+		{ImageFolders: ptr(append(slices.Clone(folders), filepath.Join(abs, "q")))},
+		{ERPUser: ptr(strings.Repeat("u", 65))},
+		{TokenTTL: ptr("4m59s")}, {TokenTTL: ptr("24h0m1s")},
+	}
+	for i, o := range ok {
+		s := handInstallSpec(orders)
+		s.Options = &o
+		if r := s.Validate(); r != nil {
+			t.Errorf("ok[%d] %+v refused: %v", i, o, r)
+		}
+	}
+	for i, o := range bad {
+		s := handInstallSpec(orders)
+		s.Options = &o
+		if r := s.Validate(); r == nil || r.Code != CodeSpecInvalid {
+			t.Errorf("bad[%d] got %v, want %s", i, r, CodeSpecInvalid)
+		}
+	}
+}
+
+// An image folder is stored trimmed and cleaned, so /api/folders/list matches
+// it however the spec spelled it.
+func TestBuildTarget_ImageFolderTrimmedAndCleaned(t *testing.T) {
+	orders := filepath.Join(os.TempDir(), "orders")
+	img := filepath.Join(os.TempDir(), "img")
+	s := handInstallSpec(orders)
+	s.Options = &OptionsSpec{ImageFolders: &[]string{"  " + img + string(filepath.Separator) + "  "}}
+	got := buildTarget(handInstallConfig(orders), s, t.TempDir(), DefaultLogin)
+	if !slices.Equal(got.ImageFolders, []string{img}) {
+		t.Errorf("imageFolders = %q, want %q", got.ImageFolders, []string{img})
+	}
+}
