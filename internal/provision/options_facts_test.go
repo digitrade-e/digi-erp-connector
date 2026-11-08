@@ -36,7 +36,7 @@ func TestConfigFacts_OptionsAsSet(t *testing.T) {
 	cfg.ERPUser = "39"
 	cfg.Debug = true
 	cfg.Queries = config.QueriesConfig{TimeoutSeconds: 120, MaxRows: 50000}
-	cfg.Auth.TokenTTL = " 1h "
+	cfg.Auth.TokenTTL = "1h"
 
 	o := configFacts(cfg, nil).Options
 	want := OptionsFacts{
@@ -90,5 +90,18 @@ func TestConfigFacts_OptionsWireShapeASCII(t *testing.T) {
 	}
 	if len(o.ImageFolders) != 1 || o.ImageFolders[0] != `D:\תמונות` {
 		t.Errorf("imageFolders = %q after the ASCII envelope, want the Hebrew name intact", o.ImageFolders)
+	}
+}
+
+// discover reports the lifetime the daemon honours: config.AuthConfig.TTL does
+// not trim and falls back to the default on anything it cannot parse.
+func TestConfigFacts_TokenTTLAsTheDaemonUsesIt(t *testing.T) {
+	for raw, want := range map[string]string{"": "", "1h": "1h", " 1h ": "", "abc": "", "0s": "", "-5m": ""} {
+		cfg := config.Default()
+		cfg.Auth.TokenTTL = raw
+		got := configFacts(cfg, nil).Options.TokenTTL
+		if got != want {
+			t.Errorf("tokenTTL %q: discover reports %q, want %q (the daemon uses %s)", raw, got, want, cfg.Auth.TTL())
+		}
 	}
 }

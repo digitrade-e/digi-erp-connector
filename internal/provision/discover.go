@@ -111,7 +111,8 @@ type ConfigFacts struct {
 
 // OptionsFacts mirrors OptionsSpec with the defaults written out: a zero
 // query limit is reported as the limit the daemon really applies. TokenTTL is
-// "" when unset (the daemon then uses config.DefaultTokenTTL).
+// "" when unset or when the daemon cannot use it (it then applies
+// config.DefaultTokenTTL).
 type OptionsFacts struct {
 	ImageFolders        []string `json:"imageFolders"`
 	ERPUser             string   `json:"erpUser"`
@@ -393,13 +394,20 @@ func optionsFacts(cfg config.Config) *OptionsFacts {
 	if maxRows <= 0 {
 		maxRows = queries.DefaultMaxRows
 	}
+	// The lifetime the daemon honours: config.AuthConfig.TTL parses the raw
+	// value and falls back to the default on anything else (" 1h ", "abc"),
+	// so such a value is reported as "" (the default), not as written.
+	ttl := ""
+	if d, err := time.ParseDuration(cfg.Auth.TokenTTL); err == nil && d > 0 {
+		ttl = cfg.Auth.TokenTTL
+	}
 	return &OptionsFacts{
 		ImageFolders:        folders,
 		ERPUser:             cfg.ERPUser,
 		Debug:               cfg.Debug,
 		QueryTimeoutSeconds: timeout,
 		QueryMaxRows:        maxRows,
-		TokenTTL:            strings.TrimSpace(cfg.Auth.TokenTTL),
+		TokenTTL:            ttl,
 	}
 }
 

@@ -73,7 +73,7 @@ GUI at all. A missing image folder is refused (`image_folder_missing`).
 `discover` reports the values the box holds now as `connector.config.options`
 (`imageFolders`, `erpUser`, `debug`, `queryTimeoutSeconds`, `queryMaxRows`,
 `tokenTTL`), with the daemon's defaults written out (30 s, 10000 rows) and
-`tokenTTL` `""` when unset, so a plan can show what each option was. A non-ASCII
+`tokenTTL` `""` when unset or when the daemon cannot use it (it then applies 30m), so a plan can show what each option was. A non-ASCII
 folder name comes back escaped as `\uXXXX`, like everything in the envelope.
 
 `hasParamFile` is passed to has.exe as written, and has.exe runs from `sendOrderDir`,
