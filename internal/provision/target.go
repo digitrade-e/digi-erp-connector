@@ -70,29 +70,7 @@ func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Confi
 	t.Auth.Username = s.Auth.Username
 	t.Auth.Password = s.Auth.Password
 
-	if o := s.Options; o != nil {
-		if o.ImageFolders != nil {
-			t.ImageFolders = make([]string, 0, len(*o.ImageFolders))
-			for _, d := range *o.ImageFolders {
-				t.ImageFolders = append(t.ImageFolders, filepath.Clean(strings.TrimSpace(d)))
-			}
-		}
-		if o.ERPUser != nil {
-			t.ERPUser = strings.TrimSpace(*o.ERPUser)
-		}
-		if o.Debug != nil {
-			t.Debug = *o.Debug
-		}
-		if o.QueryTimeoutSeconds != nil {
-			t.Queries.TimeoutSeconds = *o.QueryTimeoutSeconds
-		}
-		if o.QueryMaxRows != nil {
-			t.Queries.MaxRows = *o.QueryMaxRows
-		}
-		if o.TokenTTL != nil {
-			t.Auth.TokenTTL = strings.TrimSpace(*o.TokenTTL)
-		}
-	}
+	setOptions(&t, s.Options)
 
 	if s.TLS != nil {
 		switch s.TLS.Mode {
@@ -106,4 +84,33 @@ func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Confi
 		}
 	}
 	return t
+}
+
+// setOptions writes the options a spec gives onto t; a nil field keeps t's.
+// Shared by apply and the options command, so both store a value the same way.
+func setOptions(t *config.Config, o *OptionsSpec) {
+	if o == nil {
+		return
+	}
+	if o.ImageFolders != nil {
+		t.ImageFolders = make([]string, 0, len(*o.ImageFolders))
+		for _, d := range *o.ImageFolders {
+			t.ImageFolders = append(t.ImageFolders, filepath.Clean(strings.TrimSpace(d)))
+		}
+	}
+	if o.ERPUser != nil {
+		t.ERPUser = strings.TrimSpace(*o.ERPUser)
+	}
+	if o.Debug != nil {
+		t.Debug = *o.Debug
+	}
+	if o.QueryTimeoutSeconds != nil {
+		t.Queries.TimeoutSeconds = *o.QueryTimeoutSeconds
+	}
+	if o.QueryMaxRows != nil {
+		t.Queries.MaxRows = *o.QueryMaxRows
+	}
+	if o.TokenTTL != nil {
+		t.Auth.TokenTTL = strings.TrimSpace(*o.TokenTTL)
+	}
 }

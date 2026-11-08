@@ -372,6 +372,12 @@ func (a *applier) checkFilesExist() error {
 			return refuse(CodeImporterMissing, "name a file that exists (discover lists candidates)", "importer file %s is not on this machine", p)
 		}
 	}
+	return a.checkImageFolders()
+}
+
+// checkImageFolders refuses image folders the spec names that are not folders
+// on this machine. Folders the spec leaves alone are not checked.
+func (a *applier) checkImageFolders() error {
 	if a.s.Options != nil && a.s.Options.ImageFolders != nil {
 		for _, d := range a.tgt.ImageFolders {
 			if info, err := os.Stat(d); err != nil || !info.IsDir() {
@@ -956,12 +962,17 @@ func (a *applier) rollback() error {
 	if _, err := putBack(a.env, p); err != nil {
 		return err
 	}
-	var pw []byte
-	if a.dbPassword != "" {
-		pw = []byte(a.dbPassword)
-	}
-	if err := keepLoginPassword(a.env, a.tgt.DB.User, pw); err != nil {
-		return err
+	// A run that set no DB password (the options command) leaves the secret
+	// putBack restored exactly as it was: keepLoginPassword could only swap in
+	// an older login key.
+	if a.dbPassword != "" || a.rotated {
+		var pw []byte
+		if a.dbPassword != "" {
+			pw = []byte(a.dbPassword)
+		}
+		if err := keepLoginPassword(a.env, a.tgt.DB.User, pw); err != nil {
+			return err
+		}
 	}
 	if err := a.env.Sys.ProtectDataDir(); err != nil {
 		a.warn("the data directory could not be protected after the rollback: %v", err)
@@ -984,11 +995,13 @@ func (a *applier) rollback() error {
 }
 
 // keepLoginPassword makes the daemon's DB secret the current password of the
-// login the config on disk uses, when this box knows it: that login's own key
-// (loginKey, kept out of every pre-image), else before — the secret in use
-// until now — when userBefore is the same login. A credential only moves
-// forward: SQL Server knows no older password, and a restored one would lock
-// the connector out.
+// login the config on disk uses, when this box knows it: before — the secret
+// in use until now — when userBefore is the same login, else that login's own
+// key (loginKey, kept out of every pre-image). before wins for the same login:
+// the GUI re-types the DB secret and never updates loginKey, so the key can be
+// older than the secret SQL Server accepts. A credential only moves forward:
+// SQL Server knows no older password, and a restored one would lock the
+// connector out.
 func keepLoginPassword(env Env, userBefore string, before []byte) error {
 	b, err := os.ReadFile(filepath.Join(env.Sys.DataDir(), configFile))
 	if err != nil {
@@ -1002,7 +1015,7 @@ func keepLoginPassword(env Env, userBefore string, before []byte) error {
 	if !strings.EqualFold(cfg.DB.User, userBefore) {
 		pw = nil
 	}
-	if user := strings.ToLower(cfg.DB.User); loginNameRe.MatchString(user) {
+	if user := strings.ToLower(cfg.DB.User); pw == nil && loginNameRe.MatchString(user) {
 		if k, err := env.Sys.SecretGet(loginKey(user)); err == nil {
 			pw = k
 		}

@@ -33,6 +33,7 @@ const (
 const Usage = `usage:
   digi-erp-connector-provision discover [--spec -]      read the box (stdin: optional {"db":{...}} to fingerprint the named database)
   digi-erp-connector-provision apply [--check] --spec - make the connector match the spec on stdin; --check stops before the first write
+  digi-erp-connector-provision options [--check] --spec - set config.yaml options only (image folders, query limits, ...); no credential on stdin
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
   digi-erp-connector-provision version
@@ -109,6 +110,19 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		if res != nil {
 			secrets = append(secrets, res.secrets...)
 		}
+	case "options":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeOptions(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		result, err = ApplyOptions(ctx, env, in, check)
 	case "verify":
 		var in VerifyInput
 		if ok, u := readSpecFlag(rest); !u {

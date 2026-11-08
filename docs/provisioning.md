@@ -19,6 +19,7 @@ can run it the same way in an elevated PowerShell. The code is
 | `verify [--spec -]` | optional `{"expectVersion","firewallRule"}` | Checks the running connector against `config.yaml`: service, login, `/api/ping`, `/api/health`, the order queue, recovery, the SQL dependency, the firewall rule | nothing |
 | `restore <changeSet> [--assume-idle]` | none | Puts a change set's pre-image back and restarts on it | the pre-image's files, firewall rule, dependencies |
 | `apply --check --spec -` | the spec | Every check `apply` makes, its refusals included, then what it would change (`check`) | nothing |
+| `options [--check] --spec -` | `{"version":1,"changeSet","options":{…},"assumeIdle"?,"expect"?}` | Sets `options` (below) on a connector that is already configured, and nothing else: no credential, database, listener, firewall or service setting is read from stdin or changed | `config.yaml` |
 | `version` | none | Prints the build's version | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
@@ -173,6 +174,24 @@ Then:
     the restored config, or stopped (`rolledBack`).
 
 A second identical `apply` changes nothing: no write, no new password, no restart.
+
+## `options`: settings on a configured connector
+
+`apply` always restates the credential (`auth.password`), so a caller that does not hold
+the one in use would replace it and cut off whoever logs in with it now. `options`
+takes the `options` block alone, with the same bounds as the spec's, and carries no
+credential: an `auth` key on its stdin is refused as an unknown field.
+
+In order: the input's checks (at least one option, the bounds, the change set), the
+drift guard (`expect.configSha256`), the daemon's own startup check on the result, the
+image folders it names must exist (`image_folder_missing`); then, only when
+`config.yaml` would change, the order queue (`orders_pending`), the change set's
+pre-image, the write, and the restart with the port proved by the box's own
+credential. A failure after the pre-image puts it back. `restore <changeSet>` undoes
+it. Unchanged values write nothing, and restart only a running daemon older than the file
+(a hand edit it never loaded) when it runs; a stopped service stays stopped. `--check` stops before the first write and reports
+`check.config` and `check.restart`. No `config.yaml` is `config_refused`: run
+`apply` first.
 
 ## Refusals
 
