@@ -14,7 +14,7 @@ A Go application providing a local HTTP REST API gateway between the main app an
 Three binaries:
 - **`digi-erp-connectord`** — background daemon / Windows service; runs the REST API server
 - **`digi-erp-connector`** — Windows-only native UI (`walk` library) for config management and service control
-- **`digi-erp-connector-provision`** — headless discover / apply / verify / restore, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068, `docs/provisioning.md`)
+- **`digi-erp-connector-provision`** — headless discover / apply / options / verify / restore, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068, `docs/provisioning.md`)
 
 **Supported ERPs:** Hasavshevet (complete), SAP (price/stock query implemented), Priority (not implemented)
 **Primary target OS:** Windows. Linux supported for daemon only.

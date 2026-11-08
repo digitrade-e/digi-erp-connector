@@ -372,6 +372,12 @@ func (a *applier) checkFilesExist() error {
 			return refuse(CodeImporterMissing, "name a file that exists (discover lists candidates)", "importer file %s is not on this machine", p)
 		}
 	}
+	return a.checkImageFolders()
+}
+
+// checkImageFolders refuses image folders the spec names that are not folders
+// on this machine. Folders the spec leaves alone are not checked.
+func (a *applier) checkImageFolders() error {
 	if a.s.Options != nil && a.s.Options.ImageFolders != nil {
 		for _, d := range a.tgt.ImageFolders {
 			if info, err := os.Stat(d); err != nil || !info.IsDir() {
