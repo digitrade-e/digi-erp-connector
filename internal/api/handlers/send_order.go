@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
@@ -15,6 +18,13 @@ import (
 //
 // Using async processing means the HTTP response is returned immediately;
 // the caller does not block while IMOVEIN files are written and has.exe runs.
+//
+// historyId is the order's idempotency key (DIG-1291) when the queue has the
+// key index: a repeat answers 202 with the first jobId, the order's current
+// status and "replay": true, and writes nothing — except an order that failed
+// before any file was written, which it queues again under the same number
+// (status queued). An index entry that cannot be read answers 500
+// ORDER_INDEX_UNREADABLE — never 202, never a new number.
 //
 // ordersConfigured tells the handler whether this installation can process
 // orders at all — it needs erp: hasavshevet and a sendOrderDir. A node deployed
@@ -149,6 +159,13 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			Details:       details,
 		}
 
+		// Document fields (DIG-1295): checked here, before anything is
+		// reserved, so a bad one is a 400 and never a number given away.
+		if fe := applyDocumentFields(&orderReq, req); fe != nil {
+			respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
+			return
+		}
+
 		// Customer details supplied with the order skip the [dbo].[Accounts]
 		// lookup, which is what lets a connector with no database build orders.
 		if a := req.Account; a != nil {
@@ -163,18 +180,119 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			}
 		}
 
-		lastOrderNumber, err := queue.Submit(orderReq)
+		acc, err := queue.Accept(orderReq)
 		if err != nil {
-			respond.Error(w, http.StatusServiceUnavailable,
-				"Order queue full; try again later", "QUEUE_FULL", nil)
+			writeSendOrderError(w, err)
 			return
 		}
 
 		respond.JSON(w, http.StatusAccepted, dto.SendOrderAccepted{
-			Status: "queued",
-			JobID:  lastOrderNumber,
+			Status: string(acc.Status),
+			JobID:  acc.JobID,
+			Replay: acc.Replay,
 			Meta:   dto.SendOrderMeta{DurationMs: time.Since(start).Milliseconds()},
 		})
+	}
+}
+
+// applyDocumentFields parses the optional document fields of the wire request
+// into orderReq and validates them against the IMOVEIN widths. Each may be a
+// JSON number or a string; absent and null keep today's value. Anything else
+// — another kind of value, a sign, a fraction where a whole number belongs —
+// fails the digit checks and is refused with the field's name.
+func applyDocumentFields(orderReq *hasavshevet.OrderRequest, req dto.SendOrderRequest) *hasavshevet.FieldError {
+	wholeNumber := func(field string, raw json.RawMessage, dst *int) *hasavshevet.FieldError {
+		s, given := wireNumberText(raw)
+		if !given {
+			return nil
+		}
+		n, err := strconv.Atoi(s)
+		if !asciiDigits(s) || err != nil || n == 0 { // 0 would read as "absent"
+			return &hasavshevet.FieldError{Field: field, Reason: "must be a positive whole number"}
+		}
+		*dst = n
+		return nil
+	}
+	if fe := wholeNumber("documentId", req.DocumentID, &orderReq.DocumentID); fe != nil {
+		return fe
+	}
+	if fe := wholeNumber("warehouse", req.Warehouse, &orderReq.Warehouse); fe != nil {
+		return fe
+	}
+	if s, given := wireNumberText(req.VatPercent); given {
+		vat, err := hasavshevet.FormatVatPercent(s)
+		if err != nil {
+			var fe *hasavshevet.FieldError
+			if errors.As(err, &fe) {
+				return fe
+			}
+			return &hasavshevet.FieldError{Field: "vatPercent", Reason: "must be a VAT rate"}
+		}
+		orderReq.VatPercent = vat
+	}
+	if s, given := wireNumberText(req.Asmahta2); given {
+		if !asciiDigits(s) {
+			return &hasavshevet.FieldError{Field: "asmahta2", Reason: "must be digits only (the B2B cart id)"}
+		}
+		orderReq.Asmahta2 = s
+	}
+	if err := hasavshevet.ValidateDocumentFields(*orderReq); err != nil {
+		var fe *hasavshevet.FieldError
+		if errors.As(err, &fe) {
+			return fe
+		}
+		return &hasavshevet.FieldError{Field: "body", Reason: err.Error()}
+	}
+	return nil
+}
+
+// wireNumberText is the text a field was sent as: a JSON string's value, or
+// any other JSON value's literal ("31", "18.5", "true", "{}" — the callers'
+// digit checks refuse what is not a number). given is false for an absent
+// field or null.
+func wireNumberText(raw json.RawMessage) (text string, given bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+	var s string
+	if raw[0] == '"' && json.Unmarshal(raw, &s) == nil {
+		return s, true
+	}
+	return string(raw), true
+}
+
+func asciiDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// writeSendOrderError maps an Accept error to a status. Messages are fixed
+// text: the errors name files under the data directory (the queue logs them).
+func writeSendOrderError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, hasavshevet.ErrOrderIndexUnreadable):
+		// Only ever this key's own entry: recovery skips other damaged files.
+		respond.Error(w, http.StatusInternalServerError,
+			"The order index entry for this historyId cannot be read; nothing was queued and no number given until a person repairs it — see the connector log",
+			"ORDER_INDEX_UNREADABLE", nil)
+	case errors.Is(err, hasavshevet.ErrQueueFull), errors.Is(err, hasavshevet.ErrQueueClosed):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"Order queue full; try again later", "QUEUE_FULL", nil)
+	case errors.Is(err, hasavshevet.ErrOrderCounterUnreadable):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The order counter (lastOrderNumber.json) cannot be read; no new order is accepted until a person repairs it — see the connector log",
+			"ORDER_COUNTER_UNREADABLE", nil)
+	default:
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The order was not queued: the order index could not be written or recovered; nothing was reserved — retry with the same historyId (see the connector log)",
+			"ORDER_NOT_QUEUED", nil)
 	}
 }
 

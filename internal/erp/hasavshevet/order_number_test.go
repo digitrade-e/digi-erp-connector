@@ -1,7 +1,9 @@
 package hasavshevet
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -106,5 +108,102 @@ func TestOrderNumberStore_Concurrent(t *testing.T) {
 			t.Errorf("duplicate order number %d", n)
 		}
 		seen[n] = true
+	}
+}
+
+// Taking an order number for the key index is two steps — Peek, persist the
+// index entry that owns the number, advancePast — so a crash between them
+// leaves the entry ahead of the counter, never a number owned by nobody.
+func TestOrderNumberStore_PeekAndAdvancePast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lastOrderNumber.json")
+	store := NewOrderNumberStore(path)
+
+	// A missing counter is a fresh install: the first order is 1.
+	for i := 0; i < 2; i++ {
+		if n, err := store.Peek(); err != nil || n != 1 {
+			t.Fatalf("Peek on a missing counter = %d, %v; want 1 and no file written", n, err)
+		}
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Peek wrote the counter: %v", err)
+	}
+
+	if err := store.advancePast(1); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := store.Peek(); n != 2 {
+		t.Fatalf("Peek after advancePast(1) = %d; want 2", n)
+	}
+	// Never lowers: advancing past a number already behind it is a no-op.
+	before := readFile(t, path)
+	if err := store.advancePast(1); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, readFile(t, path)) {
+		t.Error("advancePast of a number already behind the counter rewrote it")
+	}
+	if err := store.advancePast(41); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := store.Next(); n != 42 {
+		t.Fatalf("Next after advancePast(41) = %d; want 42", n)
+	}
+	// The format stays the legacy one.
+	var f orderNumberFile
+	if err := json.Unmarshal(readFile(t, path), &f); err != nil || f.LastOrderNumber != 42 {
+		t.Fatalf("counter file = %s (%v); want {\"lastOrderNumber\": 42}", readFile(t, path), err)
+	}
+	// Written by atomic rename: no temp file is left beside it.
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	if len(entries) != 1 {
+		t.Errorf("the counter's folder holds %d entries; want only lastOrderNumber.json", len(entries))
+	}
+}
+
+// A counter that exists but cannot be read used to restart at 1 silently,
+// handing Hashavshevet order numbers it already has. Now every use refuses and
+// the file is left exactly as found; only a MISSING file starts at 1.
+func TestOrderNumberStore_UnreadableCounterRefuses(t *testing.T) {
+	for name, content := range map[string]string{
+		"not json":          `{`,
+		"empty":             ``,
+		"no number":         `{}`,
+		"null":              `{"lastOrderNumber": null}`,
+		"string":            `{"lastOrderNumber": "12"}`,
+		"fraction":          `{"lastOrderNumber": 1.5}`,
+		"negative":          `{"lastOrderNumber": -3}`,
+		"data after object": `{"lastOrderNumber": 3} {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "lastOrderNumber.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := NewOrderNumberStore(path)
+			if n, err := store.Peek(); !errors.Is(err, ErrOrderCounterUnreadable) {
+				t.Errorf("Peek = %d, %v; want ErrOrderCounterUnreadable", n, err)
+			}
+			if err := store.advancePast(5); !errors.Is(err, ErrOrderCounterUnreadable) {
+				t.Errorf("advancePast = %v; want ErrOrderCounterUnreadable", err)
+			}
+			if n, err := store.Next(); !errors.Is(err, ErrOrderCounterUnreadable) {
+				t.Errorf("Next = %d, %v; want ErrOrderCounterUnreadable", n, err)
+			}
+			if got := string(readFile(t, path)); got != content {
+				t.Errorf("the counter was rewritten to %q", got)
+			}
+		})
+	}
+}
+
+// The legacy Node app's file may carry other fields; they are ignored, as
+// before, and the number is continued.
+func TestOrderNumberStore_LegacyFileWithOtherFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lastOrderNumber.json")
+	if err := os.WriteFile(path, []byte(`{"lastOrderNumber": 1000294, "updatedAt": "2026-01-01"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := NewOrderNumberStore(path).Next(); err != nil || n != 1000295 {
+		t.Fatalf("Next = %d, %v; want 1000295", n, err)
 	}
 }

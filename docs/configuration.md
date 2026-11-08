@@ -85,7 +85,7 @@ all until these are set.
 
 | Key | Meaning |
 |---|---|
-| `sendOrderDir` | Working directory for `IMOVEIN.doc`/`.prm`. History copies go to `history/<orderNumber>/`, and `lastOrderNumber.json` lives here. |
+| `sendOrderDir` | Working directory for `IMOVEIN.doc`/`.prm`. History copies go to `history/<orderNumber>/`, and `lastOrderNumber.json` lives here. The `historyId` → order number index does not: it is in the data directory (`orders/index/`, DIG-1291). Back up both. |
 | `hasBatFile` | Masofon-generated BAT, e.g. `C:\Hash7\digi.bat`. **Takes precedence over `hasExePath`.** Run via `cmd.exe /C` from its own directory so relative paths inside it resolve. |
 | `hasExePath` | Path to `has.exe`, used when no BAT is configured. |
 | `hasParamFile` | Parameter file passed to `has.exe`. |

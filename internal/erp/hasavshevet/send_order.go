@@ -14,6 +14,22 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
 
+// ErrOrderNotWritten marks a processing error raised before the first order
+// file was opened for writing: nothing of the order is on disk and no importer
+// ran, so it may be tried again under the same number (the key index's
+// retryable state). Any error after that point may leave a file behind and is
+// final for its key. errors.Is finds it; the error's text is unchanged.
+var ErrOrderNotWritten = errors.New("order not written")
+
+type orderNotWrittenError struct{ err error }
+
+func (e *orderNotWrittenError) Error() string        { return e.err.Error() }
+func (e *orderNotWrittenError) Unwrap() error        { return e.err }
+func (e *orderNotWrittenError) Is(target error) bool { return target == ErrOrderNotWritten }
+
+// notWritten marks err as raised before any order file was written.
+func notWritten(err error) error { return &orderNotWrittenError{err: err} }
+
 // OrderRequest is the internal representation of a send-order request,
 // translated from the API DTO before enqueueing.
 // DBName is not part of the request; the Sender resolves it from config.
@@ -33,6 +49,15 @@ type OrderRequest struct {
 	// [dbo].[Accounts]. When set it is used as-is and no lookup happens, which
 	// is what lets a connector with no database build orders.
 	Account *AccountDetails
+
+	// Document fields (DIG-1295, document_fields.go): the tenant's
+	// erp-manager config for the IMOVEIN header. Zero / "" = today's value.
+	// omitempty keeps a request without them hashing as it did before them
+	// (orderRequestHash, the DIG-1291 index).
+	DocumentID int    `json:",omitempty"` // line4
+	Warehouse  int    `json:",omitempty"` // line12
+	VatPercent string `json:",omitempty"` // line18 text, e.g. "17.00"
+	Asmahta2   string `json:",omitempty"` // line8, digits; MyID (line3) stays the order number
 }
 
 // AccountDetails is the caller-supplied form of the account record: the columns
@@ -129,14 +154,17 @@ func (s *Sender) nextOrderNumber() (int64, error) {
 
 // processOrderWithNumber executes the full send-order flow using a pre-reserved
 // order number. If orderNum is zero, it reserves one before continuing.
+//
+// Every error until the first order file is opened for writing is marked
+// ErrOrderNotWritten (see there); from then on a file may exist.
 func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, orderNum int64) (*OrderResult, error) {
 	if strings.TrimSpace(s.cfg.SendOrderDir) == "" {
-		return nil, errors.New("sendOrderDir is not configured")
+		return nil, notWritten(errors.New("sendOrderDir is not configured"))
 	}
 
 	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field spec)
 	if err := validateOrderRequest(req); err != nil {
-		return nil, err
+		return nil, notWritten(err)
 	}
 
 	// 2. Concurrency-safe order number (reserved at queue submit when possible).
@@ -144,7 +172,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		var err error
 		orderNum, err = s.nextOrderNumber()
 		if err != nil {
-			return nil, err
+			return nil, notWritten(err)
 		}
 	}
 
@@ -155,7 +183,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	// 3. Account details: supplied by the caller, or looked up in the ERP database
 	account, err := s.resolveAccount(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, notWritten(err)
 	}
 
 	// 4. Currency rate (non-fatal; default 1.0 matches legacy behaviour)
@@ -172,7 +200,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	hdr, moves := buildIMOVEIN(orderNum, account, req, rate)
 	docBytes, err := generateDOC(hdr, moves)
 	if err != nil {
-		return nil, fmt.Errorf("generate DOC: %w", err)
+		return nil, notWritten(fmt.Errorf("generate DOC: %w", err))
 	}
 	prmBytes := generatePRM()
 
@@ -180,7 +208,7 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	dir := s.cfg.SendOrderDir
 	historyDir := filepath.Join(dir, "history", fmt.Sprintf("%d", orderNum))
 	if err := os.MkdirAll(historyDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create history dir: %w", err)
+		return nil, notWritten(fmt.Errorf("create history dir: %w", err))
 	}
 
 	// 7. Write files
@@ -198,8 +226,15 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 
 	var writtenFiles []string
 	for _, f := range toWrite {
-		if err := os.WriteFile(f.path, f.data, 0o644); err != nil {
-			return nil, fmt.Errorf("write %s: %w", f.path, err)
+		opened, err := writeOrderFile(f.path, f.data)
+		if err != nil {
+			err = fmt.Errorf("write %s: %w", f.path, err)
+			if !opened && len(writtenFiles) == 0 {
+				// IMOVEIN.doc could not even be opened (e.g. a sharing
+				// violation while the importer holds it): nothing is written.
+				return nil, notWritten(err)
+			}
+			return nil, err
 		}
 		writtenFiles = append(writtenFiles, f.path)
 	}
@@ -242,6 +277,20 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 	}, nil
 }
 
+// writeOrderFile is os.WriteFile that says whether the file was opened: once
+// it is (and truncated), a failed write may leave part of the order in it.
+func writeOrderFile(path string, data []byte) (opened bool, err error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return false, err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return true, err
+}
+
 // buildIMOVEIN maps a validated OrderRequest to the stockHeader + []stockMove
 // needed by generateDOC.
 func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate float64) (stockHeader, []stockMove) {
@@ -257,11 +306,12 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		discount = 99.99
 	}
 
-	// Document type → Hasavshevet header DocumentID code
+	// Document type → Hasavshevet header DocumentID code (today's rule; the
+	// request's document fields replace it below).
 	var headerDocID, wareHouse int
 	switch req.DocumentType {
 	case "ORDER":
-		wareHouse = 1
+		wareHouse = defaultWarehouse
 		if req.Currency == `ש"ח` {
 			headerDocID = 30
 		} else {
@@ -269,10 +319,24 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		}
 	case "QUOATE":
 		headerDocID = 40
-		wareHouse = 1
+		wareHouse = defaultWarehouse
 	case "RETURN":
 		headerDocID = 74
-		wareHouse = 1
+		wareHouse = defaultWarehouse
+	}
+	if req.DocumentID != 0 {
+		headerDocID = req.DocumentID
+	}
+	if req.Warehouse != 0 {
+		wareHouse = req.Warehouse
+	}
+	asmahta2 := fmt.Sprintf("%d", orderNum)
+	if req.Asmahta2 != "" {
+		asmahta2 = req.Asmahta2
+	}
+	vat := defaultVatPercent
+	if req.VatPercent != "" {
+		vat = req.VatPercent
 	}
 
 	hdr := stockHeader{
@@ -283,12 +347,12 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		Address:      sanitizeField(account.Address),
 		City:         sanitizeField(account.City),
 		Phone:        sanitizeField(account.Phone),
-		Asmahta2:     fmt.Sprintf("%d", orderNum),
+		Asmahta2:     asmahta2,
 		ShortDate:    shortDate,
 		Agent:        account.Agent,
 		WareHouse:    wareHouse,
 		DiscountPrcR: fmt.Sprintf("%.2f", discount),
-		VatPrc:       "18.00",
+		VatPrc:       vat,
 		Copies:       "1",
 		Currency:     req.Currency,
 		Rate:         fmt.Sprintf("%.4f", rate),
@@ -450,6 +514,10 @@ func validateOrderRequest(req OrderRequest) error {
 	case "ORDER", "QUOATE", "RETURN":
 	default:
 		return fmt.Errorf("invalid documentType %q; allowed: ORDER, QUOATE, RETURN", req.DocumentType)
+	}
+
+	if err := ValidateDocumentFields(req); err != nil {
+		return err
 	}
 
 	for i, d := range req.Details {
