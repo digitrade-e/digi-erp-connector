@@ -249,7 +249,8 @@ func (c Config) OrdersPickup() bool {
 
 // ValidateOrders — only when orders are configured (erp: hasavshevet and a
 // sendOrderDir; otherwise it accepts anything) — refuses an unknown
-// sendOrderFormat and, for model (a), a pickup folder that is relative, is the
+// sendOrderFormat and, for model (a), a pickup folder without an explicit
+// sendOrderFormat (the scheduler's PRM reads one layout), or one that is relative, is the
 // sendOrderDir or the sendReceiptDir, or holds the sendOrderDir (the counter
 // and the history copies, customer data, would sit in the folder the ERP's
 // scheduler reads — on a real install under a web root), and an order importer
@@ -271,6 +272,13 @@ func (c Config) ValidateOrders() error {
 	pickup := strings.TrimSpace(c.SendOrderPickupDir)
 	if pickup == "" {
 		return nil
+	}
+	// The scheduler reads with a PRM of its own, made for one layout; a pickup
+	// folder with the layout left to the default would hand BFL's
+	// legacy-layout PRM the official record (a garbled document in the books).
+	if strings.TrimSpace(c.SendOrderFormat) == "" {
+		return fmt.Errorf("sendOrderPickupDir is set but sendOrderFormat is not: name the layout the scheduler's PRM reads (%q or %q)",
+			OrderFormatOfficial, OrderFormatLegacy)
 	}
 	if !filepath.IsAbs(pickup) {
 		return fmt.Errorf("sendOrderPickupDir %q must be an absolute path", pickup)

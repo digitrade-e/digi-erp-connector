@@ -157,8 +157,10 @@ byte:
   included). The legacy's content quirks are not copied — it cut remarks at
   250 UTF-8 bytes (half a Hebrew letter makes iconv drop the field), turned a
   newline in a name into a space (here `. `), and rounded half up where Go's
-  `%.2f` rounds the binary value; a byte-compare with real legacy orders
-  (plan 075 P1-6) should expect those.
+  `%.2f` rounds the binary value; and its `iconv //TRANSLIT` spells some
+  symbols out (`©` → `(C)`) where the connector writes `?` — Hebrew, ASCII and
+  Windows-1255's own punctuation are identical. A byte-compare with real legacy
+  orders (plan 075 P1-6) should expect those.
 - A number the narrower fields would change is refused with `400
   VALIDATION_ERROR` naming the field (`vatPercent`, `discount`,
   `details[i].quantity|originalPrice|discount`) before a number is reserved,
@@ -239,13 +241,18 @@ Per order, under the single worker:
    there — the scheduler has its own — and no importer runs, whatever
    `hasExePath` says (receipts may use it).
 
-A pickup folder that cannot be read (missing, a share not there) fails the
-order before anything is written, so a repeat of its `historyId` queues it
-again under the same number once the folder is back. The connector never
-creates the pickup folder.
+A pickup folder that cannot be read (missing, a share not there) or takes no
+file (read-only, a write the ACL denies — probed with an empty temp file before
+the history copies) fails the order before anything is written, so a repeat of
+its `historyId` queues it again under the same number once the folder is
+fixed. Only the final no-replace rename can still fail after the history
+copies; that order is `failed` for good (troubleshooting.md § The order index).
+The connector never creates the pickup folder.
 
 Refused at start and at the GUI's save (`config.ValidateOrders`, only when
-orders are configured): a relative `sendOrderPickupDir`; one that is, or
+orders are configured): a `sendOrderPickupDir` without an explicit
+`sendOrderFormat` (the scheduler's PRM reads one layout — BFL's the legacy one —
+so the layout is never left to the default there); a relative one; one that is, or
 holds, `sendOrderDir`; one that is `sendReceiptDir` (`herp\receipts` beside
 `herp` is fine); `hasBatFile` or `hasParamFile` set beside it; a
 `sendOrderFormat` other than `official` / `legacy`. Unset, every install writes

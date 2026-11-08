@@ -26,23 +26,30 @@ func TestValidateOrders(t *testing.T) {
 		{"official", func(c *Config) { c.SendOrderFormat = "official" }, ""},
 		{"legacy", func(c *Config) { c.SendOrderFormat = "legacy" }, ""},
 		{"an unknown layout", func(c *Config) { c.SendOrderFormat = "Legacy" }, "sendOrderFormat"},
-		{"pickup", func(c *Config) { c.SendOrderPickupDir = herp }, ""},
+		{"pickup with the official layout", func(c *Config) { c.SendOrderPickupDir, c.SendOrderFormat = herp, "official" }, ""},
+		{"pickup without a layout", func(c *Config) { c.SendOrderPickupDir = herp }, "sendOrderFormat"},
 		{"pickup with legacy and has.exe for receipts", func(c *Config) {
 			c.SendOrderPickupDir, c.SendOrderFormat, c.HasExePath = herp, "legacy", `C:\Hash7\has.exe`
 		}, ""},
-		{"pickup relative", func(c *Config) { c.SendOrderPickupDir = "herp" }, "absolute"},
-		{"pickup is the order folder", func(c *Config) { c.SendOrderPickupDir = own + string(filepath.Separator) }, "holds the sendOrderDir"},
+		{"pickup relative", func(c *Config) { c.SendOrderPickupDir, c.SendOrderFormat = "herp", "legacy" }, "absolute"},
+		{"pickup is the order folder", func(c *Config) {
+			c.SendOrderPickupDir, c.SendOrderFormat = own+string(filepath.Separator), "legacy"
+		}, "holds the sendOrderDir"},
 		{"pickup holds the order folder", func(c *Config) {
-			c.SendOrderDir, c.SendOrderPickupDir = filepath.Join(herp, "connector"), herp
+			c.SendOrderDir, c.SendOrderPickupDir, c.SendOrderFormat = filepath.Join(herp, "connector"), herp, "legacy"
 		}, "holds the sendOrderDir"},
 		{"pickup is the receipt folder", func(c *Config) {
-			c.SendOrderPickupDir, c.SendReceiptDir = herp, filepath.Join(herp, ".")
+			c.SendOrderPickupDir, c.SendReceiptDir, c.SendOrderFormat = herp, filepath.Join(herp, "."), "legacy"
 		}, "sendReceiptDir"},
 		{"pickup beside its receipts subfolder", func(c *Config) {
-			c.SendOrderPickupDir, c.SendReceiptDir = herp, filepath.Join(herp, "receipts")
+			c.SendOrderPickupDir, c.SendReceiptDir, c.SendOrderFormat = herp, filepath.Join(herp, "receipts"), "legacy"
 		}, ""},
-		{"pickup and a BAT importer", func(c *Config) { c.SendOrderPickupDir, c.HasBatFile = herp, `C:\Hash7\digi.bat` }, "importer"},
-		{"pickup and a has.exe parameter file", func(c *Config) { c.SendOrderPickupDir, c.HasParamFile = herp, "digi_perm.bat" }, "importer"},
+		{"pickup and a BAT importer", func(c *Config) {
+			c.SendOrderPickupDir, c.HasBatFile, c.SendOrderFormat = herp, `C:\Hash7\digi.bat`, "legacy"
+		}, "importer"},
+		{"pickup and a has.exe parameter file", func(c *Config) {
+			c.SendOrderPickupDir, c.HasParamFile, c.SendOrderFormat = herp, "digi_perm.bat", "legacy"
+		}, "importer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := base
@@ -75,7 +82,7 @@ func TestValidateOrders_ANewOrderFolderUnderTheLinkedPickupFolder(t *testing.T) 
 	if err := os.Symlink(herp, link); err != nil {
 		t.Skipf("no symlinks here: %v", err)
 	}
-	c := Config{ERP: ERPHasavshevet, SendOrderDir: filepath.Join(link, "connector", "orders"), SendOrderPickupDir: herp}
+	c := Config{ERP: ERPHasavshevet, SendOrderDir: filepath.Join(link, "connector", "orders"), SendOrderPickupDir: herp, SendOrderFormat: "legacy"}
 	if err := c.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "holds the sendOrderDir") {
 		t.Fatalf("ValidateOrders = %v; want the pickup folder seen holding the (not yet created) sendOrderDir", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,7 +111,7 @@ func TestPickup_PublishesTheLegacyFileAndNothingElse(t *testing.T) {
 // layout publishes today's official bytes under the pickup name.
 func TestPickup_OfficialLayout(t *testing.T) {
 	tc := imoveinGoldenCases()[0]
-	s, _, pickup := pickupSender(t, "")
+	s, _, pickup := pickupSender(t, config.OrderFormatOfficial)
 	if _, err := s.processOrderWithNumber(context.Background(), tc.req, tc.number); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +188,30 @@ func TestPickup_UnreadableFolderIsRetryable(t *testing.T) {
 	}
 	if _, statErr := os.Stat(pickup); !os.IsNotExist(statErr) {
 		t.Error("the pickup folder was created; it is the scheduler's, a missing one must stay an error")
+	}
+}
+
+// A pickup folder that takes no file (read-only, a write the ACL denies) is
+// found before the history copies are written, so the order stays retryable
+// under its number instead of failing for good with only history on disk.
+func TestPickup_FolderThatTakesNoFileIsRetryable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod cannot make a folder unwritable on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only folder")
+	}
+	s, own, pickup := pickupSender(t, config.OrderFormatLegacy)
+	if err := os.Chmod(pickup, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pickup, 0o755) })
+	_, err := s.processOrderWithNumber(context.Background(), legacyRequestCases()[0].req, 5)
+	if err == nil || !errors.Is(err, ErrOrderNotWritten) {
+		t.Fatalf("processOrderWithNumber = %v; want an ErrOrderNotWritten", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(own, "history")); !os.IsNotExist(statErr) {
+		t.Errorf("history was written before the folder was found unwritable (err %v)", statErr)
 	}
 }
 

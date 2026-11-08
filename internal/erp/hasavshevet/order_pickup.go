@@ -37,7 +37,8 @@ func PickupFileName(documentType string, orderNum int64) string {
 // folder. It returns the files written, the published one first.
 //
 // Errors before the first history copy is opened are ErrOrderNotWritten (the
-// key may be retried under the same number). A number already taken in the
+// key may be retried under the same number) — among them a pickup folder that
+// cannot be read or takes no file. A number already taken in the
 // pickup folder is final: nothing is written, and writing under it would put
 // a second document under the same reference into the books.
 func (s *Sender) writePickup(req OrderRequest, orderNum int64, doc, prm []byte) ([]string, error) {
@@ -50,6 +51,13 @@ func (s *Sender) writePickup(req OrderRequest, orderNum int64, doc, prm []byte) 
 	}
 	if taken != "" {
 		return nil, fmt.Errorf("order number %d is already used in the pickup folder %s (%s): the order counter overlaps numbers written there by someone else — seed it past them; nothing was written", orderNum, pickupDir, taken)
+	}
+
+	// The folder must take a file before anything is written: a read-only
+	// folder or a write the ACL denies, found after the history copies, would
+	// make the number final for an order that never reached the scheduler.
+	if err := probeWritable(pickupDir, n); err != nil {
+		return nil, notWritten(fmt.Errorf("the pickup folder %s does not take a file: %w", pickupDir, err))
 	}
 
 	// The history copies live in the connector's own folder, never in the
@@ -87,6 +95,21 @@ func (s *Sender) writePickup(req OrderRequest, orderNum int64, doc, prm []byte) 
 		return nil, fmt.Errorf("publish %s: %w", dst, err)
 	}
 	return append([]string{dst}, written...), nil
+}
+
+// probeWritable creates and removes an empty file in dir under a name the
+// scheduler's imovein*.doc does not match (the same form as WriteNew's temp).
+func probeWritable(dir, n string) error {
+	f, err := os.CreateTemp(dir, ".IMOVEIN_"+n+".doc.tmp-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return os.Remove(name)
 }
 
 // pickupNumberTaken returns the name of a file in dir that already carries
