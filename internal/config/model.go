@@ -389,12 +389,25 @@ func canonicalDir(p string) string {
 	if abs, err := filepath.Abs(p); err == nil {
 		p = abs
 	}
-	// A folder that does not exist yet has nothing to resolve; its cleaned
-	// absolute form is what it will be.
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		p = resolved
+	// A folder that does not exist yet is resolved through its nearest
+	// existing ancestor, so it compares with the folders around it: that
+	// ancestor may be a link, or on Windows an 8.3 short name
+	// (C:\Users\RUNNER~1\…) that EvalSymlinks expands for an existing path only.
+	var rest []string
+	for dir := p; ; {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, rest[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p // nothing on the path exists: its cleaned absolute form is what it will be
+		}
+		rest = append(rest, filepath.Base(dir))
+		dir = parent
 	}
-	return p
 }
 
 func ErpValues() []ERPType {

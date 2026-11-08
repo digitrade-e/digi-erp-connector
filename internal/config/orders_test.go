@@ -61,6 +61,26 @@ func TestValidateOrders(t *testing.T) {
 	}
 }
 
+// A sendOrderDir that does not exist yet, under a pickup folder reached by
+// another name (a link here; on Windows an 8.3 short name like the CI's temp
+// folder), is still seen inside it: the path is resolved through its nearest
+// existing folder.
+func TestValidateOrders_ANewOrderFolderUnderTheLinkedPickupFolder(t *testing.T) {
+	root := t.TempDir()
+	herp := filepath.Join(root, "herp")
+	if err := os.MkdirAll(herp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "herp-link")
+	if err := os.Symlink(herp, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	c := Config{ERP: ERPHasavshevet, SendOrderDir: filepath.Join(link, "connector", "orders"), SendOrderPickupDir: herp}
+	if err := c.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "holds the sendOrderDir") {
+		t.Fatalf("ValidateOrders = %v; want the pickup folder seen holding the (not yet created) sendOrderDir", err)
+	}
+}
+
 // Keys on a connector that writes no orders never refuse: a stray line must
 // not stop a query-only node from starting.
 func TestValidateOrders_DormantKeysNeverRefuse(t *testing.T) {
