@@ -17,6 +17,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
+	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 )
 
 // DiscoverInput optionally carries a database credential, so Discover can
@@ -103,6 +104,21 @@ type ConfigFacts struct {
 	HasParamFile       string    `json:"hasParamFile,omitempty"`
 	HasBatFile         string    `json:"hasBatFile,omitempty"`
 	SendReceiptDir     string    `json:"sendReceiptDir,omitempty"`
+	// Options are the values OptionsSpec sets, as config.yaml holds them now,
+	// so a plan can show "was -> becomes" (plan 068 §13.5.1, contract 0).
+	Options *OptionsFacts `json:"options"`
+}
+
+// OptionsFacts mirrors OptionsSpec with the defaults written out: a zero
+// query limit is reported as the limit the daemon really applies. TokenTTL is
+// "" when unset (the daemon then uses config.DefaultTokenTTL).
+type OptionsFacts struct {
+	ImageFolders        []string `json:"imageFolders"`
+	ERPUser             string   `json:"erpUser"`
+	Debug               bool     `json:"debug"`
+	QueryTimeoutSeconds int      `json:"queryTimeoutSeconds"`
+	QueryMaxRows        int      `json:"queryMaxRows"`
+	TokenTTL            string   `json:"tokenTTL"`
 }
 
 // NetworkFacts are the listening sockets that matter here and the firewall.
@@ -353,6 +369,7 @@ func configFacts(cfg config.Config, raw []byte) *ConfigFacts {
 		HasParamFile:      cfg.HasParamFile,
 		HasBatFile:        cfg.HasBatFile,
 		SendReceiptDir:    cfg.SendReceiptDir,
+		Options:           optionsFacts(cfg),
 	}
 	if d := strings.TrimSpace(cfg.SendOrderDir); d != "" {
 		if info, err := os.Stat(d); err == nil && info.IsDir() {
@@ -360,6 +377,30 @@ func configFacts(cfg config.Config, raw []byte) *ConfigFacts {
 		}
 	}
 	return cf
+}
+
+// optionsFacts reports cfg's options with the daemon's defaults written out.
+func optionsFacts(cfg config.Config) *OptionsFacts {
+	folders := slices.Clone(cfg.ImageFolders)
+	if folders == nil {
+		folders = []string{}
+	}
+	timeout := cfg.Queries.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = int(queries.DefaultTimeout / time.Second)
+	}
+	maxRows := cfg.Queries.MaxRows
+	if maxRows <= 0 {
+		maxRows = queries.DefaultMaxRows
+	}
+	return &OptionsFacts{
+		ImageFolders:        folders,
+		ERPUser:             cfg.ERPUser,
+		Debug:               cfg.Debug,
+		QueryTimeoutSeconds: timeout,
+		QueryMaxRows:        maxRows,
+		TokenTTL:            strings.TrimSpace(cfg.Auth.TokenTTL),
+	}
 }
 
 func instanceFlags(in SQLInstance) []string {
