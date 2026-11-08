@@ -134,7 +134,43 @@ before DIG-1295).
   reported as changed.
 - Not here: BFL's legacy writes returns as `TMP_` drafts. That is a choice of
   file and import flow, not a header field, and waits on BFL's answer (plan 075
-  §8 Q6); nothing in these fields blocks it.
+  §8 Q6); nothing in these fields blocks it. Model (a) below names a return's
+  file `TMP_IMOVEIN_<n>.doc`, as the legacy does.
+
+### The legacy layout (DIG-1297) — `sendOrderFormat: legacy`
+
+The old Digitrade app writes IMOVEIN in a layout of its own, and a Hashavshevet
+scheduler set up beside it (BFL: WizSched with the static `imovein.prm` in
+`herp`) reads only that layout. `sendOrderFormat: legacy` writes it, byte for
+byte:
+
+- 37 of the fields 2–86 are written; each is the Windows-1255 value cut to its
+  width, padded with spaces, plus **one separator space**: **1296 bytes** + `\n`
+  per line. Widths differ from the official table (17: 6, 18: 4, 23: 9, 24: 9,
+  26: 6, 50–52: 12); 20, 21, 25, 27 (currency, rate), 33 (packs), 60 (VAT id),
+  79, 80 and 87 are absent; 13, 58 and 59 are written blank.
+- Its PRM lists fields 2–86 as `start end ;title` with the next start two past
+  the end, `0 0` for a field not written, and line 1 = `1297`, the next start.
+  Titles are the legacy's (line 69 carries a TAB).
+- Only the layout is the legacy's: what goes into each field is the request's,
+  built exactly as for the official layout (the document fields above
+  included). The legacy's content quirks are not copied — it cut remarks at
+  250 UTF-8 bytes (half a Hebrew letter makes iconv drop the field), turned a
+  newline in a name into a space (here `. `), and rounded half up where Go's
+  `%.2f` rounds the binary value; a byte-compare with real legacy orders
+  (plan 075 P1-6) should expect those.
+- A number the narrower fields would change is refused with `400
+  VALIDATION_ERROR` naming the field (`vatPercent`, `discount`,
+  `details[i].quantity|originalPrice|discount`) before a number is reserved,
+  and again by the writer. A cut that drops only trailing zeros after the point
+  keeps the number and passes: `18.00` is written `18.0`, exactly what the
+  legacy writes for 18 % VAT. Text fields are cut as the legacy cuts them.
+- Goldens: `internal/erp/hasavshevet/testdata/imovein-legacy/`, written by
+  **running** the legacy functions (`generate.php`, which lifts
+  `WriteDocSpaces`, `getHerpOrderConstantLengths`, `prepareForHerpDoc`,
+  `CreatePrmDoc` and `CreateMainDoc` out of the old app's `global_api.php` and
+  calls them on `cases.json`; `source.txt` pins the file). Regenerate, never
+  hand-edit.
 
 ---
 
@@ -167,6 +203,59 @@ Because orders are processed by a **single worker**, the sequence for each order
 
 This guarantees that `IMOVEIN.doc/.prm` always contain the current order when the
 importer runs, eliminating the race that caused only the last order to be imported.
+
+### Model (a) — `sendOrderPickupDir` (DIG-1297)
+
+When the ERP already has an importer watching a folder — BFL's WizSched reading
+`C:\xampp\htdocs\herp` beside the legacy app — a second `has.exe` from the
+connector would race it and overwrite its PRM. With `sendOrderPickupDir` set,
+the connector only leaves each order there for that importer (the receipts'
+model (a), A-2', DIG-929):
+
+```yaml
+sendOrderDir:       'C:\digi\orders'          # the connector's own: counter + history copies
+sendOrderPickupDir: 'C:\xampp\htdocs\herp'   # the scheduler's folder: one IMOVEIN_<n>.doc per order
+sendOrderFormat:    legacy                     # the layout that scheduler's imovein.prm describes
+# no hasBatFile / hasParamFile: the scheduler imports, the connector runs nothing
+```
+
+Per order, under the single worker:
+1. The number must be free in the pickup folder: no `IMOVEIN_<n>.*` or
+   `TMP_IMOVEIN_<n>.*` there, any case — someone's order waiting, its `.prm`, or
+   one already imported (Masofon renames it `<name>.….MASOFON2.BAK`). A used
+   number fails the order **for good** (`failed`, nothing written): writing
+   would put a second document under one reference into the books. It means the
+   counter overlaps another writer's numbers — seed it past them (plan 075
+   cutover). A file the scheduler moved away cannot be seen; the seed is what
+   keeps the ranges apart, this check only stops the mistake it can see.
+2. The history copies `history/<n>/IMOVEIN_<n>.doc` + `.prm` go to
+   `sendOrderDir` — never the pickup folder, which on a real install sits under
+   a web root.
+3. Last, `IMOVEIN_<n>.doc` (`TMP_IMOVEIN_<n>.doc` for a `RETURN`, the legacy's
+   name for its returns) appears in the pickup folder **whole and never over
+   another file**: written as `.IMOVEIN_<n>.doc.tmp-*` (which `imovein*.doc`
+   does not match) and renamed without replacing (`MoveFileEx` without
+   `MOVEFILE_REPLACE_EXISTING`; a hard link off Windows). No `.prm` is written
+   there — the scheduler has its own — and no importer runs, whatever
+   `hasExePath` says (receipts may use it).
+
+A pickup folder that cannot be read (missing, a share not there) fails the
+order before anything is written, so a repeat of its `historyId` queues it
+again under the same number once the folder is back. The connector never
+creates the pickup folder.
+
+Refused at start and at the GUI's save (`config.ValidateOrders`, only when
+orders are configured): a relative `sendOrderPickupDir`; one that is, or
+holds, `sendOrderDir`; one that is `sendReceiptDir` (`herp\receipts` beside
+`herp` is fine); `hasBatFile` or `hasParamFile` set beside it; a
+`sendOrderFormat` other than `official` / `legacy`. Unset, every install writes
+and imports exactly as before.
+
+The names follow the plan 056 survey of BFL's write node (2026-10-20): its
+receipt profile is the wildcard `kupain*.doc`, and `ImportLog` shows the order
+profile reading `herp\imovein_<n>.doc` with the static `imovein.prm`. Read
+`masofon.ini`'s `digitrade` and `digitrade_tmp` lines on the box before the
+first live order (plan 075 P1-6; BFL §8 Q4).
 
 ---
 

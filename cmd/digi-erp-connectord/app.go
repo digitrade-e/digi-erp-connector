@@ -332,6 +332,13 @@ func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, log logg
 	if !cfg.OrdersConfigured() {
 		return queue
 	}
+	if cfg.OrdersPickup() {
+		log.Info(fmt.Sprintf("orders: model a — one IMOVEIN_<n>.doc per order left in %s for the ERP's scheduler, no importer run; layout %s",
+			strings.TrimSpace(cfg.SendOrderPickupDir), cfg.OrderFormat()))
+	} else {
+		log.Info(fmt.Sprintf("orders: IMOVEIN.doc/.prm in %s, then the configured importer; layout %s",
+			strings.TrimSpace(cfg.SendOrderDir), cfg.OrderFormat()))
+	}
 	queue.UseKeyIndex(dataDir)
 	if err := queue.Recover(); err != nil {
 		log.Error("order index recovery failed; sendOrder answers an error until it succeeds", err)
