@@ -104,6 +104,12 @@ type ConfigFacts struct {
 	HasParamFile       string    `json:"hasParamFile,omitempty"`
 	HasBatFile         string    `json:"hasBatFile,omitempty"`
 	SendReceiptDir     string    `json:"sendReceiptDir,omitempty"`
+	// SendOrderPickupDir and SendOrderFormat are the order model and layout
+	// (DIG-1297). The spec does not set them (an apply keeps them); they are
+	// reported so a plan sees a box that relies on them — a build older than
+	// DIG-1297 ignores both and would write orders nobody imports.
+	SendOrderPickupDir string `json:"sendOrderPickupDir,omitempty"`
+	SendOrderFormat    string `json:"sendOrderFormat,omitempty"`
 	// Options are the values OptionsSpec sets, as config.yaml holds them now,
 	// so a plan can show "was -> becomes" (plan 068 §13.5.1, contract 0).
 	Options *OptionsFacts `json:"options"`
@@ -313,7 +319,9 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 			defect(DefectSaLogin, "move to a least-privilege login (leastPrivilege)",
 				"the connector logs in as sa: every saved query runs as the server's administrator")
 		}
-		if cfg.ERP == config.ERPHasavshevet && strings.TrimSpace(cfg.SendOrderDir) != "" &&
+		// A pickup folder (model a, DIG-1297) is imported by the ERP's own
+		// scheduler: that box has its importer.
+		if cfg.ERP == config.ERPHasavshevet && strings.TrimSpace(cfg.SendOrderDir) != "" && !cfg.OrdersPickup() &&
 			strings.TrimSpace(cfg.HasExePath) == "" && strings.TrimSpace(cfg.HasBatFile) == "" {
 			defect(DefectNoImporter, "name has.exe and its parameter file, or the BAT (importerCandidates)",
 				"orders are written to %s but nothing imports them into Hasavshevet", cfg.SendOrderDir)
@@ -352,25 +360,27 @@ func configFacts(cfg config.Config, raw []byte) *ConfigFacts {
 		return "set"
 	}
 	cf := &ConfigFacts{
-		SHA256:            hex.EncodeToString(sum[:]),
-		ERP:               string(cfg.ERP),
-		APIListen:         cfg.APIListen,
-		TLS:               cfg.TLS.Enabled(),
-		DBHost:            cfg.DB.Host,
-		DBPort:            cfg.DB.Port,
-		Database:          cfg.DB.Database,
-		DBUser:            cfg.DB.User,
-		DBEncrypt:         cfg.DB.Encrypt,
-		DBTrustServerCert: cfg.DB.TrustServerCertificate,
-		AuthUsername:      cfg.Auth.Username,
-		AuthPassword:      setOrMissing(cfg.Auth.Password),
-		AuthSecret:        setOrMissing(cfg.Auth.Secret),
-		SendOrderDir:      cfg.SendOrderDir,
-		HasExePath:        cfg.HasExePath,
-		HasParamFile:      cfg.HasParamFile,
-		HasBatFile:        cfg.HasBatFile,
-		SendReceiptDir:    cfg.SendReceiptDir,
-		Options:           optionsFacts(cfg),
+		SHA256:             hex.EncodeToString(sum[:]),
+		ERP:                string(cfg.ERP),
+		APIListen:          cfg.APIListen,
+		TLS:                cfg.TLS.Enabled(),
+		DBHost:             cfg.DB.Host,
+		DBPort:             cfg.DB.Port,
+		Database:           cfg.DB.Database,
+		DBUser:             cfg.DB.User,
+		DBEncrypt:          cfg.DB.Encrypt,
+		DBTrustServerCert:  cfg.DB.TrustServerCertificate,
+		AuthUsername:       cfg.Auth.Username,
+		AuthPassword:       setOrMissing(cfg.Auth.Password),
+		AuthSecret:         setOrMissing(cfg.Auth.Secret),
+		SendOrderDir:       cfg.SendOrderDir,
+		HasExePath:         cfg.HasExePath,
+		HasParamFile:       cfg.HasParamFile,
+		HasBatFile:         cfg.HasBatFile,
+		SendReceiptDir:     cfg.SendReceiptDir,
+		SendOrderPickupDir: cfg.SendOrderPickupDir,
+		SendOrderFormat:    cfg.SendOrderFormat,
+		Options:            optionsFacts(cfg),
 	}
 	if d := strings.TrimSpace(cfg.SendOrderDir); d != "" {
 		if info, err := os.Stat(d); err == nil && info.IsDir() {
