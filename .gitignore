@@ -70,3 +70,10 @@ Thumbs.db
 # =========================
 coverage.*
 *.coverprofile
+
+# Binaries built in the tree by `go build ./cmd/...` (one was committed by
+# mistake in DIG-1297's 787fde7 and removed in the next commit).
+/digi-erp-connectord
+/digi-erp-connector
+/digi-erp-connector-provision
+/cutover-seed

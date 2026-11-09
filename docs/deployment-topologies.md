@@ -41,6 +41,15 @@ backend ─────────┤                   ├─ saved queries, p
 
 The backend simply points at two base URLs.
 
+> **Since DIG-1297 (model a):** where the importer already running on the write
+> node is the ERP's own scheduler (BFL: WizSched reading `herp`), point
+> `sendOrderPickupDir` at that folder (with `sendOrderFormat: legacy` for BFL's
+> legacy PRM) and give `sendOrderDir` a folder of its own, outside the web root:
+> the connector then leaves one `IMOVEIN_<n>.doc` per order there and runs no
+> importer. The `sendOrderDir = herp` lines in this page describe the connector
+> writing the fixed `IMOVEIN.doc` and running the importer itself.
+> [hasavshevet-send-order.md § Model (a)](hasavshevet-send-order.md#model-a--sendorderpickupdir-dig-1297)
+
 ### Why this beats a file share
 
 The obvious alternative is to keep one connector on the database server and have

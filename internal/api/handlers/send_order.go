@@ -166,6 +166,18 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			return
 		}
 
+		// The layout this connector writes (sendOrderFormat legacy, DIG-1297)
+		// may be narrower than a number: refused here too, never cut.
+		if err := queue.ValidateLayout(orderReq); err != nil {
+			field := "body"
+			var fe *hasavshevet.FieldError
+			if errors.As(err, &fe) {
+				field = fe.Field
+			}
+			respond.Error(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR", map[string]any{"field": field})
+			return
+		}
+
 		// Customer details supplied with the order skip the [dbo].[Accounts]
 		// lookup, which is what lets a connector with no database build orders.
 		if a := req.Account; a != nil {

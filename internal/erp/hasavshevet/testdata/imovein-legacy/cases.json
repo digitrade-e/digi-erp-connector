@@ -1,0 +1,178 @@
+[
+ {
+  "name": "order",
+  "stock": {
+   "MyId": 100001,
+   "Status": 1,
+   "DocumentID": "31",
+   "AccountKey": "40217",
+   "AccountName": "לקוח בדיקה בע\"מ",
+   "Address": "הרצל 1. קומה 2",
+   "City": "חיפה",
+   "Phone": "04-1234567",
+   "Asmahta2": 4711,
+   "ShortDate": "05/11/2026",
+   "Agent": "7",
+   "WareHouse": 81,
+   "DiscountPrcR": "5.00",
+   "VatPrc": "18.00",
+   "Copies": "1",
+   "Remarks": "הערה ללקוח. שורה שנייה|הערת מנהל",
+   "Hp": "514000000",
+   "ExtraText1": "",
+   "ExtraText2": "",
+   "ExtraText3": "",
+   "ExtraText4": "",
+   "ExtraText5": "",
+   "ExtraSum1": "",
+   "ExtraSum2": "",
+   "ExtraSum3": "",
+   "ExtraNum1": "",
+   "ExtraNum2": ""
+  },
+  "moves": [
+   {
+    "ItemKey": "1001",
+    "Quantity": "2.00",
+    "Price": "75.00",
+    "DiscountPrc": "6.50",
+    "ItemName": "מוצר א",
+    "Unit": "יח'"
+   },
+   {
+    "ItemKey": "SKU-2002",
+    "Quantity": "1.50",
+    "Price": "10.00",
+    "DiscountPrc": "0.00",
+    "ItemName": "Widget B – 5₪",
+    "Unit": "יח'"
+   }
+  ]
+ },
+ {
+  "name": "quote",
+  "stock": {
+   "MyId": 100002,
+   "Status": 1,
+   "DocumentID": "40",
+   "AccountKey": "40217",
+   "AccountName": "לקוח בדיקה בע\"מ",
+   "Address": "הרצל 1. קומה 2",
+   "City": "חיפה",
+   "Phone": "04-1234567",
+   "Asmahta2": 4712,
+   "ShortDate": "05/11/2026",
+   "Agent": "7",
+   "WareHouse": 8,
+   "DiscountPrcR": "0.00",
+   "VatPrc": "18.00",
+   "Copies": "1",
+   "Remarks": "",
+   "Hp": "514000000",
+   "ExtraText1": "",
+   "ExtraText2": "",
+   "ExtraText3": "",
+   "ExtraText4": "",
+   "ExtraText5": "",
+   "ExtraSum1": "",
+   "ExtraSum2": "",
+   "ExtraSum3": "",
+   "ExtraNum1": "",
+   "ExtraNum2": ""
+  },
+  "moves": [
+   {
+    "ItemKey": "1001",
+    "Quantity": "10.00",
+    "Price": "70.00",
+    "DiscountPrc": "0.00",
+    "ItemName": "מוצר א",
+    "Unit": "יח'"
+   }
+  ]
+ },
+ {
+  "name": "return",
+  "stock": {
+   "MyId": 100003,
+   "Status": 0,
+   "DocumentID": "74",
+   "AccountKey": "40217",
+   "AccountName": "לקוח בדיקה בע\"מ",
+   "Address": "הרצל 1. קומה 2",
+   "City": "חיפה",
+   "Phone": "04-1234567",
+   "Asmahta2": 4713,
+   "ShortDate": "05/11/2026",
+   "Agent": "7",
+   "WareHouse": 8,
+   "DiscountPrcR": "0.00",
+   "VatPrc": "18.00",
+   "Copies": "1",
+   "Remarks": "החזרה",
+   "Hp": "514000000",
+   "ExtraText1": "",
+   "ExtraText2": "",
+   "ExtraText3": "",
+   "ExtraText4": "",
+   "ExtraText5": "",
+   "ExtraSum1": "",
+   "ExtraSum2": "",
+   "ExtraSum3": "",
+   "ExtraNum1": "",
+   "ExtraNum2": ""
+  },
+  "moves": [
+   {
+    "ItemKey": "1001",
+    "Quantity": "-1.00",
+    "Price": "75.00",
+    "DiscountPrc": "0.00",
+    "ItemName": "החזרה",
+    "Unit": "יח'"
+   }
+  ]
+ },
+ {
+  "name": "overflow",
+  "stock": {
+   "MyId": 999999999,
+   "Status": 1,
+   "DocumentID": "31",
+   "AccountKey": "40217",
+   "AccountName": "אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא",
+   "Address": "רחוב ארוך מאוד רחוב ארוך מאוד רחוב ארוך מאוד רחוב ארוך מאוד ",
+   "City": "קרית ביאליק",
+   "Phone": "+972-4-1234567 / 050-1234567 שלוחה 12",
+   "Asmahta2": 123456789,
+   "ShortDate": "05/11/2026",
+   "Agent": "123456789",
+   "WareHouse": 999999999,
+   "DiscountPrcR": "99.99",
+   "VatPrc": "18.00",
+   "Copies": "1",
+   "Remarks": "בבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבב",
+   "Hp": "514000000",
+   "ExtraText1": "",
+   "ExtraText2": "",
+   "ExtraText3": "",
+   "ExtraText4": "",
+   "ExtraText5": "",
+   "ExtraSum1": "",
+   "ExtraSum2": "",
+   "ExtraSum3": "",
+   "ExtraNum1": "",
+   "ExtraNum2": ""
+  },
+  "moves": [
+   {
+    "ItemKey": "ABCDEFGHIJ0123456789",
+    "Quantity": "123456.00",
+    "Price": "99999.99",
+    "DiscountPrc": "100.00",
+    "ItemName": "שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך שם פריט ארוך ",
+    "Unit": "יח'"
+   }
+  ]
+ }
+]

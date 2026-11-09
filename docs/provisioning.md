@@ -101,6 +101,19 @@ receipts, image folders, query limits, `erpUser`, the token lifetime, the signin
 secret — stays as it was. Orders with no importer must still say `{"mode":"none"}`:
 `apply` refuses to leave it unstated (`importer_required`).
 
+**Model (a) boxes (DIG-1297).** The spec cannot set `sendOrderPickupDir` or
+`sendOrderFormat`; set them in config.yaml by hand. An apply keeps them (the
+target starts from the current config) and must say `{"mode":"none"}` for the
+importer; `CheckConfig` refuses a spec that would put an order importer beside
+a pickup folder. Discover reports both keys in the config facts and calls no
+`no_importer` defect there (the ERP's scheduler imports). **Never downgrade
+such a box to a build older than DIG-1297 with the keys in place:** an old
+build ignores them, writes the fixed `IMOVEIN.doc` into `sendOrderDir` with no
+importer and answers `done`, so the order never reaches the books. Remove the
+keys (and restore an importer) first, or upgrade only. Moving `sendOrderDir`
+off the scheduler's folder by hand must carry `lastOrderNumber.json` along
+(only an apply does that for you).
+
 **The least-privilege login is given a password only when that is safe.** It is
 created when it does not exist, and its password is kept in its own DPAPI entry
 (`secrets\login_<name>.bin`), which no pre-image holds. A login that works with a

@@ -89,6 +89,8 @@ all until these are set.
 | `hasBatFile` | Masofon-generated BAT, e.g. `C:\Hash7\digi.bat`. **Takes precedence over `hasExePath`.** Run via `cmd.exe /C` from its own directory so relative paths inside it resolve. |
 | `hasExePath` | Path to `has.exe`, used when no BAT is configured. |
 | `hasParamFile` | Parameter file passed to `has.exe`. |
+| `sendOrderPickupDir` | **Model (a)** (DIG-1297): each order is left as one `IMOVEIN_<n>.doc` (`TMP_IMOVEIN_<n>.doc` for a return) in this folder for the ERP's own scheduler; no `.prm` there, no importer, never over an existing file, and a number already used there fails the order. Counter and history stay in `sendOrderDir`. **Needs an explicit `sendOrderFormat`; absolute; not, and not holding, `sendOrderDir`; not `sendReceiptDir`; refused with `hasBatFile` / `hasParamFile`** — the daemon will not start and the GUI will not save. Omitted when unset (today's model). [hasavshevet-send-order.md § Model (a)](hasavshevet-send-order.md#model-a--sendorderpickupdir-dig-1297) |
+| `sendOrderFormat` | IMOVEIN layout: `official` (default when omitted — Hashavshevet's 2891-byte record) or `legacy` (the old Digitrade app's layout, for a scheduler whose PRM was made for it). Anything else is refused. A number the legacy layout's narrower fields would change is a 400. [§ The legacy layout](hasavshevet-send-order.md#the-legacy-layout-dig-1297--sendorderformat-legacy) |
 
 Leave both `hasBatFile` and `hasExePath` empty and the files are still written but
 nothing imports them — occasionally useful for diagnosis.

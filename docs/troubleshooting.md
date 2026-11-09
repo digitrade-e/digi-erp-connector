@@ -189,6 +189,16 @@ written. One caveat: if something other than the connector imports
 `IMOVEIN.doc` from `sendOrderDir` on its own (no `hasBatFile` / `hasExePath`
 configured), check Hashavshevet (Asmahta `n`) in every case below.
 
+**Model (a)** (`sendOrderPickupDir`, DIG-1297): the history copy is written
+*before* the order is published into the pickup folder, so it only proves the
+order was built. What the scheduler can import is `IMOVEIN_<n>.doc` (or
+`TMP_IMOVEIN_<n>.doc`) in the pickup folder, or, once imported, its
+`*.MASOFON2.BAK`. Look there and in Hashavshevet (Asmahta `n`) before treating
+an order with a history copy as written — and never set `retryable` while
+either exists. Neither there nor in Hashavshevet, with `history\<n>` present:
+the publish failed; `retryable` is safe only after confirming no other key holds
+`n` (below).
+
 ### A damaged order index entry
 
 1. Read the file and the log to learn its `historyId` and number `n`.

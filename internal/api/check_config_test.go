@@ -26,6 +26,22 @@ func TestCheckConfigRefusesWhatNewServerRefuses(t *testing.T) {
 			dir := t.TempDir()
 			c.SendOrderDir, c.SendReceiptDir = dir, dir
 		}},
+		{"an unknown order layout", func(c *config.Config) {
+			c.ERP, c.SendOrderDir, c.SendOrderFormat = config.ERPHasavshevet, t.TempDir(), "fixed"
+		}},
+		{"the pickup folder is the order folder", func(c *config.Config) {
+			c.ERP = config.ERPHasavshevet
+			dir := t.TempDir()
+			c.SendOrderDir, c.SendOrderPickupDir, c.SendOrderFormat = dir, dir, config.OrderFormatLegacy
+		}},
+		{"a pickup folder without a layout", func(c *config.Config) {
+			c.ERP, c.SendOrderDir, c.SendOrderPickupDir = config.ERPHasavshevet, t.TempDir(), t.TempDir()
+		}},
+		{"a pickup folder and an order importer", func(c *config.Config) {
+			c.ERP, c.SendOrderDir, c.SendOrderPickupDir = config.ERPHasavshevet, t.TempDir(), t.TempDir()
+			c.SendOrderFormat = config.OrderFormatLegacy
+			c.HasBatFile = filepath.Join(t.TempDir(), "digi.bat")
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

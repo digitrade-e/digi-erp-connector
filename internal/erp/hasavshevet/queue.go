@@ -352,6 +352,17 @@ func (q *OrderQueue) Submit(req OrderRequest) (string, error) {
 // reserved, and two requests with one key could both miss the index. Only
 // Accept sends on ch, so a free slot seen under closeMu is still free at the
 // send.
+// ValidateLayout is the sender's ValidateLayout: whether the configured IMOVEIN
+// layout (sendOrderFormat) can hold req as written. The route calls it before
+// Accept, so a request it refuses is a 400 and never a number given away. nil
+// for a queue without a sender.
+func (q *OrderQueue) ValidateLayout(req OrderRequest) error {
+	if q == nil || q.sender == nil {
+		return nil
+	}
+	return q.sender.ValidateLayout(req)
+}
+
 func (q *OrderQueue) Accept(req OrderRequest) (Acceptance, error) {
 	q.closeMu.Lock()
 	defer q.closeMu.Unlock()
