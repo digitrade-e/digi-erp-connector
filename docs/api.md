@@ -5,9 +5,9 @@ Base URL: `http(s)://<apiListen>` (default `127.0.0.1:8080`). HTTP by default;
 whenever the backend is on another machine — see
 [configuration.md](configuration.md#tls) and [security.md](security.md).
 
-Every `/api/*` route requires `Authorization: Bearer <credential>` and is
-rate-limited per client IP (25 req/s, burst 50 → `429 RATE_LIMITED`). Rate
-limiting is applied **before** authentication.
+Every `/api/*` route requires `Authorization: Bearer <credential>`. Only
+`POST /auth/token` is rate-limited per client IP (25 req/s, burst 50 →
+`429 RATE_LIMITED`); the `/api/*` routes carry no limit since 2026-11-10.
 
 The credential is a token obtained from `POST /auth/token` by posting the
 configured username and password. There is no static API token. See
@@ -109,7 +109,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `UNAUTHORIZED` | 401 | Missing, malformed, wrong or expired token. No distinction between the cases, by design. |
 | `INVALID_CREDENTIALS` | 401 | `POST /auth/token` refused the username/password, or could not parse the body. |
 | `TOKEN_ISSUE_FAILED` | 500 | Credentials were right but signing the token failed. No known trigger. |
-| `RATE_LIMITED` | 429 | Per-IP bucket exhausted. Applied before auth. |
+| `RATE_LIMITED` | 429 | `POST /auth/token` only: its per-IP bucket is exhausted. |
 | `NOT_FOUND` | 404 | Unknown route, saved query, or job id. |
 | `INVALID_JSON` | 400 | Unparseable body, or trailing data after the JSON document. |
 | `NAME_REQUIRED` | 400 | Saved-query name empty, too long (>200), or contains a control character, `/` or `\`. |

@@ -49,23 +49,27 @@ Every route is wrapped in the same chain, outermost first
 ```
 request
   └─ Logging      method, path, status, duration — never the token or DB password
+      └─ Auth       a token this installation issued → 401 UNAUTHORIZED
+          └─ handler
+
+POST /auth/token
+  └─ Logging
       └─ RateLimit  per-IP token bucket, 25 rps / burst 50 → 429 RATE_LIMITED
-          └─ Auth     a token this installation issued → 401 UNAUTHORIZED
-              └─ handler
+          └─ the credential check
 ```
 
 `POST /auth/token` is the one route outside the Auth step — it *is* the
-credential check — but it keeps Logging and RateLimit. The Auth step compares the
+credential check — and the one route that keeps RateLimit. The Auth step compares the
 presented credential as an HS256 token this installation signed. There is no
 second credential and no fallback; every failure is the same flat 401.
 
-Rate limiting sits **before** auth deliberately: an unauthenticated flood is
-exactly what you want to shed cheaply, and it means brute-forcing the token is
-also rate-limited.
+Rate limiting guards the credential exchange only, so a flood of password
+guesses is shed cheaply. The data routes were limited too until 2026-11-10 (Ilya, 2026-11-10: a per-IP limit capped online price and stock for every buyer of a shop at once; the load on the client's SQL Server is the client's to size).
 
-Server timeouts are set on `http.Server`: 5s read-header, 10s read, 60s write,
-60s idle. The write timeout is 60s because a saved query may legitimately run for
-`queries.timeoutSeconds` (default 30s).
+Server timeouts are set on `http.Server`: 5s read-header, 10s read, 60s idle,
+and a write timeout of `queries.timeoutSeconds` + 30s with a floor of 60s, so the
+slowest query a config allows (up to 600s) can answer; a fixed 60s cut longer ones
+mid-response until 2026-11-10.
 
 ## Packages
 

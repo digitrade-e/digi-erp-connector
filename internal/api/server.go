@@ -23,8 +23,11 @@ import (
 )
 
 const (
-	// Rate limiting protects the SQL and file endpoints from runaway callers.
-	// Generous limits: the API serves a single trusted backend on localhost.
+	// Rate limiting guards the credential exchange only: a flood of password
+	// guesses is shed before the comparison. The data routes are not limited
+	// (Ilya, 2026-11-10, Digitrade plan 083 §13): a per-IP limit capped online
+	// price and stock for every buyer of a shop at once, and the load on the
+	// client's SQL Server is the client's to size.
 	rateLimitPerSecond = 25
 	rateLimitBurst     = 50
 )
@@ -120,7 +123,7 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		return middleware.Logging(deps.Logger, cfg.Debug, h)
 	}
 	wrap := func(h http.Handler) http.Handler {
-		return withLog(limiter.Middleware(withAuth(h)))
+		return withLog(withAuth(h))
 	}
 
 	queryTimeout := time.Duration(cfg.Queries.TimeoutSeconds) * time.Second
@@ -146,8 +149,8 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	// touch, unlike /api/health.
 	mux.Handle("GET /api/ping", wrap(handlers.NewPingHandler()))
 
-	// The credential exchange cannot itself require a credential. It is still
-	// logged and rate-limited.
+	// The credential exchange cannot itself require a credential. It is
+	// logged and, alone of all routes, rate-limited.
 	mux.Handle("POST /auth/token", withLog(limiter.Middleware(
 		handlers.NewTokenHandler(cfg.Auth, signer, deps.Logger))))
 
@@ -180,7 +183,7 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      writeTimeout(queryTimeout),
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -260,4 +263,14 @@ func validateListenAddr(addr string) error {
 
 func NotFound(w http.ResponseWriter, r *http.Request) {
 	respond.Error(w, http.StatusNotFound, "Not found", "NOT_FOUND", nil)
+}
+
+// writeTimeout is the server's write deadline. It must outlast the slowest
+// saved query the configuration allows (queries.timeoutSeconds, up to 600 s),
+// or a long query's answer is cut mid-response; 60 s is the floor.
+func writeTimeout(query time.Duration) time.Duration {
+	if t := query + 30*time.Second; t > 60*time.Second {
+		return t
+	}
+	return 60 * time.Second
 }

@@ -84,7 +84,7 @@ internal/
 
 Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server.log, ui.log, secrets/, receipts/, history/receipts/, orders/index/). Linux: `/etc/digi-erp-connector/`. On Windows the daemon gives it a **protected DACL** at every start (SYSTEM + Administrators Full Control, the service account only if it is not an admin, OWNER RIGHTS READ_CONTROL only; children carry the same as inherited ACEs) via `dataacl.ProtectTree`, run BEFORE server.log is opened and BEFORE config.Load (`cmd/digi-erp-connectord/dataacl.go`). **It works by handle only** (FILE_FLAG_OPEN_REPARSE_POINT, ancestors held without FILE_SHARE_DELETE, GetSecurityInfo / SetKernelObjectSecurity, no MARTA propagation — never reintroduce SetNamedSecurityInfo here: as SYSTEM a path can be redirected), refuses reparse points, multiply-linked files, entries resolving elsewhere and untrusted owners (fail closed), writes only what differs (a steady-state start only reads), sets SYSTEM as owner when running as SYSTEM, trusts owners that are Administrators members directly or via nested groups (NetUserGetLocalGroups, fail closed when unresolvable or orphaned) and then hands those entries to BUILTIN\Administrators (needsClaim) so the domain is needed at most once; the SCM restarts a refused service after 1 / 5 / every 30 min. **A refused start opens no file in DataDir**: the reason goes to the Windows Event Log and the service exits with service-specific code 2 (`autostart.ExitDataDirRefused`). server.log is kept only when it is provably the daemon's own object (`.server-log-id` file-ID marker); otherwise it is moved aside, or the daemon logs to `server-<UTC>.log` if it cannot be. The elevated GUI walks at launch before opening its logs and before **every** save — a failed walk refuses the save with nothing written — and hands what it created to Administrators (`ClaimForAdministrators`; `cmd/digi-erp-connector/config_acl.go`, `gui_logs.go`). Off Windows the receipt import stubs return an error, so model (b) records `failed`, never `ok`.
 
-## API endpoints (all `/api/*` require `Authorization: Bearer <token from /auth/token>`; all rate-limited)
+## API endpoints (all `/api/*` require `Authorization: Bearer <token from /auth/token>`; only `/auth/token` is rate-limited)
 
 | Route | Method | What it does |
 |-------|--------|--------------|
@@ -122,7 +122,7 @@ Data dir: `%PROGRAMDATA%\digi-erp-connector\` (config.yaml, queries.json, server
 
 ## Authentication
 
-**One credential, one scheme.** A caller posts the configured username and password to `POST /auth/token`, gets a short-lived HS256 token, and sends it as `Authorization: Bearer <token>` on every `/api/*` route. `middleware/auth.go` verifies the signature and nothing else; every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) runs before auth.
+**One credential, one scheme.** A caller posts the configured username and password to `POST /auth/token`, gets a short-lived HS256 token, and sends it as `Authorization: Bearer <token>` on every `/api/*` route. `middleware/auth.go` verifies the signature and nothing else; every failure is a flat 401. Nothing is ever logged. Rate limiting (`middleware/ratelimit.go`) guards `/auth/token` only.
 
 **There is no static API token.** `bearerToken` was removed from the config and the code on 2026-08-09 at the operator's instruction: two credentials meant two things to rotate and two ways in, and erp-manager — the caller that matters — only ever used the exchange. **Do not reintroduce one.**
 
@@ -228,7 +228,7 @@ production backend. Covered by `queries/normalize_test.go`:
 - Reintroducing a static API token as a second way to authenticate. One scheme.
 - Storing secrets in logs (DB password, auth password, signing secret, token
   contents)
-- Disabling auth or rate limiting "for testing" on any route
+- Disabling auth on any route, or the `/auth/token` rate limit, "for testing" (the `/api/*` routes carry no rate limit by decision — Ilya, 2026-11-10; do not add one back without him)
 - Returning raw DB driver errors to API clients
 - Absolute-path `fileName` values in the file endpoint
 - Making the OrderQueue worker concurrent
