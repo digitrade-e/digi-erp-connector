@@ -40,6 +40,8 @@ func TestSpecValidate_Refusals(t *testing.T) {
 		{"a credential with a newline", func(s *Spec) { s.Auth.Password = strings.Repeat("x", 20) + "\n" }, CodeAuthPasswordWeak},
 		{"the whole internet", func(s *Spec) { s.Firewall.AllowFrom = []string{"0.0.0.0/0"} }, CodeFirewallAny},
 		{"an IPv6 source", func(s *Spec) { s.Firewall.AllowFrom = []string{"::1"} }, CodeSpecInvalid},
+		{"an IPv4-mapped CIDR that is all of IPv4", func(s *Spec) { s.Firewall.AllowFrom = []string{"::ffff:8.0.0.0/96"} }, CodeSpecInvalid},
+		{"an IPv4-mapped address", func(s *Spec) { s.Firewall.AllowFrom = []string{"::ffff:198.51.100.7"} }, CodeSpecInvalid},
 		{"no sources", func(s *Spec) { s.Firewall.AllowFrom = nil }, CodeSpecInvalid},
 		{"a dependency that is not SQL Server", func(s *Spec) { s.Service.DependOn = []string{"WinRM"} }, CodeSpecInvalid},
 		{"tls with no host", func(s *Spec) { s.TLS = &TLSSpec{Mode: "self-signed"} }, CodeSpecInvalid},
