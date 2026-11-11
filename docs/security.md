@@ -46,11 +46,14 @@ Failure is a flat `401` in every case — no distinction between "missing",
 "wrong" and "expired", never a `403` or a `500`, and no credential is ever
 logged.
 
-**Rate limiting runs before authentication** — a per-IP token bucket (25 rps,
-burst 50) returning `429 RATE_LIMITED`, on the exchange as well as the data
-routes. So an unauthenticated flood is shed cheaply, and both token guessing and
-password guessing are throttled. Buckets are capped at 4096 with 10-minute idle
-eviction, so spoofed source IPs cannot exhaust memory.
+**The credential exchange is rate-limited; the data routes are not.**
+`POST /auth/token` has a per-IP token bucket (25 rps, burst 50) returning
+`429 RATE_LIMITED`, so password guessing is throttled and an unauthenticated
+flood of logins is shed cheaply. Buckets are capped at 4096 with 10-minute idle
+eviction, so spoofed source IPs cannot exhaust memory. Every `/api/*` route is
+unlimited (Ilya, 2026-11-10: a per-IP limit capped online price and stock for every buyer of a shop at once; the load on the client's SQL Server is the client's to size); a token is still required, and a guessed token is
+an HS256 signature, not a password. What bounds the database is the connection
+pool (`MaxOpenConns` 10) and `queries.timeoutSeconds`.
 
 There is no user model, no roles and no per-route authorisation: a valid token
 grants every route. What it does give you is expiry (default 30 minutes) and a

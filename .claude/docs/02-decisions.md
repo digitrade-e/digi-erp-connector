@@ -113,7 +113,7 @@ panicked in the handler. `Run` now returns `ErrNoDatabase` and callers map it to
 a failed initial `db.Open`.
 
 ## 11. New additions beyond both parents
-- Per-IP token-bucket rate limiting (25 rps, burst 50) before auth on all routes.
+- Per-IP token-bucket rate limiting (25 rps, burst 50) before auth on all routes. **Changed 2026-11-10 (Ilya): only `POST /auth/token` is limited; the `/api/*` routes carry no limit** — the per-IP bucket capped online price and stock for every buyer of a shop at once.
 - `GET /api/sendOrder/{jobId}` — the OrderQueue job map existed in
   erp-connector but had no HTTP endpoint.
 - Config section `queries: {timeoutSeconds: 30, maxRows: 10000}`.
