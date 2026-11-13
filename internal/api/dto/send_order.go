@@ -39,6 +39,35 @@ type SendOrderRequest struct {
 	Warehouse  json.RawMessage `json:"warehouse,omitempty"`
 	VatPercent json.RawMessage `json:"vatPercent,omitempty"`
 	Asmahta2   json.RawMessage `json:"asmahta2,omitempty"`
+
+	// Header (DIG-1315, optional): the order's own Hashavshevet header
+	// details, mapped per tenant in erp-manager. An object whose keys are
+	// exactly SendOrderHeader's (case-sensitive; any other key is a 400);
+	// absent or null = today's bytes. Raw, so the handler can refuse unknown,
+	// duplicate and wrong-case keys by name (the body itself is decoded
+	// leniently, as before).
+	Header json.RawMessage `json:"header,omitempty"`
+}
+
+// SendOrderHeader is the "header" object of POST /api/sendOrder (DIG-1315).
+// Each value is a JSON string or number; absent, null or "" = not applied.
+// Texts are at most the IMOVEIN field's width in characters, numbers are
+// decimals written as sent (docs/hasavshevet-send-order.md § Header fields).
+type SendOrderHeader struct {
+	AccountNameDetail json.RawMessage `json:"accountNameDetail"` // line5, "<account name>|<detail>"
+	Address           json.RawMessage `json:"address"`           // line6
+	City              json.RawMessage `json:"city"`              // line7
+	Phone             json.RawMessage `json:"phone"`             // line35
+	ExtraText1        json.RawMessage `json:"extraText1"`        // line45
+	ExtraText2        json.RawMessage `json:"extraText2"`        // line46
+	ExtraText3        json.RawMessage `json:"extraText3"`        // line47
+	ExtraText4        json.RawMessage `json:"extraText4"`        // line48
+	ExtraText5        json.RawMessage `json:"extraText5"`        // line49
+	ExtraSum1         json.RawMessage `json:"extraSum1"`         // line50
+	ExtraSum2         json.RawMessage `json:"extraSum2"`         // line51
+	ExtraSum3         json.RawMessage `json:"extraSum3"`         // line52
+	ExtraNum1         json.RawMessage `json:"extraNum1"`         // line81
+	ExtraNum2         json.RawMessage `json:"extraNum2"`         // line82
 }
 
 // SendOrderAccount mirrors the columns the connector otherwise reads from
@@ -76,8 +105,16 @@ type SendOrderMeta struct {
 // and Replay true. The field is omitted on a first answer, which keeps its
 // original shape.
 type SendOrderAccepted struct {
-	Status string        `json:"status"`
-	JobID  string        `json:"jobId"`
-	Replay bool          `json:"replay,omitempty"`
-	Meta   SendOrderMeta `json:"meta"`
+	Status string `json:"status"`
+	JobID  string `json:"jobId"`
+	Replay bool   `json:"replay,omitempty"`
+	// HeaderApplied (DIG-1315) is present exactly when the request carried a
+	// "header" object: the keys this connector writes into the document
+	// header, in a fixed order ([] when none was set). A connector older than
+	// DIG-1315 never sends it — it silently drops "header" — so a caller that
+	// sends a header and gets no headerApplied knows its fields were not
+	// written. On a replay the document is the first request's, as for every
+	// other field.
+	HeaderApplied *[]string     `json:"headerApplied,omitempty"`
+	Meta          SendOrderMeta `json:"meta"`
 }
