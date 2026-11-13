@@ -58,6 +58,11 @@ type OrderRequest struct {
 	Warehouse  int    `json:",omitempty"` // line12
 	VatPercent string `json:",omitempty"` // line18 text, e.g. "17.00"
 	Asmahta2   string `json:",omitempty"` // line8, digits; MyID (line3) stays the order number
+
+	// Header (DIG-1315, header_fields.go): the order's own header details,
+	// mapped by the tenant's erp-manager config. nil = none, today's bytes;
+	// omitempty keeps a request without it hashing as before.
+	Header *OrderHeader `json:",omitempty"`
 }
 
 // AccountDetails is the caller-supplied form of the account record: the columns
@@ -418,6 +423,8 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		Remarks:      sanitizeComment(req.Comment, 250),
 		HProtect:     account.HProtect,
 	}
+	// The request's header fields (DIG-1315) win over the account's.
+	applyHeader(&hdr, req.Header)
 
 	_ = dueDate // available for future per-line DueDate fields
 
@@ -576,6 +583,9 @@ func validateOrderRequest(req OrderRequest) error {
 	}
 
 	if err := ValidateDocumentFields(req); err != nil {
+		return err
+	}
+	if err := ValidateHeader(req.Header); err != nil {
 		return err
 	}
 

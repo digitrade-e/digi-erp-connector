@@ -266,6 +266,18 @@ func ValidateLegacyFit(req OrderRequest) error {
 	if err := fits("discount", 17, h.DiscountPrcR); err != nil {
 		return err
 	}
+	// The header numbers (DIG-1315): 12 characters here, 13 in the official
+	// layout. Its texts have the same widths in both.
+	for _, f := range headerFields {
+		if f.Kind != headerNumber {
+			continue
+		}
+		if v := *f.get(nonNilHeader(req.Header)); v != "" {
+			if err := fits(headerFieldPath(f.Name), f.Line, v); err != nil {
+				return err
+			}
+		}
+	}
 	for i, m := range moves {
 		for _, c := range []struct {
 			name string
@@ -293,4 +305,12 @@ func keepsNumber(s string, width int) bool {
 	}
 	kept, cut := s[:width], s[width:]
 	return strings.Contains(kept, ".") && strings.Trim(cut, "0") == ""
+}
+
+// nonNilHeader is h, or an empty header for nil.
+func nonNilHeader(h *OrderHeader) *OrderHeader {
+	if h == nil {
+		return &OrderHeader{}
+	}
+	return h
 }

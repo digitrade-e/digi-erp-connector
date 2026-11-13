@@ -137,6 +137,61 @@ before DIG-1295).
   §8 Q6); nothing in these fields blocks it. Model (a) below names a return's
   file `TMP_IMOVEIN_<n>.doc`, as the legacy does.
 
+### Header fields (DIG-1315)
+
+A tenant's declared order fields (delivery name, address, city, phone, PO
+number, delivery flags; plan 075 § P3-4) reach the document header through an
+optional `header` object, which erp-manager's mapping fills per tenant. The
+connector knows only the Hashavshevet fields; which order field goes where, and
+with which value (BFL: delivery note → `extraSum2` = 99, self pickup →
+`extraSum3` = 18), is the tenant's erp-manager config, never code.
+
+| `header` key | IMOVEIN | Kind | Max (official / legacy) | Written |
+|---|---|---|---|---|
+| `accountNameDetail` | line5 AccountName | text | 49 / 49 | `<account name>\|<detail>` (the legacy's `name + "\|" + CustName`) |
+| `address` | line6 Address | text | 50 / 50 | replaces the account's address |
+| `city` | line7 City | text | 50 / 50 | replaces the account's city |
+| `phone` | line35 Phone | text | 30 / 30 | replaces the account's phone |
+| `extraText1`…`extraText5` | line45…49 | text | 50 / 50 | as sent |
+| `extraSum1`…`extraSum3` | line50…52 | number | 13 / 12 | as sent |
+| `extraNum1`, `extraNum2` | line81, 82 | number | 13 / 12 | as sent |
+
+- **Absent stays today's.** No `header`, `null`, `{}`, or a key that is
+  absent, `null` or blank (`""`, spaces only) writes exactly what was written
+  before: the account's value for line5/6/7/35, blank for the extras. Pinned by
+  the goldens (`testdata/imovein`, `testdata/imovein-legacy`) and
+  `TestHeader_EmptyIsTheGoldenBytes`; a request without `header` hashes as
+  before (DIG-1291 replays are not reported as changed).
+- **Values.** A JSON string or number. A text counts characters as written:
+  one Windows-1255 byte each (Hebrew included), a line break (CR LF, CR or LF)
+  written `. ` counts two, a `'` is dropped (as for every other text of the
+  record), a character Windows-1255 lacks is written `?` (as for every other
+  text). Any other control character (a tab, NUL) is refused. A number is
+  `-?digits(.digits)?` in ASCII, written exactly as sent (`99`, `12.50`); no
+  exponent, `+`, spaces or comma.
+- **Refused, never cut.** An unknown key (no free-form keys; also the
+  Hashavshevet spelling `ExtraText1` — keys are case-sensitive), a key given
+  twice, a value of another kind (`true`, an object, an array), a `header` that
+  is not an object, or a value over its field is `400 VALIDATION_ERROR` with
+  `details.field` = `header/<key>` (or `header`), before a number is reserved.
+  The value is never echoed. With `sendOrderFormat: legacy` the numbers are
+  12 characters: a 13-character one is refused unless the cut drops only zeros
+  after the point.
+- **`accountNameDetail`** is joined to the account name with `|`. The detail
+  is always written whole; when the account name is too long for both, the name
+  loses its end (it was always cut to the 50 characters of line5).
+- **Echo.** When the request carries `header` (anything but absent or `null`),
+  the 202 answer adds `"headerApplied": [<keys written>]`, in the table's order
+  (`[]` when none was set). A connector older than DIG-1315 ignores `header`
+  silently and never answers `headerApplied`: a caller that sends a header and
+  gets no `headerApplied` knows the fields were not written. On a replay
+  (DIG-1291) the echo names this request's fields; the document is the first
+  request's, as for every other field.
+- **Upgrade order.** The connector on the tenant's write node must be this
+  release or later BEFORE erp-manager's mapping sends any `header` field;
+  otherwise the order is written without them and only the missing echo says
+  so.
+
 ### The legacy layout (DIG-1297) — `sendOrderFormat: legacy`
 
 The old Digitrade app writes IMOVEIN in a layout of its own, and a Hashavshevet

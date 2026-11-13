@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
@@ -166,6 +168,13 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			return
 		}
 
+		// Header fields (DIG-1315): the same, and echoed in the answer.
+		headerApplied, fe := applyOrderHeader(&orderReq, req.Header)
+		if fe != nil {
+			respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
+			return
+		}
+
 		// The layout this connector writes (sendOrderFormat legacy, DIG-1297)
 		// may be narrower than a number: refused here too, never cut.
 		if err := queue.ValidateLayout(orderReq); err != nil {
@@ -198,12 +207,16 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			return
 		}
 
-		respond.JSON(w, http.StatusAccepted, dto.SendOrderAccepted{
+		answer := dto.SendOrderAccepted{
 			Status: string(acc.Status),
 			JobID:  acc.JobID,
 			Replay: acc.Replay,
 			Meta:   dto.SendOrderMeta{DurationMs: time.Since(start).Milliseconds()},
-		})
+		}
+		if headerApplied != nil {
+			answer.HeaderApplied = &headerApplied
+		}
+		respond.JSON(w, http.StatusAccepted, answer)
 	}
 }
 
@@ -341,4 +354,67 @@ func itoa(n int) string {
 		buf[pos] = '-'
 	}
 	return string(buf[pos:])
+}
+
+// applyOrderHeader parses the optional "header" object (DIG-1315) into orderReq
+// and validates it against the IMOVEIN widths. It returns the keys the
+// connector will write — nil when the request carried no header (absent or
+// null), so the answer keeps its old shape — or a *FieldError naming
+// "header" or "header/<key>". A key that is not a header field, given twice
+// or in another case is refused, never ignored: a dropped key is a field the
+// caller believes was written. Values are never echoed.
+func applyOrderHeader(orderReq *hasavshevet.OrderRequest, raw json.RawMessage) (applied []string, fe *hasavshevet.FieldError) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if err := checkJSONKeys(raw, reflect.TypeOf(dto.SendOrderHeader{})); err != nil {
+		var ke *jsonKeyError
+		if errors.As(err, &ke) {
+			reason := "is not a header field (keys are case-sensitive; allowed: " + strings.Join(hasavshevet.HeaderFieldNames(), ", ") + ")"
+			if ke.Duplicate {
+				reason = "is given more than once"
+			} else if ke.TooDeep {
+				reason = "is nested too deeply"
+			}
+			return nil, &hasavshevet.FieldError{Field: capEchoedField("header/" + ke.Path), Reason: reason}
+		}
+	}
+	var values map[string]json.RawMessage
+	if raw[0] != '{' || json.Unmarshal(raw, &values) != nil {
+		return nil, &hasavshevet.FieldError{Field: "header", Reason: "must be a JSON object"}
+	}
+
+	h := &hasavshevet.OrderHeader{}
+	for _, name := range hasavshevet.HeaderFieldNames() {
+		v, ok := values[name]
+		if !ok || len(v) == 0 || string(v) == "null" {
+			continue
+		}
+		var text string
+		switch {
+		case v[0] == '"':
+			if json.Unmarshal(v, &text) != nil {
+				return nil, &hasavshevet.FieldError{Field: "header/" + name, Reason: "must be a string or a number"}
+			}
+		case v[0] == '-' || (v[0] >= '0' && v[0] <= '9'):
+			text = string(v) // a JSON number, written as sent
+		default:
+			return nil, &hasavshevet.FieldError{Field: "header/" + name, Reason: "must be a string or a number"}
+		}
+		if strings.TrimSpace(text) == "" {
+			continue // blank = not set, like absent
+		}
+		h.SetHeaderField(name, text)
+	}
+	if err := hasavshevet.ValidateHeader(h); err != nil {
+		var hfe *hasavshevet.FieldError
+		if errors.As(err, &hfe) {
+			return nil, hfe
+		}
+		return nil, &hasavshevet.FieldError{Field: "header", Reason: err.Error()}
+	}
+	if !h.IsEmpty() {
+		orderReq.Header = h
+	}
+	return h.Applied(), nil
 }
