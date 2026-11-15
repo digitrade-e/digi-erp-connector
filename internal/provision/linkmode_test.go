@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -33,7 +34,9 @@ func TestLinkModeIsWhatLinkYamlSays(t *testing.T) {
 }
 
 func TestLinkModeSpecRules(t *testing.T) {
-	root := t.TempDir() // OS-native absolute paths: the base validation checks absoluteness first
+	// OS-native absolute paths (the base validation checks absoluteness first), but not t.TempDir(): on Windows
+	// that is under the user's AppData, which link mode refuses as an image folder. Nothing here is created.
+	root := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "srv")
 	win, pf, pd := filepath.Join(root, "Windows"), filepath.Join(root, "Program Files"), filepath.Join(root, "ProgramData")
 	sysDirs := []string{win, pf, pd}
 	hash, orders := filepath.Join(root, "Hash7"), filepath.Join(root, "digiorders")
@@ -66,6 +69,7 @@ func TestLinkModeSpecRules(t *testing.T) {
 		{"link: a Hebrew image folder", withFolders(loop(base()), filepath.Join(root, "תמונות -Digitrade")), true, ""},
 		{"link: the registry hives as images", withFolders(loop(base()), filepath.Join(win, "System32", "config")), true, CodeImageFolderForbidden},
 		{"link: a user's AppData", withFolders(loop(base()), filepath.Join(root, "Users", "bob", "AppData", "Roaming", "x")), true, CodeImageFolderForbidden},
+		{"link: a temp folder under AppData", withFolders(loop(base()), t.TempDir()), true, wantOnWindows(CodeImageFolderForbidden)},
 		{"link: the connector's own data", withFolders(loop(base()), filepath.Join(pd, "digi-erp-connector")), true, CodeImageFolderForbidden},
 	}
 	for _, c := range cases {
@@ -78,6 +82,14 @@ func TestLinkModeSpecRules(t *testing.T) {
 			t.Errorf("%s: %q, want %q (%v)", c.name, got, c.wantCode, r)
 		}
 	}
+}
+
+// wantOnWindows is code where t.TempDir() is under AppData (Windows), else no refusal.
+func wantOnWindows(code string) string {
+	if runtime.GOOS == "windows" {
+		return code
+	}
+	return ""
 }
 
 func withImporter(s Spec, imp ImporterSpec) Spec { s.Importer = &imp; return s }
