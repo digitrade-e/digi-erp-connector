@@ -42,6 +42,12 @@ type Config struct {
 	APITLS  bool
 	APICert []byte // the daemon's certificate (PEM, its certFile) when APITLS: the only one the link trusts
 
+	// Daemon, when set, is asked for the daemon's address on every data stream (plan 086 C5); nil = APIAddr, APITLS
+	// and APICert as given.
+	Daemon *DaemonWatch
+	// Proxy is the finder behind HTTPClient, for link-status (nil: link-status names none).
+	Proxy *ProxyFinder
+
 	HTTPClient *http.Client // the proxy and the TLS roots for the relay
 	Runner     Runner       // provision.exe
 	InstallDir string       // for "hashes"
@@ -66,6 +72,40 @@ type Link struct {
 
 	moveMu  sync.Mutex
 	movedAt time.Time
+
+	status liveStatus // for link-status (plan 086 C5)
+}
+
+// liveStatus is the link's own view of its connection, for link-status.
+type liveStatus struct {
+	mu          sync.Mutex
+	started     time.Time
+	connected   bool
+	epoch       int64
+	relay       string // the relay instance that answered (Welcome.Relay)
+	connectedAt time.Time
+	lastErr     string
+	lastErrAt   time.Time
+}
+
+func (s *liveStatus) up(epoch int64, relay string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.connected, s.epoch, s.relay, s.connectedAt = true, epoch, relay, at
+}
+
+func (s *liveStatus) down(epoch int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch == epoch {
+		s.connected = false
+	}
+}
+
+func (s *liveStatus) failed(err error, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastErr, s.lastErrAt = err.Error(), at
 }
 
 func New(cfg Config) *Link {
@@ -87,7 +127,17 @@ func New(cfg Config) *Link {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
 	}
-	return &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64)}
+	l := &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64)}
+	l.status.started = cfg.Now()
+	return l
+}
+
+// daemonTargets are where a data stream may go, the current address first (DaemonWatch.Targets).
+func (l *Link) daemonTargets() []DaemonTarget {
+	if l.cfg.Daemon != nil {
+		return l.cfg.Daemon.Targets()
+	}
+	return []DaemonTarget{{Addr: l.cfg.APIAddr, TLS: l.cfg.APITLS, Cert: l.cfg.APICert}}
 }
 
 // conn is one live connection to the relay.
@@ -119,6 +169,7 @@ func (l *Link) Run(ctx context.Context) error {
 		}
 		c, wait, err := l.connect(ctx, st)
 		if err != nil {
+			l.status.failed(err, l.cfg.Now())
 			if wait == 0 {
 				wait = backoff + time.Duration(rand.Int64N(int64(backoff)/2+1))
 				backoff = min(backoff*2, time.Minute)
@@ -157,6 +208,7 @@ func (l *Link) serve(ctx context.Context, c *conn) {
 			return
 		case <-c.sess.CloseChan():
 			l.cfg.Log.Warn(fmt.Sprintf("link: connection to %s (epoch %d) closed", c.relay, c.epoch))
+			l.status.down(c.epoch)
 			return
 		case <-live.C:
 			go l.checkLive(c)
@@ -182,6 +234,7 @@ func (l *Link) serve(ctx context.Context, c *conn) {
 			next, _, err = l.connect(ctx, st)
 		}
 		if err != nil {
+			l.status.failed(err, l.cfg.Now())
 			l.cfg.Log.Warn(fmt.Sprintf("link: moving (%s) failed: %v; staying on epoch %d for now", reason, err, c.epoch))
 			go func(c *conn, reason string) { // try again shortly
 				sleep(ctx, 5*time.Second)
@@ -285,6 +338,7 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 	go l.readControl(c)
 	go l.accept(c)
 	l.cfg.Log.Info(fmt.Sprintf("link: connected to %q as %q (epoch %d)", w.Relay, w.Box, w.Epoch))
+	l.status.up(w.Epoch, w.Relay, l.cfg.Now())
 	return c, 0, nil
 }
 

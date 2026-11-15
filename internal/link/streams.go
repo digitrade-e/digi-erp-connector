@@ -2,7 +2,6 @@ package link
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,22 +47,21 @@ func (l *Link) handleStream(st *yamux.Stream) {
 	}
 }
 
-// pipe connects a data stream to the daemon's local API, byte for byte.
+// pipe connects a data stream to the daemon's local API, byte for byte. The address is read per stream (plan 086
+// C5: daemonTargets), so an apply that moves the port or turns TLS on does not strand the data path.
 func (l *Link) pipe(st net.Conn) {
-	api, err := net.DialTimeout("tcp", l.cfg.APIAddr, 5*time.Second)
-	if err != nil {
-		return // the relay answers 504 forwarded-no-answer, or 503 if nothing was written
-	}
-	if l.cfg.APITLS {
-		// Only the daemon's own certificate, read from its certFile, is trusted — never "skip verification", even on
-		// loopback (CodeQL go/disabled-certificate-check). Unreadable, the data stream is not served.
-		conf, err := APITLSConfig(l.cfg.APICert)
-		if err != nil {
-			_ = api.Close()
-			l.cfg.Log.Error("link: the connector's TLS certificate", err)
-			return
+	var api net.Conn
+	var err error
+	for _, t := range l.daemonTargets() {
+		if api, err = dialDaemon(t); err == nil {
+			break
 		}
-		api = tls.Client(api, conf)
+		if errors.Is(err, errDaemonCert) {
+			l.cfg.Log.Error("link: the connector's TLS certificate", err)
+		}
+	}
+	if api == nil {
+		return // the relay answers 504 forwarded-no-answer, or 503 if nothing was written
 	}
 	defer func() { _ = api.Close() }()
 	var wg sync.WaitGroup
@@ -207,7 +205,7 @@ func (l *Link) refusedUnverified(code string) {
 }
 
 func (l *Link) argv(env linkproto.Envelope) ([]string, error) {
-	if env.Command == CommandHashes {
+	if _, self := selfCommands[env.Command]; self {
 		if len(env.Args) != 0 {
 			return nil, &linkproto.Refusal{Code: linkproto.CodeMalformed}
 		}
@@ -217,8 +215,8 @@ func (l *Link) argv(env linkproto.Envelope) ([]string, error) {
 }
 
 func (l *Link) run(env linkproto.Envelope, stdin []byte) ([]byte, int) {
-	if env.Command == CommandHashes {
-		return Hashes(l.cfg.InstallDir), 0
+	if self, ok := selfCommands[env.Command]; ok {
+		return self(l, env, stdin)
 	}
 	argv, _ := Argv(env) // checked already
 	ctx, cancel := context.WithTimeout(context.Background(), CommandDeadline)

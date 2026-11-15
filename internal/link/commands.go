@@ -32,6 +32,12 @@ var commands = map[string]func(args []string) ([]string, bool){
 // before anything else (L25 item 4).
 const CommandHashes = "hashes"
 
+// selfCommands are answered by the link itself, not provision.exe; they take no args. The answer is stdout and the
+// exit code.
+var selfCommands = map[string]func(l *Link, env linkproto.Envelope, stdin []byte) ([]byte, int){
+	CommandHashes: func(l *Link, _ linkproto.Envelope, _ []byte) ([]byte, int) { return Hashes(l.cfg.InstallDir), 0 },
+}
+
 var changeSetShape = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
 func fixed(argv ...string) func([]string) ([]string, bool) {

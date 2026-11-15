@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -608,6 +609,15 @@ func TestTheFixedCommandSet(t *testing.T) {
 	}
 	if argv, err := Argv(linkproto.Envelope{Command: "restore", Args: []string{"cs-bfl-0001", "--assume-idle"}}); err != nil || strings.Join(argv, " ") != "restore cs-bfl-0001 --assume-idle" {
 		t.Errorf("restore: %v %v", argv, err)
+	}
+	// the ones the link answers itself
+	var self []string
+	for name := range selfCommands {
+		self = append(self, name)
+	}
+	slices.Sort(self)
+	if strings.Join(self, " ") != "hashes link-status" {
+		t.Errorf("the link answers %v itself", self)
 	}
 }
 
