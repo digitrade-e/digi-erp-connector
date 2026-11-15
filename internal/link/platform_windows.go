@@ -5,6 +5,7 @@ package link
 import (
 	"fmt"
 	"os"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -37,9 +38,10 @@ func (e winEvents) write(level, msg string) {
 func (e winEvents) close() { _ = e.l.Close() }
 
 // MachineFacts are what a human sees before confirming a pairing: the host,
-// its DNS domain, and whether it is a domain controller (role 4, NTDS present)
-// or a member (3) or standalone (2) server. digi-mcp's discover reads the exact
-// role later.
+// its DNS domain, and its role as Windows itself reports it — the same numbers
+// as Win32_ComputerSystem.DomainRole, which discover reads: 2 a standalone
+// server, 3 a member, 4 and 5 a domain controller. The NTDS service key is not
+// a DC's sign: BFL's member server SQLSRV has one (2026-11-15).
 func MachineFacts() (string, string, int) {
 	host, _ := os.Hostname()
 	domain := ""
@@ -47,15 +49,40 @@ func MachineFacts() (string, string, int) {
 		domain, _, _ = k.GetStringValue("Domain")
 		_ = k.Close()
 	}
-	role := 2
+	if role, ok := dsRole(); ok {
+		return host, domain, role
+	}
+	role := 2 // DsRole unavailable: a member when joined, never a guess of DC
 	if domain != "" {
 		role = 3
 	}
-	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services\NTDS`, registry.QUERY_VALUE); err == nil {
-		_ = k.Close()
-		role = 4
-	}
 	return host, domain, role
+}
+
+var (
+	modNetapi32                 = windows.NewLazySystemDLL("netapi32.dll")
+	procDsRoleGetPrimaryDomInfo = modNetapi32.NewProc("DsRoleGetPrimaryDomainInformation")
+	procDsRoleFreeMemory        = modNetapi32.NewProc("DsRoleFreeMemory")
+)
+
+// DSROLE_PRIMARY_DOMAIN_INFO_BASIC's first field: DSROLE_MACHINE_ROLE, 0-5,
+// the numbering Win32_ComputerSystem.DomainRole uses.
+type dsrolePrimaryDomainInfoBasic struct {
+	MachineRole uint32
+}
+
+func dsRole() (int, bool) {
+	var info *dsrolePrimaryDomainInfoBasic
+	const dsRolePrimaryDomainInfoBasic = 1
+	r, _, _ := procDsRoleGetPrimaryDomInfo.Call(0, dsRolePrimaryDomainInfoBasic, uintptr(unsafe.Pointer(&info)))
+	if r != 0 || info == nil {
+		return 0, false
+	}
+	defer func() { _, _, _ = procDsRoleFreeMemory.Call(uintptr(unsafe.Pointer(info))) }()
+	if info.MachineRole > 5 {
+		return 0, false
+	}
+	return int(info.MachineRole), true
 }
 
 // PlatformPreflight adds the administrator and Windows version checks.
