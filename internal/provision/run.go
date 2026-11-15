@@ -36,6 +36,7 @@ const Usage = `usage:
   digi-erp-connector-provision options [--check] --spec - set config.yaml options only (image folders, query limits, ...); no credential on stdin
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
+  digi-erp-connector-provision logs --spec -            read a log's tail, redacted (stdin: {"source":"server|link|ui|events-daemon|events-link",...})
   digi-erp-connector-provision version
 Secrets travel on stdin only. The output is one JSON object; exit 0 ok, 1 refused, 2 usage.`
 
@@ -71,6 +72,21 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			return []byte(Usage + "\n"), ExitUsage
 		}
 		result = map[string]string{"version": buildinfo.Version}
+	// plan 086 C4: read-only diagnostics (logs.go, state.go)
+	case "logs":
+		var in LogsInput
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		if r := decodeInput(stdin, &in); r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		var res *LogsResult
+		res, err = Logs(env, in)
+		result = res
+		if res != nil {
+			secrets = append(secrets, res.secrets...)
+		}
 	case "discover":
 		var in DiscoverInput
 		if ok, u := readSpecFlag(rest); !u {

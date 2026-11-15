@@ -594,6 +594,8 @@ func TestTheFixedCommandSet(t *testing.T) {
 		"version": "version", "discover": "discover --spec -", "apply-check": "apply --check --spec -",
 		"apply": "apply --spec -", "options-check": "options --check --spec -", "options": "options --spec -",
 		"verify": "verify --spec -",
+		// plan 086 (B2)
+		"logs": "logs --spec -",
 	}
 	if len(commands) != len(want)+1 { // + restore
 		t.Fatalf("the command set has %d entries", len(commands))
