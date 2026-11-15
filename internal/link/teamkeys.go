@@ -16,13 +16,16 @@ import (
 // the highest epoch it has seen (Store.MinEpoch), so a downgrade cannot bring
 // a retired key back (§8 A17).
 //
-// Empty until the team key exists: with no key, every command is refused
-// (key_unknown) and only the data path works.
+// team-1 was made by Ilya on 2026-11-15 in his own terminal; its private half
+// is digi-mcp's Keychain slot link/prod/team-1 (plan 083 D3). The relay's helm
+// values carry the same public key (connector-link teamKeys).
 var teamKeys = []struct {
 	ID    string
 	Epoch int
 	Pub   string // base64 Ed25519 public key
-}{}
+}{
+	{ID: "team-1", Epoch: 1, Pub: "KGQUy5wa5R7V54GWKUcZGuWcPNqIQRTggZuSFH699Wg="},
+}
 
 const CompiledMinEpoch = 1
 
