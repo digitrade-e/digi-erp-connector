@@ -39,6 +39,7 @@ const Usage = `usage:
   digi-erp-connector-provision daemon <restart|stop|start> [--assume-idle]   control the service (the order queue is asked first; start/restart end with the proof)
   digi-erp-connector-provision service [--check] --spec - set the service's SQL Server dependencies and recovery only; no restart
   digi-erp-connector-provision db [--check] --spec -     change the database login and settings only (or turn the database off); no API credential
+  digi-erp-connector-provision firewall-remove [--check] --spec -   remove inbound rules this tool made (the connector's group); no restart
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
   digi-erp-connector-provision version
@@ -197,6 +198,19 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		if res != nil {
 			secrets = append(secrets, res.secrets...)
 		}
+	case "firewall-remove":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeFirewallRemove(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		result, err = RemoveFirewallRules(ctx, env, in, check)
 	case "verify":
 		var in VerifyInput
 		if ok, u := readSpecFlag(rest); !u {

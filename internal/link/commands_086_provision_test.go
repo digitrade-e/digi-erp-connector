@@ -35,6 +35,9 @@ func TestPlan086ProvisionCommands(t *testing.T) {
 		{"service", []string{"MSSQL$X"}, ""},
 		{"db-check", nil, "db --check --spec -"},
 		{"db", nil, "db --spec -"},
+		{"firewall-remove-check", nil, "firewall-remove --check --spec -"},
+		{"firewall-remove", nil, "firewall-remove --spec -"},
+		{"firewall-remove", []string{"digi-erp-connector"}, ""},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})

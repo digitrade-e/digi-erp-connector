@@ -60,15 +60,17 @@ func restore(args []string) ([]string, bool) {
 // builders add theirs without touching these lines. Each one is a provision
 // subcommand with fixed argv; the pin test lists them all.
 var provisionCommands086 = map[string]func(args []string) ([]string, bool){
-	"auth-check":     fixed("auth", "--check", "--spec", "-"),
-	"auth":           fixed("auth", "--spec", "-"),
-	"daemon-restart": daemonCmd086("restart"),
-	"daemon-stop":    daemonCmd086("stop"),
-	"daemon-start":   daemonCmd086("start"),
-	"service-check":  fixed("service", "--check", "--spec", "-"),
-	"service":        fixed("service", "--spec", "-"),
-	"db-check":       fixed("db", "--check", "--spec", "-"),
-	"db":             fixed("db", "--spec", "-"),
+	"auth-check":            fixed("auth", "--check", "--spec", "-"),
+	"auth":                  fixed("auth", "--spec", "-"),
+	"daemon-restart":        daemonCmd086("restart"),
+	"daemon-stop":           daemonCmd086("stop"),
+	"daemon-start":          daemonCmd086("start"),
+	"service-check":         fixed("service", "--check", "--spec", "-"),
+	"service":               fixed("service", "--spec", "-"),
+	"db-check":              fixed("db", "--check", "--spec", "-"),
+	"db":                    fixed("db", "--spec", "-"),
+	"firewall-remove-check": fixed("firewall-remove", "--check", "--spec", "-"),
+	"firewall-remove":       fixed("firewall-remove", "--spec", "-"),
 }
 
 // sealedOnly086 are the commands whose stdin carries a secret (the API

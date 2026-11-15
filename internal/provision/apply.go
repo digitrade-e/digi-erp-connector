@@ -50,15 +50,17 @@ type ApplyResult struct {
 // being re-implemented there (plan 068 §10.2). Procedures are created where
 // missing at apply; the check does not look.
 type CheckResult struct {
-	Config       string `json:"config"`                 // "unchanged", or configDiff's "changed: …"
-	Login        string `json:"login"`                  // given | keep | create | rotate | none
-	DBSecret     bool   `json:"dbSecret"`               // the stored DB password would change
-	TLS          string `json:"tls,omitempty"`          // keep | generate, when the spec asks for a pair
-	Firewall     string `json:"firewall,omitempty"`     // keep | set, when the spec names a rule
-	Dependencies bool   `json:"dependencies,omitempty"` // the service's dependencies would change
-	Recovery     bool   `json:"recovery"`               // the service's recovery actions would be set
-	OrderCounter bool   `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
-	Restart      bool   `json:"restart"`                // the service would restart
+	Config   string `json:"config"`             // "unchanged", or configDiff's "changed: …"
+	Login    string `json:"login"`              // given | keep | create | rotate | none
+	DBSecret bool   `json:"dbSecret"`           // the stored DB password would change
+	TLS      string `json:"tls,omitempty"`      // keep | generate, when the spec asks for a pair
+	Firewall string `json:"firewall,omitempty"` // keep | set, when the spec names a rule; remove (firewall-remove)
+	// Rules are the rules firewall-remove would remove.
+	Rules        []string `json:"rules,omitempty"`
+	Dependencies bool     `json:"dependencies,omitempty"` // the service's dependencies would change
+	Recovery     bool     `json:"recovery"`               // the service's recovery actions would be set
+	OrderCounter bool     `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
+	Restart      bool     `json:"restart"`                // the service would restart
 }
 
 // Step is one part of the change: whether it changed anything.
