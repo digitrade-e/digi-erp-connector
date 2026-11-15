@@ -306,7 +306,7 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 	}
 	if cfg != nil {
 		if host, _, err := net.SplitHostPort(cfg.APIListen); err == nil {
-			if ip := net.ParseIP(host); (ip != nil && ip.IsLoopback()) || strings.EqualFold(host, "localhost") {
+			if ip := net.ParseIP(host); ((ip != nil && ip.IsLoopback()) || strings.EqualFold(host, "localhost")) && !LinkMode(env.Sys.DataDir()) {
 				defect(DefectLoopbackListen, "listen on 0.0.0.0 behind the client's port forward",
 					"apiListen %s is loopback: erp-manager and the tenant cannot reach it", cfg.APIListen)
 			}

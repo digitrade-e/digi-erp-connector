@@ -94,7 +94,7 @@ func ApplyCheck(ctx context.Context, env Env, s Spec) (*ApplyResult, error) {
 
 func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
-	if r := s.Validate(); r != nil {
+	if r := s.ValidateFor(LinkMode(env.Sys.DataDir()), SystemDirs()); r != nil {
 		return res, r
 	}
 	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check}

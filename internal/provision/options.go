@@ -61,6 +61,11 @@ func ApplyOptions(ctx context.Context, env Env, in OptionsInput, check bool) (*A
 	if r := in.Validate(); r != nil {
 		return res, r
 	}
+	if LinkMode(env.Sys.DataDir()) {
+		if r := validateImageFoldersLinked(in.Options.ImageFolders, SystemDirs()); r != nil {
+			return res, r
+		}
+	}
 	opts := in.Options
 	s := Spec{Version: in.Version, ChangeSet: in.ChangeSet, Options: &opts, AssumeIdle: in.AssumeIdle, Expect: in.Expect}
 	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check}
