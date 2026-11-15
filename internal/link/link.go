@@ -99,6 +99,7 @@ var (
 // Run keeps the box connected until ctx ends.
 func (l *Link) Run(ctx context.Context) error {
 	backoff := time.Second
+	quietUnpaired := false // "not paired" is logged once, not every 15 s
 	for ctx.Err() == nil {
 		st, err := l.cfg.Store.LoadState()
 		if err != nil {
@@ -112,7 +113,14 @@ func (l *Link) Run(ctx context.Context) error {
 				wait = backoff + time.Duration(rand.Int64N(int64(backoff)/2+1))
 				backoff = min(backoff*2, time.Minute)
 			}
-			if !errors.Is(err, errPending) {
+			switch {
+			case errors.Is(err, errPending):
+			case errors.Is(err, errNotPaired):
+				if !quietUnpaired {
+					l.cfg.Log.Warn("link: " + err.Error() + "; waiting for `digi-erp-connector-link.exe pair <code>`")
+					quietUnpaired = true
+				}
+			default:
 				l.cfg.Log.Warn(fmt.Sprintf("link: %v; next try in %s", err, wait.Round(time.Second)))
 			}
 			sleep(ctx, wait)
@@ -191,7 +199,8 @@ func drain(c *conn) {
 
 func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, error) {
 	if st.Box == "" && st.PairCode == "" {
-		return nil, 5 * time.Minute, errNotPaired
+		// A code stored by `pair` (setup, or the person later) is picked up within 15 s.
+		return nil, 15 * time.Second, errNotPaired
 	}
 	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

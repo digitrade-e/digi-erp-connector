@@ -91,29 +91,74 @@ func TestInstallerScriptStructure(t *testing.T) {
 // directory refused) count as one. An empty or "none" action would leave the
 // node down after the second failure.
 func TestInstallerSetsRestartOnFailure(t *testing.T) {
-	var failure, flag string
+	// Both services: the daemon and, since plan 083, the link.
+	for _, svc := range []string{"{#ServiceName}", "{#LinkService}"} {
+		var failure, flag string
+		for _, l := range issLines(t) {
+			if strings.Contains(l, "sc.exe failure "+svc+" ") {
+				failure = l
+			}
+			if strings.Contains(l, "sc.exe failureflag "+svc+" ") {
+				flag = l
+			}
+		}
+		m := regexp.MustCompile(`reset= (\d+) actions= (\S+?) >nul`).FindStringSubmatch(failure)
+		if m == nil {
+			t.Fatalf("%s: no parseable sc failure line: %q", svc, failure)
+		}
+		if m[1] != "86400" {
+			t.Errorf("%s: reset= %s; want 86400", svc, m[1])
+		}
+		want := []string{"restart", "60000", "restart", "300000", "restart", "1800000"}
+		if m[2] != strings.Join(want, "/") {
+			t.Errorf("%s: actions= %s; want %s", svc, m[2], strings.Join(want, "/"))
+		}
+		if !strings.Contains(flag, "failureflag "+svc+" 1 ") {
+			t.Errorf("%s: failureflag line %q; want the flag set to 1", svc, flag)
+		}
+	}
+}
+
+// Plan 083: the link is its own service, created, started and removed with the
+// connector; setup stops it before the daemon; a pairing code is taken on a page
+// or as /PAIRCODE=; setup never opens a port or turns WinRM on.
+func TestInstallerShipsTheLink(t *testing.T) {
+	src := strings.Join(issLines(t), "\n")
+	for _, want := range []string{
+		`#define LinkExe "digi-erp-connector-link.exe"`,
+		`#define LinkService "digi-erp-connector-link"`,
+		`Source: "{#BuildDir}\{#LinkExe}"; DestDir: "{app}"`,
+		`sc.exe create {#LinkService} binPath= ""{app}\{#LinkExe}"" start= auto`,
+		`sc.exe start {#LinkService}`,
+		`sc.exe delete {#LinkService}`,
+		`New-EventLog -LogName Application -Source '{#LinkService}'`,
+		`{param:PAIRCODE|}`,
+		`'" pair ' + Code`,
+		`if not ValidPairCode(Code) then`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the installer lacks %q", want)
+		}
+	}
+	link := strings.Index(src, "StopServiceAndWait('{#LinkService}')")
+	daemon := strings.Index(src, "StopServiceAndWait('{#ServiceName}')")
+	if link < 0 || daemon < 0 || link > daemon {
+		t.Errorf("setup must stop the link before the daemon (link at %d, daemon at %d)", link, daemon)
+	}
 	for _, l := range issLines(t) {
-		if strings.Contains(l, "sc.exe failure ") {
-			failure = l
+		code := strings.TrimSpace(l)
+		if strings.HasPrefix(code, ";") || strings.HasPrefix(code, "//") {
+			continue // comments may name WinRM (plan 068's provision tool)
 		}
-		if strings.Contains(l, "sc.exe failureflag ") {
-			flag = l
+		for _, never := range []string{"netsh", "New-NetFirewallRule", "winrm", "Enable-PSRemoting"} {
+			if strings.Contains(strings.ToLower(code), strings.ToLower(never)) {
+				t.Errorf("the installer runs %q: setup never opens a port or turns WinRM on\n%s", never, l)
+			}
 		}
 	}
-	m := regexp.MustCompile(`reset= (\d+) actions= (\S+?) >nul`).FindStringSubmatch(failure)
-	if m == nil {
-		t.Fatalf("no parseable sc failure line: %q", failure)
-	}
-	if m[1] != "86400" {
-		t.Errorf("reset= %s; want 86400", m[1])
-	}
-	parts := strings.Split(m[2], "/")
-	want := []string{"restart", "60000", "restart", "300000", "restart", "1800000"}
-	if strings.Join(parts, "/") != strings.Join(want, "/") {
-		t.Errorf("actions= %s; want %s", m[2], strings.Join(want, "/"))
-	}
-	if !strings.Contains(flag, "failureflag {#ServiceName} 1 ") {
-		t.Errorf("failureflag line %q; want the flag set to 1", flag)
+	// The link starts after the pairing code is stored (CurStepChanged ssPostInstall runs before [Run]).
+	if strings.Index(src, "sc.exe start {#LinkService}") < strings.Index(src, "sc.exe create {#LinkService}") {
+		t.Error("the link service starts before it is created")
 	}
 }
 

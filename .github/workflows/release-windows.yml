@@ -69,9 +69,12 @@ jobs:
           go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connectord.exe" ./cmd/digi-erp-connectord
           # A console program: it prints one JSON object (plan 068).
           go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connector-provision.exe" ./cmd/digi-erp-connector-provision
+          # The link service (plan 083): dials out to Digitrade's relay; the installer ships it.
+          go build -trimpath -ldflags "-s -w ${version_flag}" -o "dist/bin/digi-erp-connector-link.exe" ./cmd/digi-erp-connector-link
           # digi-mcp runs these over WinRM only when their sha256 is listed in a
-          # release's SHA256SUMS (plan 068, lint L25).
-          (cd dist/bin && sha256sum digi-erp-connector.exe digi-erp-connectord.exe digi-erp-connector-provision.exe > ../SHA256SUMS)
+          # release's SHA256SUMS (plan 068, lint L25); the link's `version` answer
+          # is checked against the same file (plan 083 P3).
+          (cd dist/bin && sha256sum digi-erp-connector.exe digi-erp-connectord.exe digi-erp-connector-provision.exe digi-erp-connector-link.exe > ../SHA256SUMS)
 
       - name: Build installer
         shell: powershell

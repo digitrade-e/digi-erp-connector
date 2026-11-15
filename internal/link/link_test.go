@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -591,5 +592,15 @@ func TestTheFixedCommandSet(t *testing.T) {
 	}
 	if argv, err := Argv(linkproto.Envelope{Command: "restore", Args: []string{"cs-bfl-0001", "--assume-idle"}}); err != nil || strings.Join(argv, " ") != "restore cs-bfl-0001 --assume-idle" {
 		t.Errorf("restore: %v %v", argv, err)
+	}
+}
+
+// Installed but not paired: the code `pair` stores later (setup's page, or the person at the
+// server) is picked up within 15 s, not after a long sleep.
+func TestAnUnpairedLinkLooksAgainSoon(t *testing.T) {
+	l := New(Config{Store: &Store{Dir: t.TempDir(), Secrets: &memSecrets{}}, Log: &testLog{}})
+	_, wait, err := l.connect(context.Background(), State{})
+	if !errors.Is(err, errNotPaired) || wait <= 0 || wait > 15*time.Second {
+		t.Fatalf("an unpaired box: %v, next look in %s", err, wait)
 	}
 }
