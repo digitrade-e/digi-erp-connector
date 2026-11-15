@@ -7,4 +7,5 @@ func init() {
 	// C4: read-only diagnostics, run by provision.exe like every other command; the answer is redacted on the box
 	// (plan 086 D1).
 	commands["logs"] = fixed("logs", "--spec", "-")
+	commands["state"] = fixed("state", "--spec", "-")
 }
