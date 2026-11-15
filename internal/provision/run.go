@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/buildinfo"
@@ -40,6 +42,7 @@ const Usage = `usage:
   digi-erp-connector-provision service [--check] --spec - set the service's SQL Server dependencies and recovery only; no restart
   digi-erp-connector-provision db [--check] --spec -     change the database login and settings only (or turn the database off); no API credential
   digi-erp-connector-provision firewall-remove [--check] --spec -   remove inbound rules this tool made (the connector's group); no restart
+  digi-erp-connector-provision receipt-seed <N>         create the receipt number store with N as the next receipt (write-if-absent)
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
   digi-erp-connector-provision version
@@ -211,6 +214,14 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			return envelope(cmd, nil, r, nil), ExitRefused
 		}
 		result, err = RemoveFirewallRules(ctx, env, in, check)
+	case "receipt-seed":
+		if len(rest) != 1 || !receiptSeedArg.MatchString(rest[0]) {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		n, _ := strconv.ParseInt(rest[0], 10, 64) // nine digits at most: it parses
+		var res *ApplyResult
+		res, err = SeedReceipts(ctx, env, n)
+		result = res
 	case "verify":
 		var in VerifyInput
 		if ok, u := readSpecFlag(rest); !u {
@@ -258,6 +269,9 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 	}
 	return envelope(cmd, result, refusal, secrets), code
 }
+
+// receiptSeedArg is receipt-seed's N: 1 to 9 digits, no sign, no leading zero.
+var receiptSeedArg = regexp.MustCompile(`^[1-9][0-9]{0,8}$`)
 
 // readSpecFlag accepts nothing or exactly "--spec -". ok: input comes on
 // stdin; usageOK: the flags were understood.

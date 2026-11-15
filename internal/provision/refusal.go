@@ -58,5 +58,7 @@ const (
 
 // Plan 086 B1's codes.
 const (
-	CodeDependencyMissing = "dependency_missing" // service: a dependency that is not a service on this machine
+	CodeDependencyMissing  = "dependency_missing"   // service: a dependency that is not a service on this machine
+	CodeReceiptStoreExists = "receipt_store_exists" // receipt-seed: the store exists (a seed is written once)
+	CodeReceiptSeedLow     = "receipt_seed_low"     // receipt-seed: at or below a receipt already written
 )

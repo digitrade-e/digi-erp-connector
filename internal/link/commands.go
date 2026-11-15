@@ -71,6 +71,7 @@ var provisionCommands086 = map[string]func(args []string) ([]string, bool){
 	"db":                    fixed("db", "--spec", "-"),
 	"firewall-remove-check": fixed("firewall-remove", "--check", "--spec", "-"),
 	"firewall-remove":       fixed("firewall-remove", "--spec", "-"),
+	"receipt-seed":          receiptSeed086,
 }
 
 // sealedOnly086 are the commands whose stdin carries a secret (the API
@@ -109,6 +110,17 @@ func daemonCmd086(action string) func([]string) ([]string, bool) {
 		return nil, false
 	}
 }
+
+// receiptSeed086 is provision's receipt-seed <N>: N is 1 to 9 digits, no
+// sign, no leading zero (the KUPAIN number's width).
+func receiptSeed086(args []string) ([]string, bool) {
+	if len(args) == 1 && receiptSeedShape.MatchString(args[0]) {
+		return []string{"receipt-seed", args[0]}, true
+	}
+	return nil, false
+}
+
+var receiptSeedShape = regexp.MustCompile(`^[1-9][0-9]{0,8}$`)
 
 // --- end plan 086 B1 ---
 

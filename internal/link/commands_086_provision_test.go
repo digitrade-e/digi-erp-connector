@@ -38,6 +38,15 @@ func TestPlan086ProvisionCommands(t *testing.T) {
 		{"firewall-remove-check", nil, "firewall-remove --check --spec -"},
 		{"firewall-remove", nil, "firewall-remove --spec -"},
 		{"firewall-remove", []string{"digi-erp-connector"}, ""},
+		{"receipt-seed", []string{"500000"}, "receipt-seed 500000"},
+		{"receipt-seed", []string{"999999999"}, "receipt-seed 999999999"},
+		{"receipt-seed", nil, ""},
+		{"receipt-seed", []string{"0"}, ""},
+		{"receipt-seed", []string{"0500"}, ""},
+		{"receipt-seed", []string{"-1"}, ""},
+		{"receipt-seed", []string{"1000000000"}, ""},
+		{"receipt-seed", []string{"5 & calc"}, ""},
+		{"receipt-seed", []string{"5", "6"}, ""},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})
