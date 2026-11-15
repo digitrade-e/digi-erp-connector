@@ -231,9 +231,29 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 | `order_number_conflict` | the old and the new order folder hold different order counters |
 | `busy` | another run holds `provision\.lock` |
 | `port_proof_failed` | the restarted connector did not answer; the pre-image was put back |
+| `sa_link_mode` | behind the link (below), `allowSa`: the connector never keeps `sa` there |
+| `importer_not_erp` | behind the link, an importer that is not `has.exe` or a `.bat`/`.cmd`, or one in a system folder |
+| `image_folder_forbidden` | behind the link, an image folder in a system folder or a user's `AppData` |
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
+
+## Behind the link (link mode)
+
+A box whose `link.yaml` (the data directory) names a box or a pairing code dials out to Digitrade's relay through
+`digi-erp-connector-link` ([link.md](link.md)). `apply`, `options` and `discover` see it and change four rules —
+the WinRM path is unchanged:
+
+- **`apiListen` may be loopback** (`127.0.0.1:8082`): nothing reaches the API from the network, so `loopback_listen`
+  is neither a refusal nor a `discover` defect, and a `firewall` block for a loopback listen is refused as pointless.
+- **`allowSa` is refused** (`sa_link_mode`): whoever holds the connector's credential can register and run SQL through
+  `custom_sql`, so behind the link the connector's own login is never `sa`. `sa` once, for `leastPrivilege`, is fine.
+- **The order importer** is Hasavshevet's `has.exe` or a `.bat`/`.cmd`, outside `%SystemRoot%`, `%ProgramFiles%`,
+  `%ProgramFiles(x86)%` and `%ProgramData%` (`importer_not_erp`): it runs as LocalSystem once per order.
+- **Image folders** are outside those folders and outside any `AppData` (`image_folder_forbidden`): `/api/file` serves
+  what is in them.
+
+These bound what a signed command can make a box do (Digitrade plan 083 §8 A16).
 
 ## What it does not do
 
