@@ -383,7 +383,7 @@ func TestACommandRunsProvisionAndTheAnswerIsSigned(t *testing.T) {
 	stdin := []byte(`{"db":{"user":"sa"}}`)
 	raw, e := envelope(priv, "team-1", "bfl-read", "discover", nil, stdin, time.Now())
 	stdout, sa := send(t, rc, raw, stdin)
-	a, err := linkproto.VerifyAnswer(b.keys.Public(), sa, "bfl-read", e.Nonce, stdout)
+	a, err := linkproto.VerifyAnswer(b.keys.Public(), sa, "bfl-read", e.Nonce, digestOf(raw), stdout)
 	if err != nil {
 		t.Fatalf("the answer does not verify with the box's key: %v", err)
 	}
@@ -435,12 +435,26 @@ func TestCommandRefusals(t *testing.T) {
 		{"a changed stdin", func() []byte { x, _ := envelope(priv, "team-1", "bfl-read", "verify", nil, stdin, now); return x }, []byte(`{"other":1}`), linkproto.CodeBodyMismatch},
 		{"not JSON", func() []byte { return []byte("nope") }, stdin, linkproto.CodeMalformed},
 	}
+	// before the signature verified, an answer names no nonce and no envelope: it says nothing about a command
+	unbound := map[string]bool{linkproto.CodeKeyUnknown: true, linkproto.CodeBadSignature: true, linkproto.CodeWrongBox: true,
+		linkproto.CodeExpired: true, linkproto.CodeMalformed + " (not JSON)": true}
 	for _, c := range cases {
-		stdout, sa := send(t, rc, c.raw(), c.stdin)
+		raw := c.raw()
+		stdout, sa := send(t, rc, raw, c.stdin)
 		var a linkproto.Answer
 		_ = json.Unmarshal(sa.Body, &a)
 		if a.Refusal != c.wanted {
 			t.Errorf("%s: refusal %q, want %q", c.name, a.Refusal, c.wanted)
+		}
+		key := c.wanted
+		if c.name == "not JSON" {
+			key += " (not JSON)"
+		}
+		if bound := a.Nonce != "" || a.Env != ""; bound == unbound[key] {
+			t.Errorf("%s: nonce %q env %q — bound %v, want %v", c.name, a.Nonce, a.Env, bound, !unbound[key])
+		}
+		if !unbound[key] && a.Env != digestOf(raw) {
+			t.Errorf("%s: the answer is bound to another envelope", c.name)
 		}
 		if len(stdout) != 0 {
 			t.Errorf("%s: stdout %q from a refused command", c.name, stdout)
@@ -602,5 +616,93 @@ func TestAnUnpairedLinkLooksAgainSoon(t *testing.T) {
 	_, wait, err := l.connect(context.Background(), State{})
 	if !errors.Is(err, errNotPaired) || wait <= 0 || wait > 15*time.Second {
 		t.Fatalf("an unpaired box: %v, next look in %s", err, wait)
+	}
+}
+
+func digestOf(raw []byte) string {
+	var s linkproto.Signed
+	_ = json.Unmarshal(raw, &s)
+	return linkproto.EnvelopeDigest(s)
+}
+
+// The review's attack (2026-11-15): a relay first delivers a tampered copy of E to collect a signed refusal for E's
+// nonce, then the real E, then hands digi-mcp the refusal. The tampered copy's refusal now names no nonce, so it
+// answers nothing; a second delivery of the real E gets replayed_nonce bound to E — "it reached the box before".
+func TestARelayCannotPassOffARefusalAsTheAnswer(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
+	stdin := []byte(`{}`)
+	raw, e := envelope(priv, "team-1", "bfl-read", "apply", nil, stdin, time.Now())
+	var s linkproto.Signed
+	_ = json.Unmarshal(raw, &s)
+	sig := []byte(s.Sig)
+	sig[3] ^= 1
+	s.Sig = string(sig)
+	tampered, _ := json.Marshal(s)
+
+	_, pre := send(t, rc, tampered, stdin)
+	if _, err := linkproto.VerifyAnswer(b.keys.Public(), pre, "bfl-read", e.Nonce, digestOf(raw), nil); err == nil {
+		t.Fatal("a refusal of a tampered copy verifies as the answer to the real envelope")
+	}
+	stdout, real := send(t, rc, raw, stdin)
+	a, err := linkproto.VerifyAnswer(b.keys.Public(), real, "bfl-read", e.Nonce, digestOf(raw), stdout)
+	if err != nil || a.Refusal != "" || b.runner.count() != 1 {
+		t.Fatalf("the real envelope: %v %+v, %d runs", err, a, b.runner.count())
+	}
+	_, again := send(t, rc, raw, stdin)
+	a, err = linkproto.VerifyAnswer(b.keys.Public(), again, "bfl-read", e.Nonce, digestOf(raw), nil)
+	if err != nil || a.Refusal != linkproto.CodeReplay || b.runner.count() != 1 {
+		t.Fatalf("a second delivery: %v %+v, %d runs", err, a, b.runner.count())
+	}
+}
+
+// A changed stdin spends the nonce: the real envelope cannot run after the relay collected body_mismatch for it, so
+// that answer stays true.
+func TestABodyMismatchSpendsTheNonce(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
+	stdin := []byte(`{}`)
+	raw, _ := envelope(priv, "team-1", "bfl-read", "apply", nil, stdin, time.Now())
+	send(t, rc, raw, []byte(`{"other":1}`))
+	_, sa := send(t, rc, raw, stdin)
+	var a linkproto.Answer
+	_ = json.Unmarshal(sa.Body, &a)
+	if a.Refusal != linkproto.CodeReplay || b.runner.count() != 0 {
+		t.Fatalf("the real envelope after a body mismatch: %+v, %d runs", a, b.runner.count())
+	}
+}
+
+// A nonce file that will not read refuses commands; a misspelt off switch refuses commands (review 2026-11-15).
+func TestStateFailsClosed(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
+	stdin := []byte(`{}`)
+	if err := os.MkdirAll(filepath.Dir(b.store.noncePath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.store.noncePath(), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.store.nonces = nil // as after a restart
+	raw, _ := envelope(priv, "team-1", "bfl-read", "verify", nil, stdin, time.Now())
+	_, sa := send(t, rc, raw, stdin)
+	var a linkproto.Answer
+	_ = json.Unmarshal(sa.Body, &a)
+	if a.Refusal != "state_unreadable" || b.runner.count() != 0 {
+		t.Fatalf("an unreadable nonce file: %+v, %d runs", a, b.runner.count())
+	}
+	_ = os.Remove(b.store.noncePath())
+	b.store.nonces = nil
+	st, _ := b.store.LoadState()
+	y := "box: " + st.Box + "\nAdmin: false\n"
+	_ = os.WriteFile(filepath.Join(b.store.Dir, "link.yaml"), []byte(y), 0o600)
+	raw, _ = envelope(priv, "team-1", "bfl-read", "verify", nil, stdin, time.Now())
+	_, sa = send(t, rc, raw, stdin)
+	_ = json.Unmarshal(sa.Body, &a)
+	if a.Refusal != "state_unreadable" || b.runner.count() != 0 {
+		t.Fatalf("a misspelt off switch: %+v, %d runs", a, b.runner.count())
 	}
 }

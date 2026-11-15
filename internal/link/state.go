@@ -6,9 +6,11 @@
 package link
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,7 +34,12 @@ type State struct {
 	PairCode string `yaml:"pairCode,omitempty"` // a code waiting to be redeemed; cleared after
 	Admin    *bool  `yaml:"admin,omitempty"`    // nil = on
 	Proxy    string `yaml:"proxy,omitempty"`    // an HTTP proxy URL; empty = the machine's
+
+	unknownKeys bool // link.yaml names a key the link does not know: commands are refused (UnknownKeys)
 }
+
+// UnknownKeys says link.yaml names a key the link does not know (a misspelt off switch): every command is refused.
+func (s State) UnknownKeys() bool { return s.unknownKeys }
 
 // RelayURL is Relay or the default.
 func (s State) RelayURL() string {
@@ -80,9 +87,19 @@ func (s *Store) LoadState() (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	// Strict: a key the link does not know (a misspelt "Admin: false") is an error, not a silent "commands on"; the
+	// caller then refuses commands (review 2026-11-15).
 	var st State
-	if err := yaml.Unmarshal(b, &st); err != nil {
-		return State{}, fmt.Errorf("link.yaml does not parse: %w", err)
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&st); err != nil && !errors.Is(err, io.EOF) {
+		var lenient State
+		if yaml.Unmarshal(b, &lenient) != nil {
+			return State{}, fmt.Errorf("link.yaml does not parse: %w", err)
+		}
+		// a key the link does not know: the link connects (the data path stays) and refuses every command
+		lenient.unknownKeys = true
+		return lenient, nil
 	}
 	return st, nil
 }
@@ -128,15 +145,28 @@ func (s *Store) Keys(newKeys func() (linkproto.BoxKeys, error)) (linkproto.BoxKe
 // MinEpoch is the highest team-key epoch this box has accepted (plan 083 §8
 // A17): a key below it is refused, so a downgrade cannot bring a revoked key back.
 func (s *Store) MinEpoch(compiled int) int {
-	b, err := s.Secrets.Get(secretMinEpoch)
+	n, err := s.MinEpochStrict(compiled)
 	if err != nil {
 		return compiled
 	}
-	var n int
-	if _, err := fmt.Sscan(string(b), &n); err != nil || n < compiled {
-		return compiled
-	}
 	return n
+}
+
+// MinEpochStrict is MinEpoch that fails closed: a floor that cannot be read is an error, never the compiled one —
+// a downgrade could otherwise bring a retired key back (review 2026-11-15). No floor stored yet is the compiled one.
+func (s *Store) MinEpochStrict(compiled int) (int, error) {
+	b, err := s.Secrets.Get(secretMinEpoch)
+	if errors.Is(err, ErrNoSecret) {
+		return compiled, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	if _, err := fmt.Sscan(string(b), &n); err != nil {
+		return 0, fmt.Errorf("the stored key-epoch floor does not parse: %w", err)
+	}
+	return max(n, compiled), nil
 }
 
 // RaiseMinEpoch records epoch if it is higher than the stored one.
@@ -147,19 +177,31 @@ func (s *Store) RaiseMinEpoch(epoch, compiled int) error {
 	return s.Secrets.Set(secretMinEpoch, []byte(fmt.Sprint(epoch)))
 }
 
+// nonceKeep is how long past its expiry a nonce is remembered, in seconds.
+const nonceKeep = 24 * 60 * 60
+
 // UseNonce records nonce until expires and refuses one seen before. The file
 // survives a restart, so a restart does not reopen the replay window.
 func (s *Store) UseNonce(nonce string, expires, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.nonces == nil {
-		s.nonces = map[string]int64{}
-		if b, err := os.ReadFile(s.noncePath()); err == nil {
-			_ = json.Unmarshal(b, &s.nonces)
+		nonces := map[string]int64{}
+		b, err := os.ReadFile(s.noncePath())
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return &linkproto.Refusal{Code: "state_unreadable"} // fail closed: never start over from nothing
+		default:
+			if err := json.Unmarshal(b, &nonces); err != nil {
+				return &linkproto.Refusal{Code: "state_unreadable"}
+			}
 		}
+		s.nonces = nonces
 	}
+	// Kept a day past their expiry: a clock set back (NTP spoofed, a VM restored) does not reopen the window.
 	for n, exp := range s.nonces {
-		if exp <= now.Unix() {
+		if exp+nonceKeep <= now.Unix() {
 			delete(s.nonces, n)
 		}
 	}

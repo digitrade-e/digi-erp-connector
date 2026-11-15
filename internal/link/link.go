@@ -55,7 +55,16 @@ type Config struct {
 
 // Link keeps one box connected to the relay.
 type Link struct {
-	cfg Config
+	cfg       Config
+	cmdSlots  chan struct{}
+	dataSlots chan struct{}
+
+	unverMu    sync.Mutex
+	unverAt    time.Time
+	unverCount int
+
+	moveMu  sync.Mutex
+	movedAt time.Time
 }
 
 func New(cfg Config) *Link {
@@ -77,7 +86,7 @@ func New(cfg Config) *Link {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
 	}
-	return &Link{cfg: cfg}
+	return &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64)}
 }
 
 // conn is one live connection to the relay.
@@ -152,9 +161,20 @@ func (l *Link) serve(ctx context.Context, c *conn) {
 			go l.checkLive(c)
 			continue
 		case reason = <-c.move:
+			// A relay that asks to move on every round trip would have the box open TLS and WebSocket connections
+			// without end, each old one held while a stream stays open: one move per 30 s at most (review 2026-11-15).
+			l.moveMu.Lock()
+			wait := 30*time.Second - l.cfg.Now().Sub(l.movedAt)
+			l.moveMu.Unlock()
+			if wait > 0 {
+				sleep(ctx, wait)
+			}
 		case <-rotate.C:
 			reason = "rotation"
 		}
+		l.moveMu.Lock()
+		l.movedAt = l.cfg.Now()
+		l.moveMu.Unlock()
 		st, err := l.cfg.Store.LoadState()
 		var next *conn
 		if err == nil {
@@ -231,7 +251,7 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 		_ = ws.CloseNow()
 		switch w.Code {
 		case linkproto.CodePending:
-			if hello.PairCode != "" && w.Box != "" {
+			if hello.PairCode != "" && linkproto.ValidBoxID(w.Box) {
 				st.Box, st.PairCode = w.Box, ""
 				if err := l.cfg.Store.SaveState(st); err != nil {
 					return nil, 0, fmt.Errorf("saving the box id %s: %w", w.Box, err)
@@ -241,9 +261,9 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 			}
 			return nil, l.cfg.PendingRetry, errPending
 		case linkproto.CodeBoxKeyChanged, linkproto.CodeBoxUnknown, linkproto.CodePairExpired, linkproto.CodeBadPairCode, "box_disabled":
-			return nil, 10 * time.Minute, fmt.Errorf("the relay refused this box: %s", w.Code)
+			return nil, 10 * time.Minute, fmt.Errorf("the relay refused this box: %q", w.Code)
 		}
-		return nil, 0, fmt.Errorf("the relay refused: %s", w.Code)
+		return nil, 0, fmt.Errorf("the relay refused: %q", w.Code)
 	}
 	ws.SetReadLimit(8 << 20) // yamux frames exceed the library's 32 KiB default (plan 083 §10 finding 2)
 	nc := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
@@ -263,7 +283,7 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 	c := &conn{sess: sess, epoch: w.Epoch, relay: w.Relay, ctl: ctl, move: make(chan string, 4), liveAns: make(chan bool, 1)}
 	go l.readControl(c)
 	go l.accept(c)
-	l.cfg.Log.Info(fmt.Sprintf("link: connected to %s as %s (epoch %d)", w.Relay, w.Box, w.Epoch))
+	l.cfg.Log.Info(fmt.Sprintf("link: connected to %q as %q (epoch %d)", w.Relay, w.Box, w.Epoch))
 	return c, 0, nil
 }
 
@@ -275,7 +295,7 @@ func (l *Link) readControl(c *conn) {
 		}
 		switch m.T {
 		case linkproto.CtlGoAway:
-			l.cfg.Log.Info(fmt.Sprintf("link: the relay asks to move (%s)", m.Reason))
+			l.cfg.Log.Info(fmt.Sprintf("link: the relay asks to move (%q)", m.Reason))
 			select {
 			case c.move <- "goaway":
 			default:

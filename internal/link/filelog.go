@@ -2,6 +2,7 @@ package link
 
 import (
 	"fmt"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"os"
 	"sync"
 	"time"
@@ -33,7 +34,7 @@ func (l *FileLog) open() error {
 	if fi, err := os.Stat(l.path); err == nil && fi.Size() > maxLogSize {
 		_ = os.Rename(l.path, l.path+".1")
 	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := dataacl.OpenLog(l.path) // the daemon's way: never a log a local user planted or can read
 	if err != nil {
 		return err
 	}

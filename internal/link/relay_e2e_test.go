@@ -150,7 +150,7 @@ func TestAgainstTheRealRelay(t *testing.T) {
 	ansRaw, _ := linkproto.ReadFrame(rd, linkproto.MaxControlFrame)
 	var sa linkproto.SignedAnswer
 	_ = json.Unmarshal(ansRaw, &sa)
-	a, err := linkproto.VerifyAnswer(keys.Public(), sa, box, e.Nonce, stdout)
+	a, err := linkproto.VerifyAnswer(keys.Public(), sa, box, e.Nonce, linkproto.EnvelopeDigest(s), stdout)
 	if err != nil || a.Refusal != "" || runner.count() != 1 {
 		t.Fatalf("the command: %v %+v, %d runs", err, a, runner.count())
 	}

@@ -161,3 +161,56 @@ func TestApplyCheckBehindTheLinkTakesALoopbackListen(t *testing.T) {
 		t.Fatalf("a linked apply with allowSa: %v, want sa_link_mode", err)
 	}
 }
+
+// The security review's bypasses (2026-11-15), as Windows paths whatever OS the tests run on.
+func TestLinkModeRefusesTheReviewsBypasses(t *testing.T) {
+	t.Setenv("SystemDrive", "C:")
+	sysDirs := []string{`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`}
+	orders := filepath.Join(t.TempDir(), "orders")
+	loop := func(s Spec) Spec { s.APIListen = "127.0.0.1:8082"; s.Firewall = nil; return s }
+	base := func() Spec { return loop(handInstallSpec(orders)) }
+	bat := func(p string) Spec { return withImporter(base(), ImporterSpec{Mode: "bat", HasBatFile: p}) }
+	exe := func(p string) Spec { return withImporter(base(), ImporterSpec{Mode: "hasExe", HasExePath: p}) }
+	for name, c := range map[string]struct {
+		spec Spec
+		code string
+	}{
+		"a command after & in the BAT path":    {bat(`C:\x&powershell -ec AAAA&\..\Windows\System32\winrm.cmd`), CodeImporterNotERP},
+		"a Masofon BAT with & cmd &":           {bat(`C:\Hash7\x.bat&cmd&\..\x.bat`), CodeImporterNotERP},
+		"a BAT path that climbs":               {bat(`C:\Hash7\..\Windows\System32\x.cmd`), CodeImporterNotERP},
+		"has.exe on a share":                   {exe(`\\attacker\s\has.exe`), CodeImporterNotERP},
+		"has.exe through the long-path prefix": {exe(`\\?\C:\Hash7\has.exe`), CodeImporterNotERP},
+		"allowWritable": {withImporter(base(), ImporterSpec{Mode: "bat", HasBatFile: `C:\Hash7\importorders.bat`, AllowWritable: true}),
+			CodeImporterNotERP},
+		"the drive as the image folder":       {withFolders(base(), `C:\`), CodeImageFolderForbidden},
+		"the profiles as the image folder":    {withFolders(base(), `C:\Users`), CodeImageFolderForbidden},
+		"an administrator's desktop":          {withFolders(base(), `C:\Users\Administrator\Desktop`), CodeImageFolderForbidden},
+		"a folder that climbs to ProgramData": {withFolders(base(), `C:\x\..\ProgramData\digi-erp-connector`), CodeImageFolderForbidden},
+		"a sysadmin login of another name": {func() Spec {
+			s := base()
+			s.DB.User, s.DB.LeastPrivilege = "erp_admin", false
+			return s
+		}(), CodeSaLinkMode},
+		"the API on every address":        {func() Spec { s := handInstallSpec(orders); s.Firewall = nil; return s }(), CodeSpecInvalid},
+		"a firewall rule behind the link": {func() Spec { s := base(); s.Firewall = &FirewallSpec{AllowFrom: []string{"198.51.100.241"}}; return s }(), CodeSpecInvalid},
+	} {
+		r := c.spec.ValidateFor(true, sysDirs)
+		if r == nil || r.Code != c.code {
+			t.Errorf("%s: %v, want %s", name, r, c.code)
+		}
+	}
+	// what link mode still takes — Windows paths are absolute only on Windows (CI's windows-latest runs these)
+	if runtime.GOOS != "windows" {
+		return
+	}
+	for name, spec := range map[string]Spec{
+		"has.exe in its own folder": exe(`C:\Hash7\has.exe`),
+		"a BAT with a space":        bat(`C:\Masofon BAT\importorders.bat`),
+		"images on another drive":   withFolders(base(), `D:\Images`),
+		"images in a Hebrew folder": withFolders(base(), `C:\תמונות -Digitrade`),
+	} {
+		if r := spec.ValidateFor(true, sysDirs); r != nil {
+			t.Errorf("%s: %v", name, r)
+		}
+	}
+}

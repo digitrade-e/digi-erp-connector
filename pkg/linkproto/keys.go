@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 
+	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 )
 
@@ -102,8 +103,15 @@ func ParseBoxPublic(signB64, sealB64 string) (BoxPublic, error) {
 	if err != nil || len(seal) != 32 {
 		return BoxPublic{}, &Refusal{Code: CodeBadKey}
 	}
+	// A low-order X25519 key would let anyone open what is sealed to it (review 2026-11-15): X25519 refuses one.
+	if _, err := curve25519.X25519(probeScalar[:], seal); err != nil {
+		return BoxPublic{}, &Refusal{Code: CodeBadKey}
+	}
 	var p BoxPublic
 	p.Sign = ed25519.PublicKey(sign)
 	copy(p.Seal[:], seal)
 	return p, nil
 }
+
+// probeScalar is any fixed scalar: X25519 with a low-order point gives the all-zero output, which it refuses.
+var probeScalar = [32]byte{9}

@@ -124,7 +124,9 @@ func getProxyForURL(target, pac string) (string, string, error) {
 		return "", "", e
 	}
 	defer func() { _, _, _ = procWinHTTPCloseHandle.Call(h) }()
-	opts := winhttpAutoProxyOptions{autoLogonIfChallenged: 1}
+	// No automatic logon: whoever answers for WPAD on the LAN would collect the machine account's NTLM (review
+	// 2026-11-15); a proxy that wants a login is a preflight STOP anyway.
+	opts := winhttpAutoProxyOptions{autoLogonIfChallenged: 0}
 	if pac != "" {
 		opts.flags = winhttpAutoConfigURL
 		opts.autoConfigURL, _ = windows.UTF16PtrFromString(pac)

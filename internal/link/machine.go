@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/pkg/linkproto"
 )
 
@@ -28,6 +31,22 @@ type Machine struct {
 	Build      string
 	Log        Logger
 	HostFacts  func() (host, domain string, role int)
+}
+
+// Protect gives the data directory the connector's protected DACL (SYSTEM and Administrators only) before the link
+// writes its keys or link.yaml there, and refuses when it cannot — never keys in a folder a local user can read or
+// owns (review 2026-11-15: on a fresh install setup's pair ran before the daemon's first start had protected it).
+func (m Machine) Protect() error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	if err := os.MkdirAll(m.DataDir, 0o700); err != nil {
+		return err
+	}
+	if _, err := dataacl.ProtectTree(m.DataDir, dataacl.TreeOptions{}); err != nil {
+		return fmt.Errorf("the data directory %s could not be protected (its owner or ACL is not the connector's): %w", m.DataDir, err)
+	}
+	return nil
 }
 
 // Store is the link's state under the data directory.

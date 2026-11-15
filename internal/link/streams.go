@@ -28,6 +28,18 @@ func (l *Link) handleStream(st *yamux.Stream) {
 		return
 	}
 	_ = st.SetReadDeadline(time.Time{})
+	// Streams the relay may hold at once: two commands, 64 data calls; more are closed at once (review 2026-11-15:
+	// 500 idle command streams held 500 MiB on the client's SQL Server host).
+	slots := l.dataSlots
+	if kind[0] == linkproto.StreamCommand {
+		slots = l.cmdSlots
+	}
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		return
+	}
 	switch kind[0] {
 	case linkproto.StreamData:
 		l.pipe(st)
@@ -62,41 +74,60 @@ func (l *Link) pipe(st net.Conn) {
 	wg.Wait()
 }
 
-// command runs one signed envelope. Everything is checked before anything
-// runs, and every refusal is itself a signed answer, so digi-mcp can tell the
-// box refused from the relay failed.
+// frameWait bounds the wait for each frame of a command: a relay that announces a frame and stalls holds the stream no
+// longer than this (review 2026-11-15).
+const frameWait = 30 * time.Second
+
+// command runs one signed envelope. The envelope is verified before its stdin
+// is read, and its nonce spent at once: an answer to a verified envelope names
+// its nonce and its digest (linkproto.EnvelopeDigest), so a relay cannot pass
+// off the answer to one delivery as another's. A refusal before verification
+// names neither, and says nothing about any command (review 2026-11-15).
 func (l *Link) command(st net.Conn) {
 	_ = st.SetDeadline(time.Now().Add(CommandDeadline + time.Minute))
+	_ = st.SetReadDeadline(time.Now().Add(frameWait))
 	envFrame, err := linkproto.ReadFrame(st, linkproto.MaxControlFrame)
-	if err != nil {
-		return
-	}
-	stdin, err := linkproto.ReadFrame(st, linkproto.MaxPayload)
 	if err != nil {
 		return
 	}
 	state, _ := l.cfg.Store.LoadState()
 	ans := linkproto.Answer{Box: state.Box, Started: l.cfg.Now().Unix()}
 	var stdout []byte
-
-	env, keyID, refusal := l.check(state, envFrame, stdin)
-	ans.Nonce = env.Nonce
-	switch {
-	case refusal != "":
-		ans.Refusal = refusal
-		l.cfg.Log.Warn(fmt.Sprintf("link: command refused (%s): %q change-set %q by %q", refusal, env.Command, env.ChangeSet, env.By))
-	default:
-		if env.Sealed {
-			plain, err := linkproto.Open(l.cfg.Keys, stdin)
-			if err != nil {
-				ans.Refusal = "sealed_input_refused"
-				break
-			}
-			stdin = plain
+	env, keyID, digest, refusal := l.verify(state, envFrame)
+	if digest != "" {
+		ans.Nonce, ans.Env = env.Nonce, digest
+	}
+	if refusal == "" {
+		_ = st.SetReadDeadline(time.Now().Add(frameWait))
+		stdin, err := linkproto.ReadFrame(st, linkproto.MaxPayload)
+		if err != nil {
+			l.cfg.Log.Warn(fmt.Sprintf("link: command %q change-set %q: its input did not arrive; not run", env.Command, env.ChangeSet))
+			return
 		}
-		l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q by %q (key %s)", env.Command, env.ChangeSet, env.By, keyID))
-		stdout, ans.Exit = l.run(env, stdin)
-		l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q ended, exit %d, %d bytes", env.Command, env.ChangeSet, ans.Exit, len(stdout)))
+		_ = st.SetDeadline(time.Now().Add(CommandDeadline + time.Minute))
+		refusal = l.checkInput(env, stdin)
+		if refusal == "" {
+			if env.Sealed {
+				plain, err := linkproto.Open(l.cfg.Keys, stdin)
+				if err != nil {
+					refusal = "sealed_input_refused"
+				}
+				stdin = plain
+			}
+		}
+		if refusal == "" {
+			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q by %q (key %s)", env.Command, env.ChangeSet, env.By, keyID))
+			stdout, ans.Exit = l.run(env, stdin)
+			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q ended, exit %d, %d bytes", env.Command, env.ChangeSet, ans.Exit, len(stdout)))
+		}
+	}
+	if refusal != "" {
+		ans.Refusal = refusal
+		if digest != "" {
+			l.cfg.Log.Warn(fmt.Sprintf("link: command %q change-set %q by %q refused: %s", env.Command, env.ChangeSet, env.By, refusal))
+		} else {
+			l.refusedUnverified(refusal)
+		}
 	}
 	ans.Finished = l.cfg.Now().Unix()
 	ans.StdoutSHA256, ans.StdoutLen = linkproto.SHA256Hex(stdout), int64(len(stdout))
@@ -110,42 +141,63 @@ func (l *Link) command(st net.Conn) {
 	}
 }
 
-// check runs every refusal in order; it returns the envelope (for the log
-// and the answer's nonce), the key that signed it, and a refusal code or "".
-func (l *Link) check(state State, envFrame, stdin []byte) (linkproto.Envelope, string, string) {
+// verify checks the envelope alone, in order, and spends its nonce. digest is
+// set once the signature verified: refusals from there on are about this
+// envelope. Nothing from an unverified envelope is returned or logged.
+func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, keyID, digest, refusal string) {
 	var s linkproto.Signed
 	if err := json.Unmarshal(envFrame, &s); err != nil {
-		return linkproto.Envelope{}, "", linkproto.CodeMalformed
-	}
-	if !state.AdminOn() {
-		// The client's off switch (link.yaml admin: false). Read the envelope only to log what was refused.
-		var e linkproto.Envelope
-		_ = json.Unmarshal(s.Body, &e)
-		return e, "", "admin_off"
+		return env, "", "", linkproto.CodeMalformed
 	}
 	if state.Box == "" {
-		return linkproto.Envelope{}, "", linkproto.CodeBoxUnknown
+		return env, "", "", linkproto.CodeBoxUnknown
 	}
-	minEpoch := l.cfg.Store.MinEpoch(CompiledMinEpoch)
+	minEpoch, err := l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
+	if err != nil {
+		return env, "", "", "state_unreadable"
+	}
 	env, key, err := l.cfg.Team.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
 	if err != nil {
-		var e linkproto.Envelope
-		_ = json.Unmarshal(s.Body, &e) // for the log only: nothing from it is trusted
-		return e, "", refusalCode(err)
+		return linkproto.Envelope{}, "", "", refusalCode(err)
 	}
-	if linkproto.SHA256Hex(stdin) != env.StdinSHA256 {
-		return env, key.ID, linkproto.CodeBodyMismatch
-	}
-	if _, err := l.argv(env); err != nil {
-		return env, key.ID, refusalCode(err)
-	}
+	digest = linkproto.EnvelopeDigest(s)
 	if err := l.cfg.Store.UseNonce(env.Nonce, time.Unix(env.ExpiresAt, 0), l.cfg.Now()); err != nil {
-		return env, key.ID, refusalCode(err)
+		return env, key.ID, digest, refusalCode(err) // replayed_nonce: this envelope reached the box before
 	}
 	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil {
 		l.cfg.Log.Error("link: recording the key epoch", err)
 	}
-	return env, key.ID, ""
+	if !state.AdminOn() {
+		return env, key.ID, digest, "admin_off" // the client's off switch (link.yaml admin: false)
+	}
+	if state.UnknownKeys() {
+		return env, key.ID, digest, "state_unreadable" // link.yaml names a key we do not know: perhaps a misspelt off switch
+	}
+	return env, key.ID, digest, ""
+}
+
+// checkInput is what needs the stdin: its digest, then the command's argv.
+func (l *Link) checkInput(env linkproto.Envelope, stdin []byte) string {
+	if linkproto.SHA256Hex(stdin) != env.StdinSHA256 {
+		return linkproto.CodeBodyMismatch
+	}
+	if _, err := l.argv(env); err != nil {
+		return refusalCode(err)
+	}
+	return ""
+}
+
+// refusedUnverified logs refusals of envelopes that did not verify as one
+// summary a minute: a relay (or anyone it relays) cannot flood link.log and the
+// client's Application log, or choose the text written there.
+func (l *Link) refusedUnverified(code string) {
+	l.unverMu.Lock()
+	defer l.unverMu.Unlock()
+	l.unverCount++
+	if now := l.cfg.Now(); now.Sub(l.unverAt) >= time.Minute {
+		l.cfg.Log.Warn(fmt.Sprintf("link: %d envelope(s) refused before verification in the last minute (last: %s)", l.unverCount, code))
+		l.unverAt, l.unverCount = now, 0
+	}
 }
 
 func (l *Link) argv(env linkproto.Envelope) ([]string, error) {

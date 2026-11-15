@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -198,11 +201,12 @@ func TestAnswer(t *testing.T) {
 	k := mustKeys(t)
 	stdout := []byte(`{"command":"discover","ok":true}`)
 	nonce := RandomNonce(16)
-	sa, err := SignAnswer(k, Answer{Box: "groopy-tsdc", Nonce: nonce, Exit: 0, StdoutSHA256: SHA256Hex(stdout), StdoutLen: int64(len(stdout))})
+	env := SHA256Hex([]byte(`{"the":"envelope"}`))
+	sa, err := SignAnswer(k, Answer{Box: "groopy-tsdc", Nonce: nonce, Env: env, Exit: 0, StdoutSHA256: SHA256Hex(stdout), StdoutLen: int64(len(stdout))})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyAnswer(k.Public(), sa, "groopy-tsdc", nonce, stdout); err != nil {
+	if _, err := VerifyAnswer(k.Public(), sa, "groopy-tsdc", nonce, env, stdout); err != nil {
 		t.Fatalf("a good answer: %v", err)
 	}
 	cases := []struct {
@@ -210,18 +214,66 @@ func TestAnswer(t *testing.T) {
 		pub    BoxPublic
 		box    string
 		nonce  string
+		env    string
 		stdout []byte
 		wanted string
 	}{
-		{"another box's key (a relay forging a green verify)", mustKeys(t).Public(), "groopy-tsdc", nonce, stdout, CodeBadSignature},
-		{"an answer to another command", k.Public(), "groopy-tsdc", RandomNonce(16), stdout, CodeWrongNonce},
-		{"a changed stdout", k.Public(), "groopy-tsdc", nonce, []byte(`{"command":"discover","ok":false}`), CodeBodyMismatch},
-		{"another box id", k.Public(), "bfl-node1", nonce, stdout, CodeWrongBox},
+		{"another box's key (a relay forging a green verify)", mustKeys(t).Public(), "groopy-tsdc", nonce, env, stdout, CodeBadSignature},
+		{"an answer to another command", k.Public(), "groopy-tsdc", RandomNonce(16), env, stdout, CodeWrongNonce},
+		{"an answer to another delivery of the same nonce", k.Public(), "groopy-tsdc", nonce, SHA256Hex([]byte("other")), stdout, CodeWrongNonce},
+		{"a changed stdout", k.Public(), "groopy-tsdc", nonce, env, []byte(`{"command":"discover","ok":false}`), CodeBodyMismatch},
+		{"another box id", k.Public(), "bfl-node1", nonce, env, stdout, CodeWrongBox},
 	}
 	for _, c := range cases {
-		if _, err := VerifyAnswer(c.pub, sa, c.box, c.nonce, c.stdout); code(err) != c.wanted {
+		if _, err := VerifyAnswer(c.pub, sa, c.box, c.nonce, c.env, c.stdout); code(err) != c.wanted {
 			t.Errorf("%s: got %q, want %q", c.name, code(err), c.wanted)
 		}
+	}
+	// a refusal the box signed before it verified an envelope names neither nonce nor envelope: it answers nothing
+	pre, _ := SignAnswer(k, Answer{Box: "groopy-tsdc", Refusal: CodeBadSignature, StdoutSHA256: SHA256Hex(nil)})
+	if _, err := VerifyAnswer(k.Public(), pre, "groopy-tsdc", nonce, env, nil); code(err) != CodeWrongNonce {
+		t.Errorf("a pre-verification refusal passed: %q", code(err))
+	}
+}
+
+// A low-order X25519 key opens to anyone; a hello's fields have shapes (review 2026-11-15).
+func TestBoxKeyAndHelloShapes(t *testing.T) {
+	k := mustKeys(t)
+	p := k.Public()
+	if _, err := ParseBoxPublic(p.SignB64(), base64.StdEncoding.EncodeToString(make([]byte, 32))); code(err) != CodeBadKey {
+		t.Errorf("the all-zero X25519 key: %q", code(err))
+	}
+	if _, err := ParseBoxPublic(p.SignB64(), p.SealB64()); err != nil {
+		t.Errorf("a real key: %v", err)
+	}
+	ch, _ := NewChallenge(rand.Reader, "r1")
+	for name, edit := range map[string]func(*Hello){
+		"a newline in the build":  func(h *Hello) { h.Build = "v1\nINFO forged" },
+		"a NUL in the host":       func(h *Hello) { h.Host = "SQL\x00SRV" },
+		"a domain role of 260":    func(h *Hello) { h.DomainRole = 260 },
+		"an escape in the domain": func(h *Hello) { h.Domain = "b4l\x1b[2K.local" },
+	} {
+		h := Hello{Box: "bfl-read", Build: "v1.0.28", Host: "SQLSRV", Domain: "b4l.local", DomainRole: 3}
+		edit(&h)
+		SignHello(k, &h, ch)
+		if _, err := VerifyHello(h, ch); code(err) != CodeMalformed {
+			t.Errorf("%s: %q", name, code(err))
+		}
+	}
+	h := Hello{Box: "bfl-read", Build: "v1.0.28-link-580e364", Host: "SQLSRV", Domain: "b4l.local", DomainRole: 3}
+	SignHello(k, &h, ch)
+	if _, err := VerifyHello(h, ch); err != nil {
+		t.Errorf("a good hello: %v", err)
+	}
+}
+
+// A peer that announces a frame and stalls holds no more memory than it sent (review 2026-11-15).
+func TestReadFrameGrowsAsBytesArrive(t *testing.T) {
+	var head [4]byte
+	binary.BigEndian.PutUint32(head[:], MaxPayload)
+	r := io.MultiReader(bytes.NewReader(head[:]), bytes.NewReader([]byte("only a little")))
+	if _, err := ReadFrame(r, MaxPayload); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("a short frame: %v", err)
 	}
 }
 

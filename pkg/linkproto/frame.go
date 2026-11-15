@@ -1,8 +1,10 @@
 package linkproto
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 )
 
@@ -41,11 +43,16 @@ func ReadFrame(r io.Reader, max int) ([]byte, error) {
 	if int64(size) > int64(max) {
 		return nil, refuse(CodeFrameTooLarge)
 	}
-	b := make([]byte, size)
-	if _, err := io.ReadFull(r, b); err != nil {
+	// The buffer grows as bytes arrive, never to the size a peer announces before sending them (review 2026-11-15:
+	// a stalled peer held 1 MiB per stream that way).
+	var b bytes.Buffer
+	if _, err := io.CopyN(&b, r, int64(size)); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return nil, err
 	}
-	return b, nil
+	return b.Bytes(), nil
 }
 
 // WriteJSONFrame and ReadJSONFrame carry one JSON value per frame.

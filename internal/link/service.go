@@ -22,6 +22,10 @@ type App struct {
 // still starts: it waits for a pairing code in link.yaml.
 func (a *App) Start() error {
 	a.errs = make(chan error, 1)
+	if err := a.Machine.Protect(); err != nil {
+		a.Log.Error("link: cannot start", err)
+		return err
+	}
 	cfg, err := a.Machine.Config()
 	if err != nil {
 		a.Log.Error("link: cannot start", err)

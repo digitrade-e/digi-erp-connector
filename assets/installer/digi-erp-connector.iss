@@ -170,6 +170,12 @@ begin
   StopServiceAndWait('{#LinkService}');
   Exec(ExpandConstant('{cmd}'), '/C sc.exe delete {#LinkService} >nul 2>&1', '', SW_HIDE,
        ewWaitUntilTerminated, ResultCode);
+  // The pairing goes with the link (plan 083 section 3.2): a later reinstall pairs again, never
+  // silently takes back a box Digitrade could command.
+  DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\link.yaml'));
+  DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\secrets\link_box_keys.bin'));
+  DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\secrets\link_min_key_epoch.bin'));
+  DelTree(ExpandConstant('{commonappdata}\digi-erp-connector\link'), True, True, True);
   if not StopServiceAndWait('{#ServiceName}') then
   begin
     Log('{#ServiceName} did not stop within ' + IntToStr(StopWaitSeconds) + ' s; deleting it anyway');

@@ -206,9 +206,12 @@ func (kr Keyring) VerifyAdmin(s Signed, now time.Time, op string, body []byte, m
 // Answer is the box's signed account of one command (plan 083 §8 A11): the relay
 // carries it and cannot forge it.
 type Answer struct {
-	V            int    `json:"v"`
-	Box          string `json:"box"`
-	Nonce        string `json:"nonce"` // the envelope's
+	V     int    `json:"v"`
+	Box   string `json:"box"`
+	Nonce string `json:"nonce"` // the envelope's, once its signature verified; "" for a refusal before that
+	// Env is the SHA-256 of the exact envelope bytes the box verified (EnvelopeDigest): the answer is bound to that
+	// command, not only to its nonce, so a relay cannot pass off the answer to another delivery as this one's.
+	Env          string `json:"env,omitempty"`
 	Exit         int    `json:"exit"`
 	StdoutSHA256 string `json:"stdoutSha256"`
 	StdoutLen    int64  `json:"stdoutLen"`
@@ -234,9 +237,15 @@ func SignAnswer(k BoxKeys, a Answer) (SignedAnswer, error) {
 	return SignedAnswer{Body: body, Sig: base64.StdEncoding.EncodeToString(sig)}, nil
 }
 
-// VerifyAnswer checks an answer against the box's pinned key, its id and the
-// nonce of the envelope it answers; stdout is checked against its digest.
-func VerifyAnswer(pub BoxPublic, s SignedAnswer, box, nonce string, stdout []byte) (Answer, error) {
+// EnvelopeDigest is the digest an answer binds: the exact signed envelope body.
+func EnvelopeDigest(s Signed) string { return SHA256Hex(s.Body) }
+
+// VerifyAnswer checks an answer against the box's pinned key, its id, the
+// nonce and the digest (EnvelopeDigest) of the envelope it answers; stdout is
+// checked against its digest. An answer the box gave before it verified the
+// envelope names neither, and is refused here: it says nothing about this
+// command.
+func VerifyAnswer(pub BoxPublic, s SignedAnswer, box, nonce, env string, stdout []byte) (Answer, error) {
 	sig, err := base64.StdEncoding.DecodeString(s.Sig)
 	if err != nil || len(sig) != ed25519.SignatureSize || !ed25519.Verify(pub.Sign, append([]byte(domainAnswer), s.Body...), sig) {
 		return Answer{}, refuse(CodeBadSignature)
@@ -250,7 +259,7 @@ func VerifyAnswer(pub BoxPublic, s SignedAnswer, box, nonce string, stdout []byt
 		return Answer{}, refuse(CodeVersion)
 	case a.Box != box:
 		return Answer{}, refuse(CodeWrongBox)
-	case a.Nonce != nonce:
+	case a.Nonce != nonce || a.Env == "" || a.Env != env:
 		return Answer{}, refuse(CodeWrongNonce)
 	case a.StdoutSHA256 != SHA256Hex(stdout) || a.StdoutLen != int64(len(stdout)):
 		return Answer{}, refuse(CodeBodyMismatch)

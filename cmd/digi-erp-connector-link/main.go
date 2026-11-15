@@ -42,6 +42,10 @@ func main() {
 		os.Exit(2)
 	}
 	switch args[0] {
+	case "fingerprint", "pair", "status": // they make or read the box's keys: the data directory is protected first
+		exitOn(m.Protect())
+	}
+	switch args[0] {
 	case "version":
 		fmt.Println(buildinfo.Version)
 	case "fingerprint":
@@ -80,6 +84,7 @@ func main() {
 		fmt.Print(link.FormatChecks(cs))
 		os.Exit(link.PreflightExit(cs))
 	case "run":
+		exitOn(m.Protect())
 		log, err := link.OpenFileLog(filepath.Join(paths.DataDir(), "link.log"))
 		exitOn(err)
 		app := &link.App{Machine: machine(log), Log: log}

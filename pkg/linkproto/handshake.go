@@ -51,7 +51,12 @@ type Welcome struct {
 	Relay string `json:"relay,omitempty"`
 }
 
-var boxIDShape = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
+var (
+	boxIDShape = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
+	helloBuild = regexp.MustCompile(`^[0-9A-Za-z.+_-]{0,64}$`)
+	helloName  = regexp.MustCompile(`^[0-9A-Za-z._-]{0,255}$`)
+	helloCode  = regexp.MustCompile(`^[0-9A-Za-z-]{0,16}$`)
+)
 
 // ValidBoxID reports whether id has the shape of a box id (it is also a URL
 // path segment: /c/<boxId>/...).
@@ -83,6 +88,12 @@ func VerifyHello(h Hello, ch Challenge) (BoxPublic, error) {
 		return BoxPublic{}, refuse(CodeVersion)
 	}
 	if (h.Box == "") == (h.PairCode == "") || (h.Box != "" && !ValidBoxID(h.Box)) {
+		return BoxPublic{}, refuse(CodeMalformed)
+	}
+	// What the relay stores and a human later reads: shapes, no control character (review 2026-11-15). Without a NUL
+	// in any field, the signed bytes (helloBytes) have one reading.
+	if !helloBuild.MatchString(h.Build) || !helloName.MatchString(h.Host) || !helloName.MatchString(h.Domain) ||
+		!helloCode.MatchString(h.PairCode) || h.DomainRole < 0 || h.DomainRole > 5 {
 		return BoxPublic{}, refuse(CodeMalformed)
 	}
 	pub, err := ParseBoxPublic(h.Sign, h.Seal)

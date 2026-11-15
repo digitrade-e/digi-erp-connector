@@ -62,7 +62,7 @@ func ApplyOptions(ctx context.Context, env Env, in OptionsInput, check bool) (*A
 		return res, r
 	}
 	if LinkMode(env.Sys.DataDir()) {
-		if r := validateImageFoldersLinked(in.Options.ImageFolders, SystemDirs()); r != nil {
+		if r := validateImageFoldersLinked(in.Options.ImageFolders, SystemDirs(), usersDirs()); r != nil {
 			return res, r
 		}
 	}

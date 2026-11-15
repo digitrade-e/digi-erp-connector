@@ -1,7 +1,7 @@
 package link
 
 import (
-	"fmt"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -128,7 +128,7 @@ func (f *ProxyFinder) ProxyFunc(req *http.Request) (*url.URL, error) {
 func parseProxyURL(s string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return nil, fmt.Errorf("link.yaml proxy %q is not a URL like http://proxy.example.local:8080", s)
+		return nil, errors.New("link.yaml proxy is not a URL like http://proxy.example.local:8080") // never echoed: it may carry a password
 	}
 	return u, nil
 }
