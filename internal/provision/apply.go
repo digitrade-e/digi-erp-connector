@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -807,6 +808,10 @@ func configDiff(cur, tgt config.Config) string {
 	add("db", cur.DB != tgt.DB)
 	add("sendOrderDir", cur.SendOrderDir != tgt.SendOrderDir)
 	add("importer", cur.HasExePath != tgt.HasExePath || cur.HasParamFile != tgt.HasParamFile || cur.HasBatFile != tgt.HasBatFile)
+	add("orderModel", cur.SendOrderPickupDir != tgt.SendOrderPickupDir || cur.SendOrderFormat != tgt.SendOrderFormat)
+	add("receipts", cur.SendReceiptDir != tgt.SendReceiptDir || cur.HasReceiptBatFile != tgt.HasReceiptBatFile ||
+		cur.HasReceiptParamFile != tgt.HasReceiptParamFile || !maps.Equal(cur.ReceiptCardNames.Issuer, tgt.ReceiptCardNames.Issuer) ||
+		!maps.Equal(cur.ReceiptCardNames.Brand, tgt.ReceiptCardNames.Brand))
 	add("auth", cur.Auth != tgt.Auth)
 	add("tls", cur.TLS != tgt.TLS)
 	add("options", !slices.Equal(cur.ImageFolders, tgt.ImageFolders) || cur.ERPUser != tgt.ERPUser ||

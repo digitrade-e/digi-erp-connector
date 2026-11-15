@@ -72,6 +72,10 @@ var provisionCommands086 = map[string]func(args []string) ([]string, bool){
 	"firewall-remove-check": fixed("firewall-remove", "--check", "--spec", "-"),
 	"firewall-remove":       fixed("firewall-remove", "--spec", "-"),
 	"receipt-seed":          receiptSeed086,
+	"receipts-check":        fixed("receipts", "--check", "--spec", "-"),
+	"receipts":              fixed("receipts", "--spec", "-"),
+	"orders-check":          fixed("orders", "--check", "--spec", "-"),
+	"orders":                fixed("orders", "--spec", "-"),
 }
 
 // sealedOnly086 are the commands whose stdin carries a secret (the API

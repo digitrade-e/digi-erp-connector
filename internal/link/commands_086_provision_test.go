@@ -47,6 +47,10 @@ func TestPlan086ProvisionCommands(t *testing.T) {
 		{"receipt-seed", []string{"1000000000"}, ""},
 		{"receipt-seed", []string{"5 & calc"}, ""},
 		{"receipt-seed", []string{"5", "6"}, ""},
+		{"receipts-check", nil, "receipts --check --spec -"},
+		{"receipts", nil, "receipts --spec -"},
+		{"orders-check", nil, "orders --check --spec -"},
+		{"orders", nil, "orders --spec -"},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})

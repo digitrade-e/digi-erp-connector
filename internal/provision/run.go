@@ -43,6 +43,8 @@ const Usage = `usage:
   digi-erp-connector-provision db [--check] --spec -     change the database login and settings only (or turn the database off); no API credential
   digi-erp-connector-provision firewall-remove [--check] --spec -   remove inbound rules this tool made (the connector's group); no restart
   digi-erp-connector-provision receipt-seed <N>         create the receipt number store with N as the next receipt (write-if-absent)
+  digi-erp-connector-provision receipts [--check] --spec - set the receipt settings only (sendReceiptDir, model (b) importer, card names)
+  digi-erp-connector-provision orders [--check] --spec -   set the order settings only (sendOrderDir, importer, model (a) pickup folder and layout)
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
   digi-erp-connector-provision version
@@ -222,6 +224,27 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		var res *ApplyResult
 		res, err = SeedReceipts(ctx, env, n)
 		result = res
+	case "receipts", "orders":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		if cmd == "receipts" {
+			in, r := DecodeReceipts(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyReceipts(ctx, env, in, check)
+		} else {
+			in, r := DecodeOrders(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyOrders(ctx, env, in, check)
+		}
 	case "verify":
 		var in VerifyInput
 		if ok, u := readSpecFlag(rest); !u {
