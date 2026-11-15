@@ -38,7 +38,7 @@ func TestAgainstTheRealRelay(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"LINK_RELAY_ID=e2e", "LINK_POD_ADDR=127.0.0.1:"+intl, "LINK_LISTEN=127.0.0.1:"+pub, "LINK_INTERNAL_LISTEN=127.0.0.1:"+intl,
 		"LINK_INTERNAL_TOKEN="+strings.Repeat("t", 40), "LINK_TEAM_KEYS=team-1:1:"+base64.StdEncoding.EncodeToString(teamPub),
-		"LINK_ALLOW_C=127.0.0.0/8", "LINK_DATABASE_URL=")
+		"LINK_ALLOW_C=127.0.0.0/8", "LINK_DATABASE_URL=", "LINK_DEV_MEMORY=1")
 	var relayLog bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &relayLog, &relayLog
 	if err := cmd.Start(); err != nil {
