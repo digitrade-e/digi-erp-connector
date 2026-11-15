@@ -3,6 +3,8 @@ module github.com/digitrade-e/digi-erp-connector
 go 1.26
 
 require (
+	github.com/coder/websocket v1.8.15
+	github.com/hashicorp/yamux v0.1.2
 	github.com/lxn/walk v0.0.0-20210112085537-c389da54e794
 	github.com/microsoft/go-mssqldb v1.9.6
 	golang.org/x/crypto v0.45.0
