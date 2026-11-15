@@ -47,6 +47,8 @@ type Config struct {
 	Daemon *DaemonWatch
 	// Proxy is the finder behind HTTPClient, for link-status (nil: link-status names none).
 	Proxy *ProxyFinder
+	// Upgrade is what the upgrade command needs (plan 086 C8).
+	Upgrade UpgradeConfig
 
 	HTTPClient *http.Client // the proxy and the TLS roots for the relay
 	Runner     Runner       // provision.exe
