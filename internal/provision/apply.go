@@ -21,6 +21,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api"
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
@@ -70,10 +71,15 @@ type Step struct {
 // Proof is the connector answering after a restart.
 type Proof struct {
 	Version string `json:"version,omitempty"`
-	// Health is GET /api/health: ok, db_unavailable, or the status.
+	// Health is GET /api/health: ok, db_unavailable, or the status; or
+	// HealthNoDatabase on a box without a database, where it is not asked
+	// (its 503 there is by design).
 	Health  string  `json:"health"`
 	Seconds float64 `json:"seconds"`
 }
+
+// HealthNoDatabase is Proof.Health on a box that has no database (plan 086 C6).
+const HealthNoDatabase = "no_database"
 
 // orderNumberFile is the order counter, kept in sendOrderDir
 // (hasavshevet.OrderNumberStore). A missing one starts again at 1.
@@ -596,15 +602,23 @@ func (a *applier) planLogin(ctx context.Context, admin Database) error {
 
 func (a *applier) capture() error {
 	files := []string{configFile, secretFile(a.cur.ERP), secretFile(a.tgt.ERP), tlsCertFile, tlsKeyFile}
-	var svc *preService
+	var st preState
 	if a.s.Service != nil {
-		svc = &preService{Dependencies: slices.Clone(a.svc.Dependencies)}
+		st.Service = &preService{Dependencies: slices.Clone(a.svc.Dependencies)}
 	}
-	var fw *preFirewall
 	if a.s.Firewall != nil {
-		fw = &preFirewall{Name: ruleName(a.s.Firewall), Rule: a.fwBefore}
+		st.Firewall = &preFirewall{Name: ruleName(a.s.Firewall), Rule: a.fwBefore}
 	}
-	first, err := capturePreimage(a.dir, a.s.ChangeSet, files, svc, fw, a.env.Now())
+	return a.captureState(files, st)
+}
+
+// captureFiles takes the change set's (and the run's) pre-image of these files
+// only: a command that changes less than apply keeps less, so its restore puts
+// back exactly what it changed.
+func (a *applier) captureFiles(files ...string) error { return a.captureState(files, preState{}) }
+
+func (a *applier) captureState(files []string, st preState) error {
+	first, err := capturePreimage(a.dir, a.s.ChangeSet, files, st, a.env.Now())
 	if err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "the pre-image could not be written, so nothing was changed: %v", err)
 	}
@@ -880,7 +894,7 @@ func (a *applier) restartAndProve(ctx context.Context) error {
 		return a.fail(refuse(CodePortProofFailed, "read server.log; the pre-image was put back", "%v", err))
 	}
 	a.res.Proof = proof
-	if proof.Health != "ok" {
+	if proof.Health != "ok" && proof.Health != HealthNoDatabase {
 		a.warn("the connector answers but its database does not (/api/health: %s)", proof.Health)
 	}
 	return nil
@@ -917,16 +931,7 @@ func (a *applier) prove(ctx context.Context, cfg config.Config) (*Proof, error) 
 		if err == nil {
 			var p pingBody
 			if p, err = d.ping(ctx, tok); err == nil {
-				health := "ok"
-				switch status, herr := d.get(ctx, "/api/health", tok, nil); {
-				case herr != nil:
-					health = "error: " + herr.Error()
-				case status == http.StatusServiceUnavailable:
-					health = "db_unavailable"
-				case status != http.StatusOK:
-					health = "status " + strconv.Itoa(status)
-				}
-				return &Proof{Version: p.Version, Health: health, Seconds: a.env.Now().Sub(start).Seconds()}, nil
+				return &Proof{Version: p.Version, Health: d.health(ctx, cfg, tok), Seconds: a.env.Now().Sub(start).Seconds()}, nil
 			}
 		}
 		last = err
@@ -935,6 +940,23 @@ func (a *applier) prove(ctx context.Context, cfg config.Config) (*Proof, error) 
 		}
 		a.env.Sleep(time.Second)
 	}
+}
+
+// health is GET /api/health as a Proof reports it. A box without a database
+// is not asked: its 503 there is by design.
+func (d daemon) health(ctx context.Context, cfg config.Config, tok string) string {
+	if !db.IsConfigured(cfg) {
+		return HealthNoDatabase
+	}
+	switch status, err := d.get(ctx, "/api/health", tok, nil); {
+	case err != nil:
+		return "error: " + err.Error()
+	case status == http.StatusServiceUnavailable:
+		return "db_unavailable"
+	case status != http.StatusOK:
+		return "status " + strconv.Itoa(status)
+	}
+	return "ok"
 }
 
 // fail puts this run's pre-image back when there is one and returns cause.
@@ -1065,43 +1087,58 @@ func (a *applier) carryOrderCounter(from, to string) error {
 	return nil
 }
 
-// putBack restores a pre-image's files, firewall rule and dependencies.
-func putBack(env Env, p preimage) (bool, error) {
+// restored is what putBack changed. Only files are read by the service, so
+// only they call for a restart.
+type restored struct {
+	files, firewall, service bool
+}
+
+func (r restored) any() bool { return r.files || r.firewall || r.service }
+
+// putBack restores a pre-image's files, firewall rules and dependencies.
+func putBack(env Env, p preimage) (restored, error) {
+	var out restored
 	changed, err := restoreFiles(env.Sys.DataDir(), p)
+	out.files = changed
 	if err != nil {
-		return changed, err
+		return out, err
 	}
-	if fw := p.m.Firewall; fw != nil {
+	var rules []preFirewall
+	if p.m.Firewall != nil {
+		rules = append(rules, *p.m.Firewall)
+	}
+	rules = append(rules, p.m.Firewalls...)
+	for _, fw := range rules {
 		cur, err := env.Sys.FirewallRule(fw.Name)
 		if err != nil {
-			return changed, fmt.Errorf("read the firewall rule: %w", err)
+			return out, fmt.Errorf("read the firewall rule: %w", err)
 		}
 		switch {
 		case cur != nil && !cur.Ours:
 			// Not ours now: leave it alone, whatever the pre-image says.
 		case fw.Rule == nil && cur != nil:
 			if err := env.Sys.RemoveFirewallRule(fw.Name); err != nil {
-				return changed, fmt.Errorf("remove the firewall rule: %w", err)
+				return out, fmt.Errorf("remove the firewall rule: %w", err)
 			}
-			changed = true
+			out.firewall = true
 		case fw.Rule != nil && (cur == nil || !cur.Same(*fw.Rule)):
 			if err := env.Sys.SetFirewallRule(*fw.Rule); err != nil {
-				return changed, fmt.Errorf("restore the firewall rule: %w", err)
+				return out, fmt.Errorf("restore the firewall rule: %w", err)
 			}
-			changed = true
+			out.firewall = true
 		}
 	}
 	if svc := p.m.Service; svc != nil {
 		cur, err := env.Sys.Service(ServiceName)
 		if err != nil {
-			return changed, fmt.Errorf("read the service: %w", err)
+			return out, fmt.Errorf("read the service: %w", err)
 		}
 		if !sameFold(cur.Dependencies, svc.Dependencies) {
 			if err := env.Sys.SetServiceDependencies(ServiceName, svc.Dependencies); err != nil {
-				return changed, fmt.Errorf("restore the service's dependencies: %w", err)
+				return out, fmt.Errorf("restore the service's dependencies: %w", err)
 			}
-			changed = true
+			out.service = true
 		}
 	}
-	return changed, nil
+	return out, nil
 }

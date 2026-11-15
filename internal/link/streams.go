@@ -190,6 +190,9 @@ func (l *Link) checkInput(env linkproto.Envelope, stdin []byte) string {
 	if _, err := l.argv(env); err != nil {
 		return refusalCode(err)
 	}
+	if MustBeSealed(env.Command) && !env.Sealed {
+		return CodeInputNotSealed // plan 086: a secret never crosses the relay in clear
+	}
 	return ""
 }
 

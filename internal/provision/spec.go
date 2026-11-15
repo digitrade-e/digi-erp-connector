@@ -264,8 +264,8 @@ func (s Spec) Validate() *Refusal {
 	if r := validateTLS(s.TLS); r != nil {
 		return r
 	}
-	if s.Expect != nil && s.Expect.ConfigSHA256 != nil && *s.Expect.ConfigSHA256 != "" && !sha256HexRe.MatchString(*s.Expect.ConfigSHA256) {
-		return refuse(CodeSpecInvalid, "send 64 lower-case hex digits, or an empty string for no file", "expect.configSha256 is not a sha256")
+	if r := validateExpect(s.Expect); r != nil {
+		return r
 	}
 	return validateOptions(s.Options)
 }
@@ -424,8 +424,15 @@ func (s Spec) validateAuth() *Refusal {
 	if !authUserRe.MatchString(s.Auth.Username) {
 		return refuse(CodeSpecInvalid, "use up to 64 letters, digits, . _ @ or -", "auth.username is not a valid user name")
 	}
-	if len(s.Auth.Password) < MinAuthPassword || len(s.Auth.Password) > 256 || hasControl(s.Auth.Password) ||
-		strings.TrimSpace(s.Auth.Password) != s.Auth.Password {
+	return validateAuthPassword(s.Auth.Password)
+}
+
+// validateAuthPassword is the one guard on a connector credential that comes
+// from outside (apply's spec, the auth command): long enough to have been
+// generated, plain text, no edge spaces. The daemon's own guard
+// (config.AuthConfig.Validate, via api.CheckConfig) refuses blanks on top.
+func validateAuthPassword(pw string) *Refusal {
+	if len(pw) < MinAuthPassword || len(pw) > 256 || hasControl(pw) || strings.TrimSpace(pw) != pw {
 		return refuse(CodeAuthPasswordWeak, fmt.Sprintf("send a generated password of %d to 256 characters", MinAuthPassword),
 			"auth.password is too short, too long or not plain text")
 	}

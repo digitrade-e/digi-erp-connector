@@ -46,7 +46,10 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	defer unlock()
 
 	a := &applier{env: env, s: Spec{ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle}, dir: dir, res: res}
-	if err := a.readConfig(); err != nil {
+	// A pre-image of no file (the service or firewall-remove commands) changes
+	// nothing the service reads: no restart, so no queue to ask.
+	files := len(p.m.Files) > 0
+	if err := a.readConfig(); err != nil && files {
 		if !in.AssumeIdle {
 			return res, refuse(CodePendingUnknown, "run restore with --assume-idle once nothing sends orders",
 				"config.yaml does not read, so the running connector's order queue cannot be asked: %v", err)
@@ -61,8 +64,10 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 		return res, refuse(CodeServiceMissing, "install the connector first", "the %s service is not installed", ServiceName)
 	}
 	a.running = a.svc.State != "stopped"
-	if err := a.idle(ctx, "before the restore"); err != nil {
-		return res, err
+	if files {
+		if err := a.idle(ctx, "before the restore"); err != nil {
+			return res, err
+		}
 	}
 	// The DB secret in use now: a login both configs use keeps it
 	// (keepLoginPassword).
@@ -77,10 +82,10 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 			"the data directory could not be protected, so nothing was written: %v", err)
 	}
 	changed, err := putBack(env, p)
-	if err == nil {
+	if err == nil && files { // no file put back: the DB secret is not this restore's
 		err = keepLoginPassword(env, a.cur.DB.User, current)
 	}
-	a.step("restore", changed, "pre-image of "+p.m.Created.Format("2006-01-02 15:04:05Z"))
+	a.step("restore", changed.any(), "pre-image of "+p.m.Created.Format("2006-01-02 15:04:05Z"))
 	if err != nil {
 		return res, refuse(CodeWriteFailed, "restore the rest by hand from provision\\"+in.ChangeSet, "%v", err)
 	}
@@ -88,6 +93,10 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 		a.warn("the data directory could not be protected after the restore: %v", err)
 	}
 
+	if !changed.files {
+		a.step("restart", false, "nothing changed that the service reads")
+		return res, nil
+	}
 	b, err := os.ReadFile(filepath.Join(dir, configFile))
 	if errors.Is(err, os.ErrNotExist) {
 		// Before the change set the connector had no config: it cannot run.
@@ -100,10 +109,6 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	restored, perr := config.Parse(b)
 	if err != nil || perr != nil {
 		return res, refuse(CodeConfigRefused, "fix config.yaml by hand", "the restored config.yaml does not read back")
-	}
-	if !changed {
-		a.step("restart", false, "nothing changed")
-		return res, nil
 	}
 	if a.running {
 		_ = env.Sys.StopService(ServiceName)
@@ -127,7 +132,7 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 		return res, refuse(CodePortProofFailed, "read server.log", "%v", err)
 	}
 	res.Proof = proof
-	if proof.Health != "ok" {
+	if proof.Health != "ok" && proof.Health != HealthNoDatabase {
 		a.warn("the connector answers but its database does not (/api/health: %s): the restored credential may be out of date", proof.Health)
 	}
 	return res, nil

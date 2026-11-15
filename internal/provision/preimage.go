@@ -38,6 +38,16 @@ type manifest struct {
 	Files     []preFile    `json:"files"`
 	Service   *preService  `json:"service,omitempty"`
 	Firewall  *preFirewall `json:"firewall,omitempty"`
+	// Firewalls are the rules firewall-remove took away (plan 086 C7); apply's
+	// one rule stays in Firewall, so its manifests read as before.
+	Firewalls []preFirewall `json:"firewalls,omitempty"`
+}
+
+// preState is what a pre-image holds besides files.
+type preState struct {
+	Service   *preService
+	Firewall  *preFirewall
+	Firewalls []preFirewall
 }
 
 type preFile struct {
@@ -72,8 +82,10 @@ func runDir(dataDir, changeSet string) string {
 }
 
 // capture writes a pre-image into dir.
-func capture(dataDir, dir, changeSet string, files []string, svc *preService, fw *preFirewall, now time.Time) error {
-	m := manifest{ChangeSet: changeSet, Created: now.UTC(), Tool: buildinfo.Version, Service: svc, Firewall: fw}
+func capture(dataDir, dir, changeSet string, files []string, st preState, now time.Time) error {
+	m := manifest{ChangeSet: changeSet, Created: now.UTC(), Tool: buildinfo.Version, Service: st.Service,
+		Firewall: st.Firewall, Firewalls: st.Firewalls}
+	m.Files = []preFile{}
 	for _, rel := range dedupe(files) {
 		b, err := os.ReadFile(filepath.Join(dataDir, rel))
 		switch {
@@ -99,14 +111,14 @@ func capture(dataDir, dir, changeSet string, files []string, svc *preService, fw
 
 // capturePreimage takes the change set's pre-image unless it has one, and
 // always the run's. It reports whether it took the change set's.
-func capturePreimage(dataDir, changeSet string, files []string, svc *preService, fw *preFirewall, now time.Time) (bool, error) {
+func capturePreimage(dataDir, changeSet string, files []string, st preState, now time.Time) (bool, error) {
 	first := false
 	dir := preimageDir(dataDir, changeSet)
 	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); errors.Is(err, os.ErrNotExist) {
 		if err := os.RemoveAll(dir); err != nil { // a capture that stopped half way
 			return false, err
 		}
-		if err := capture(dataDir, dir, changeSet, files, svc, fw, now); err != nil {
+		if err := capture(dataDir, dir, changeSet, files, st, now); err != nil {
 			return false, err
 		}
 		first = true
@@ -117,7 +129,7 @@ func capturePreimage(dataDir, changeSet string, files []string, svc *preService,
 	if err := os.RemoveAll(run); err != nil {
 		return first, err
 	}
-	return first, capture(dataDir, run, changeSet, files, svc, fw, now)
+	return first, capture(dataDir, run, changeSet, files, st, now)
 }
 
 func loadPreimage(dir string) (preimage, error) {

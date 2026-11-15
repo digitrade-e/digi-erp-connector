@@ -54,6 +54,40 @@ func restore(args []string) ([]string, bool) {
 	return nil, false
 }
 
+// --- plan 086 B1: the provision commands of v1.0.29 (auth, daemon, service, db, firewall-remove) ---
+//
+// Kept in their own table, merged into commands at start, so the plan's other
+// builders add theirs without touching these lines. Each one is a provision
+// subcommand with fixed argv; the pin test lists them all.
+var provisionCommands086 = map[string]func(args []string) ([]string, bool){
+	"auth-check": fixed("auth", "--check", "--spec", "-"),
+	"auth":       fixed("auth", "--spec", "-"),
+}
+
+// sealedOnly086 are the commands whose stdin carries a secret (the API
+// password, a SQL credential): the box refuses them unless the envelope's
+// stdin is sealed to its X25519 key, so a slip on the sender's side never
+// shows a password to the relay.
+var sealedOnly086 = map[string]bool{
+	"auth-check": true,
+	"auth":       true,
+}
+
+// CodeInputNotSealed refuses a secret-carrying command whose stdin was sent in
+// clear.
+const CodeInputNotSealed = "input_not_sealed"
+
+func init() {
+	for name, f := range provisionCommands086 {
+		commands[name] = f
+	}
+}
+
+// MustBeSealed reports whether command's stdin must arrive sealed.
+func MustBeSealed(command string) bool { return sealedOnly086[command] }
+
+// --- end plan 086 B1 ---
+
 // Argv maps an envelope's command and args to provision.exe's arguments, or
 // refuses.
 func Argv(e linkproto.Envelope) ([]string, error) {
