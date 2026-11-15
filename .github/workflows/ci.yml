@@ -64,3 +64,25 @@ jobs:
         if: failure()
         shell: bash
         run: grep -E -B2 -A25 -- '^\s*--- FAIL' test.log || true
+
+      # Only a release compiled the installer before: a Pascal error in the .iss
+      # surfaced after the merge to main, as a failed public release. Compile it
+      # here too, with the same defines (the binaries are unstamped dev builds).
+      - name: Build the installer's executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin
+          go build -o dist/bin/digi-erp-connector.exe ./cmd/digi-erp-connector
+          go build -o dist/bin/digi-erp-connectord.exe ./cmd/digi-erp-connectord
+          go build -o dist/bin/digi-erp-connector-provision.exe ./cmd/digi-erp-connector-provision
+          go build -o dist/bin/digi-erp-connector-link.exe ./cmd/digi-erp-connector-link
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile the installer
+        shell: powershell
+        run: |
+          iscc /DAppVersion=0.0.0 /DBuildDir="$PWD\\dist\\bin" /DOutputDir="$PWD\\dist" assets\\installer\\digi-erp-connector.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

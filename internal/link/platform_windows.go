@@ -3,8 +3,10 @@
 package link
 
 import (
+	"fmt"
 	"os"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/eventlog"
 )
@@ -54,4 +56,15 @@ func MachineFacts() (string, string, int) {
 		role = 4
 	}
 	return host, domain, role
+}
+
+// PlatformPreflight adds the administrator and Windows version checks.
+func PlatformPreflight(env *PreflightEnv) {
+	env.Elevated = func() (bool, error) { return windows.GetCurrentProcessToken().IsElevated(), nil }
+	env.OS = func() (string, bool) {
+		v := windows.RtlGetVersion()
+		// Windows Server 2016 is 10.0.14393; Go's runtime needs at least that.
+		return fmt.Sprintf("Windows %d.%d.%d", v.MajorVersion, v.MinorVersion, v.BuildNumber),
+			v.MajorVersion > 10 || (v.MajorVersion == 10 && v.BuildNumber >= 14393)
+	}
 }

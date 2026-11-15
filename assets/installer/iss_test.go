@@ -135,6 +135,11 @@ func TestInstallerShipsTheLink(t *testing.T) {
 		`{param:PAIRCODE|}`,
 		`'" pair ' + Code`,
 		`if not ValidPairCode(Code) then`,
+		// The preflight: before anything is installed, from a temporary copy; a STOP asks, never aborts silently.
+		`ExtractTemporaryFile('{#LinkExe}');`,
+		`ExpandConstant('{tmp}\{#LinkExe}') + '" preflight > "'`,
+		`if (PairPage <> nil) and (CurPageID = PairPage.ID) then`,
+		`'Install anyway?',`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("the installer lacks %q", want)

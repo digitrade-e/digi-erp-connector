@@ -15,8 +15,11 @@ digi-erp-connector-link ── wss://link.digitrade-admin.org ──► relay �
 
 - A Windows service, **`digi-erp-connector-link`**, LocalSystem, automatic start. It is separate from the connector's
   own service so that restarting the connector (after a configuration change or an upgrade) never cuts it.
-- It keeps one WebSocket to the relay (through the proxy in `link.yaml`, or the environment's), with many streams
-  inside it. It reconnects by itself, with a pause that grows to a minute; it moves to a fresh connection every ~20
+- It keeps one WebSocket to the relay, with many streams inside it. Its proxy, first found wins: `proxy:` in
+  `link.yaml`; `HTTPS_PROXY` in the service's environment; the machine's WinHTTP proxy (`netsh winhttp show proxy`);
+  WPAD; else direct. A LocalSystem service does not see a user's own Internet settings (an IE / Edge proxy, a PAC file
+  by policy), so the preflight names them when they differ, with the fix (`netsh winhttp import proxy source=ie`, or
+  `link.yaml`'s proxy). Only outbound HTTPS (443) to `link.digitrade-admin.org` is needed; nothing inbound. It reconnects by itself, with a pause that grows to a minute; it moves to a fresh connection every ~20
   hours and whenever the relay asks, opening the new one before closing the old.
 - Its keys are made on this server and never leave it: an Ed25519 key that proves who the box is and signs every
   answer, and an X25519 key that opens secrets Digitrade seals to it (the SQL password, for instance). Both are in the
@@ -39,6 +42,21 @@ There is no shell and no other program. Every answer is signed by this server's 
 - **Every command** is logged to `link.log` (same folder) and to the Windows **Event Log** (Application, source
   `digi-erp-connector-link`): what ran, for which change set, by whom, and how it ended.
 - **Remove it:** uninstall the connector, or stop and delete the service; its key goes with the data directory.
+
+## Setup: the preflight, then the code
+
+`setup.exe` checks the server before it installs anything (from a temporary copy of the link), one line each with the
+fix: administrator, Windows version, the existing install, the proxy the service will use, DNS, outbound 443 (or the
+proxy), HTTPS to the relay, whether TLS is inspected on the way, the clock (more than 2 minutes off is a stop: signed
+commands would expire), and the WebSocket itself. A STOP asks "Install anyway?" (the connector works without the link);
+a silent install logs it to setup's log. The same check by hand, any time, writing nothing:
+
+```powershell
+& 'C:\Program Files\digi-erp-connector\digi-erp-connector-link.exe' preflight   # exit 0 ready, 3 warnings, 1 a STOP
+```
+
+Then the code: on setup's "Connect to Digitrade" page, or `setup.exe /VERYSILENT /PAIRCODE=ABCDE-FGHJK` for the
+client's IT. Setup never asks for a SQL password, opens a port, touches the firewall or turns WinRM on.
 
 ## Pairing (once)
 

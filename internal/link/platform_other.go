@@ -11,3 +11,6 @@ func MachineFacts() (string, string, int) {
 	host, _ := os.Hostname()
 	return host, "", 0
 }
+
+// PlatformPreflight adds nothing off Windows: no elevation or OS check.
+func PlatformPreflight(*PreflightEnv) {}

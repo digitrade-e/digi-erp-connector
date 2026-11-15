@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"time"
 
@@ -62,7 +61,7 @@ func (m Machine) Config() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("the connector's config.yaml: %w", err)
 	}
-	hc, err := HTTPClient(st.Proxy)
+	hc, err := HTTPClientVia(&ProxyFinder{Explicit: st.Proxy, Log: m.Log})
 	if err != nil {
 		return Config{}, err
 	}
@@ -117,21 +116,23 @@ func LocalAddr(listen string) string {
 	return net.JoinHostPort(host, port)
 }
 
-// HTTPClient reaches the relay: through link.yaml's proxy when set, else the
-// environment's (the machine's WinHTTP setting is a later slice — plan 083
-// §9.2 O5), with the system's roots, so a TLS-inspecting proxy whose CA the
-// machine trusts works (plan 083 §10 run D).
+// HTTPClient reaches the relay through proxy (link.yaml's) when set, else the
+// machine's (proxy.go: HTTPS_PROXY, netsh winhttp, WPAD — plan 083 §9.2 O5),
+// with the system's roots, so a TLS-inspecting proxy whose CA the machine
+// trusts works (plan 083 §10 run D).
 func HTTPClient(proxy string) (*http.Client, error) {
-	p := http.ProxyFromEnvironment
-	if proxy != "" {
-		u, err := url.Parse(proxy)
-		if err != nil || u.Host == "" {
-			return nil, fmt.Errorf("link.yaml proxy %q is not a URL", proxy)
+	return HTTPClientVia(&ProxyFinder{Explicit: proxy})
+}
+
+// HTTPClientVia is HTTPClient with a ProxyFinder of the caller's.
+func HTTPClientVia(f *ProxyFinder) (*http.Client, error) {
+	if f.Explicit != "" {
+		if _, err := parseProxyURL(f.Explicit); err != nil {
+			return nil, err
 		}
-		p = http.ProxyURL(u)
 	}
 	return &http.Client{Transport: &http.Transport{
-		Proxy:               p,
+		Proxy:               f.ProxyFunc,
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: 15 * time.Second,
 		ForceAttemptHTTP2:   false, // a WebSocket upgrade is HTTP/1.1

@@ -26,6 +26,7 @@ const usage = `digi-erp-connector-link — the connector's outbound link to Digi
   digi-erp-connector-link fingerprint   print this server's key fingerprint
   digi-erp-connector-link status        print the relay, the box id and whether commands are on
   digi-erp-connector-link version       print the build
+  digi-erp-connector-link preflight     check this server can reach Digitrade, the way the service will (setup runs it)
   digi-erp-connector-link run           run in the foreground (the service does this itself)
 
 link.yaml in the data directory holds the state; "admin: false" there turns remote commands off.`
@@ -68,6 +69,16 @@ func main() {
 			box = "(not paired)"
 		}
 		fmt.Printf("relay:       %s\nbox:         %s\ncommands:    %s\nfingerprint: %s\n", st.RelayURL(), box, onOff(st.AdminOn()), k.Public().Fingerprint())
+	case "preflight":
+		// Writes nothing: no keys, no link.yaml. Exit 0 ready, 3 with warnings, 1 a STOP.
+		st, err := m.Store().LoadState()
+		exitOn(err)
+		env := link.PreflightEnv{State: st, Proxy: &link.ProxyFinder{Explicit: st.Proxy}, UserProxy: link.UserProxy,
+			Daemon: func() (string, error) { c, err := config.Load(); return c.APIListen, err }}
+		link.PlatformPreflight(&env)
+		cs := link.Preflight(context.Background(), env)
+		fmt.Print(link.FormatChecks(cs))
+		os.Exit(link.PreflightExit(cs))
 	case "run":
 		log, err := link.OpenFileLog(filepath.Join(paths.DataDir(), "link.log"))
 		exitOn(err)

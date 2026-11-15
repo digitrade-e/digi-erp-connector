@@ -213,6 +213,42 @@ begin
       Result := False;
 end;
 
+// The preflight (plan 083 section 3.4) runs when the pairing page is left, before anything
+// is installed, from a temporary copy of the link: it finds the proxy the way the service
+// will and says what to fix. A STOP does not end setup - the connector works without the
+// link - but the person is asked first; a silent install only logs it.
+function RunPreflight(): Boolean;
+var
+  OutFile: String;
+  Output: AnsiString;
+  ResultCode: Integer;
+begin
+  Result := True;
+  ExtractTemporaryFile('{#LinkExe}');
+  OutFile := ExpandConstant('{tmp}\link-preflight.txt');
+  if not Exec(ExpandConstant('{cmd}'), '/C ""' + ExpandConstant('{tmp}\{#LinkExe}') + '" preflight > "' + OutFile +
+              '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    ResultCode := -1;
+  LoadStringFromFile(OutFile, Output);
+  Log('link preflight: exit ' + IntToStr(ResultCode) + #13#10 + String(Output));
+  if WizardSilent() then
+    Exit;
+  case ResultCode of
+    0: ;
+    3: MsgBox('Connection check:' + #13#10#13#10 + String(Output), mbInformation, MB_OK);
+  else
+    Result := MsgBox('Connection check:' + #13#10#13#10 + String(Output) + #13#10 + 'Install anyway?',
+      mbConfirmation, MB_YESNO) = IDYES;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (PairPage <> nil) and (CurPageID = PairPage.ID) then
+    Result := RunPreflight();
+end;
+
 function PairCode(): String;
 begin
   Result := Trim(ExpandConstant('{param:PAIRCODE|}'));
