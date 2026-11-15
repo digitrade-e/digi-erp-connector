@@ -65,7 +65,8 @@ func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error)
 	default:
 		add("service", svc.State == "running", "%s, %s, as %s", svc.State, svc.StartType, svc.Account)
 		add("recovery", svc.RecoveryPlanned, "restart after 1, 5 and 30 min, also on non-crash failures")
-		if dep := sqlDependency(cfg); dep != "" {
+		instances, _ := env.Sys.SQLInstances() // unreadable: the dependency is named from db.host alone
+		if dep := sqlDependencyFor(cfg, instances); dep != "" {
 			add("dependency", slices.ContainsFunc(svc.Dependencies, func(d string) bool { return strings.EqualFold(d, dep) }),
 				"depends on %s", dep)
 		}
@@ -78,9 +79,11 @@ func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error)
 		}
 	}
 
+	// Behind the link loopback is the rule (linkmode.go), elsewhere a defect:
+	// the Hub cannot reach it.
 	host, _, _ := net.SplitHostPort(cfg.APIListen)
 	ip := net.ParseIP(host)
-	add("listen", ip == nil || !ip.IsLoopback(), "%s, tls %v", cfg.APIListen, cfg.TLS.Enabled())
+	add("listen", ip == nil || !ip.IsLoopback() || LinkMode(env.Sys.DataDir()), "%s, tls %v", cfg.APIListen, cfg.TLS.Enabled())
 
 	d := env.daemonFor(cfg)
 	tok, err := d.login(ctx, cfg.Auth.Username, cfg.Auth.Password)
@@ -138,16 +141,31 @@ func orUnknown(s string) string {
 }
 
 // sqlDependency is the SQL Server service a connector whose database is on
-// this machine should depend on ("" when the database is elsewhere).
-func sqlDependency(cfg config.Config) string {
+// this machine should depend on ("" when the database is elsewhere), from
+// db.host alone.
+func sqlDependency(cfg config.Config) string { return sqlDependencyFor(cfg, nil) }
+
+// sqlDependencyFor is sqlDependency with the machine's instances: a database
+// reached by port (127.0.0.1:63501) belongs to the instance that has that
+// port, which is a named one on BFL (MSSQL$WIZSOFT2017), not MSSQLSERVER
+// (plan 083 §19). host\instance names its instance; a port no instance has is
+// the default instance's, as before.
+func sqlDependencyFor(cfg config.Config, instances []SQLInstance) string {
 	server, instance := db.SplitInstance(cfg.DB.Host)
 	if !isLocalHost(server) {
 		return ""
 	}
-	if instance == "" {
-		return "MSSQLSERVER"
+	if instance != "" {
+		return "MSSQL$" + strings.ToUpper(instance)
 	}
-	return "MSSQL$" + strings.ToUpper(instance)
+	if p := cfg.DB.Port; p > 0 {
+		for _, in := range instances {
+			if in.Service != "" && (in.StaticPort == p || in.DynamicPort == p || slices.Contains(in.ListeningPorts, p)) {
+				return strings.ToUpper(in.Service)
+			}
+		}
+	}
+	return "MSSQLSERVER"
 }
 
 func isLocalHost(h string) bool {

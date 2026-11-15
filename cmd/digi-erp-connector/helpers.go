@@ -32,3 +32,15 @@ func resolveDBPassword(erp config.ERPType, entered string, required bool) (strin
 	}
 	return string(b), nil
 }
+
+// typedOrStored is the DB password a test button uses: the typed one, or the
+// stored one when the field is blank (what Save keeps then); "" when neither.
+func typedOrStored(typed string, stored func() ([]byte, error)) string {
+	if typed != "" {
+		return typed
+	}
+	if b, err := stored(); err == nil {
+		return string(b)
+	}
+	return ""
+}

@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -236,8 +237,18 @@ func readSpecFlag(args []string) (ok, usageOK bool) {
 	return false, false
 }
 
+// decodeInput reads discover's and verify's optional input. An empty stdin
+// is {} (plan 086 C10): over the link a command always has a stdin, and one
+// with nothing to say should not have to send a body.
 func decodeInput(stdin io.Reader, v any) *Refusal {
-	if err := decodeStrict(io.LimitReader(stdin, MaxInput), v); err != nil {
+	b, err := io.ReadAll(io.LimitReader(stdin, MaxInput))
+	if err == nil && len(bytes.TrimSpace(b)) == 0 {
+		return nil
+	}
+	if err == nil {
+		err = decodeStrict(bytes.NewReader(b), v)
+	}
+	if err != nil {
 		return refuse(CodeSpecInvalid, "send one JSON object with only the documented fields", "the input does not decode: %v", err)
 	}
 	return nil

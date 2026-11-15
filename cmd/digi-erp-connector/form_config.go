@@ -130,6 +130,11 @@ func (f *mainForm) parsePort() (int, bool) {
 // dbConfigFromForm builds a Config carrying only the DB settings currently in
 // the form, for the Test connection / Test user actions. Returns ok=false when
 // the port is not a valid number.
+//
+// The password is the typed one or, when the field is blank — as it is on
+// every configured box ("Leave blank to keep existing") — the stored one, the
+// same password a Save would keep (plan 086 C10: a blank field used to fail
+// the test even with a working stored secret).
 func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bool) {
 	port, ok := f.parsePort()
 	if !ok {
@@ -137,12 +142,14 @@ func (f *mainForm) dbConfigFromForm() (cfg config.Config, password string, ok bo
 	}
 
 	cfg = f.cfg
+	cfg.ERP = config.ERPType(comboValue(f.erpCombo, config.ErpOption()))
 	cfg.DB.Driver = config.DBDriver(comboValue(f.driverCombo, config.DBDriverOptions()))
 	cfg.DB.Host = f.hostEdit.Text()
 	cfg.DB.Port = port
 	cfg.DB.User = f.userEdit.Text()
 	cfg.DB.Database = f.dbNameEdit.Text()
-	return cfg, f.passEdit.Text(), true
+	password = typedOrStored(f.passEdit.Text(), func() ([]byte, error) { return secrets.Get(config.DBPasswordKey(cfg.ERP)) })
+	return cfg, password, true
 }
 
 // persistConfig performs all I/O for a save: Hasavshevet procedure setup, the
