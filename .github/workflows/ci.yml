@@ -73,10 +73,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/bin
-          go build -o dist/bin/digi-erp-connector.exe ./cmd/digi-erp-connector
-          go build -o dist/bin/digi-erp-connectord.exe ./cmd/digi-erp-connectord
-          go build -o dist/bin/digi-erp-connector-provision.exe ./cmd/digi-erp-connector-provision
-          go build -o dist/bin/digi-erp-connector-link.exe ./cmd/digi-erp-connector-link
+          # the release's flags, stamped with this commit: a test install says which build it runs
+          v="-X github.com/digitrade-e/digi-erp-connector/internal/buildinfo.Version=v0.0.0-ci.${GITHUB_SHA::7}"
+          go build -trimpath -ldflags "-s -w -H=windowsgui $v" -o dist/bin/digi-erp-connector.exe ./cmd/digi-erp-connector
+          go build -trimpath -ldflags "-s -w $v" -o dist/bin/digi-erp-connectord.exe ./cmd/digi-erp-connectord
+          go build -trimpath -ldflags "-s -w $v" -o dist/bin/digi-erp-connector-provision.exe ./cmd/digi-erp-connector-provision
+          go build -trimpath -ldflags "-s -w $v" -o dist/bin/digi-erp-connector-link.exe ./cmd/digi-erp-connector-link
+          (cd dist/bin && sha256sum *.exe > ../SHA256SUMS)
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
@@ -86,3 +89,13 @@ jobs:
         run: |
           iscc /DAppVersion=0.0.0 /DBuildDir="$PWD\\dist\\bin" /DOutputDir="$PWD\\dist" assets\\installer\\digi-erp-connector.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # A branch's installer, kept 14 days, for a test install before anything is released (plan 083: link-test-N).
+      - name: Keep the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ github.sha }}
+          path: |
+            dist/digi-erp-connector-setup-*.exe
+            dist/SHA256SUMS
+          retention-days: 14
