@@ -14,7 +14,7 @@ A Go application providing a local HTTP REST API gateway between the main app an
 Three binaries:
 - **`digi-erp-connectord`** — background daemon / Windows service; runs the REST API server
 - **`digi-erp-connector`** — Windows-only native UI (`walk` library) for config management and service control
-- **`digi-erp-connector-provision`** — headless discover / apply / options / verify / restore, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068, `docs/provisioning.md`)
+- **`digi-erp-connector-provision`** — headless discover / apply / options / verify / restore, and (plan 086) auth / db / service / firewall-remove / daemon, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068) or through the link's fixed command set (`internal/link/commands.go`; `docs/provisioning.md`, `docs/link.md`)
 
 **Supported ERPs:** Hasavshevet (complete), SAP (price/stock query implemented), Priority (not implemented)
 **Primary target OS:** Windows. Linux supported for daemon only.
@@ -31,7 +31,8 @@ cmd/
     service_control.go  ← service start/stop/restart, daemon discovery
   digi-erp-connectord/  ← Background daemon/service
   digi-erp-connector-provision/ ← entry point of internal/provision: headless
-                          discover / apply / verify / restore (docs/provisioning.md)
+                          discover / apply / verify / restore / auth / db /
+                          service / firewall-remove / daemon (docs/provisioning.md)
   cutover-seed/         ← operator tool: seed config/secret/queries for a
                           replacement install (not part of the service)
 
@@ -76,7 +77,9 @@ internal/
     filelock/           ← OS lock on a file (flock / LockFileEx): one receipt writer per DataDir
     dataacl/            ← protected DACL on DataDir + config.yaml (Windows; no-op elsewhere)
   secrets/              ← Windows DPAPI (machine scope)
-  provision/            ← discover / apply / verify / restore behind a System
+  provision/            ← discover / apply / verify / restore (+ the narrow
+                          commands auth, db, service, firewall-remove, daemon:
+                          plan 086, each one part of apply) behind a System
                           interface (Windows: service manager, registry, TCP
                           table, firewall via fixed PowerShell); pre-images in
                           DataDir/provision/<changeSet>/

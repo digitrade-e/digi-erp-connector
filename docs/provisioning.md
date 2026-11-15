@@ -6,20 +6,26 @@ machine, writes the configuration, installs the Hasavshevet procedures, can move
 the connector off `sa`, opens the port in the Windows firewall, hardens the
 service, restarts it and proves it answers.
 
-digi-mcp runs it over WinRM with fixed command lines (Digitrade plan 068). A human
-can run it the same way in an elevated PowerShell. The code is
+digi-mcp runs it over WinRM with fixed command lines (Digitrade plan 068), or through
+the link's signed commands ([link.md](link.md), plan 083 / 086). A human can run it the
+same way in an elevated PowerShell. The code is
 `internal/provision`; `cmd/digi-erp-connector-provision` is only the entry point.
 
 ## Commands
 
 | Command | Input (stdin) | What it does | Writes |
 |---|---|---|---|
-| `discover [--spec -]` | optional `{"db":{"user","password"[,"host","port"]}}` | Reads the machine: SQL Server instances, their ports and login mode, the connector's service and `config.yaml` (secrets shown as `set`/`missing`), the listeners, the firewall, has.exe candidates and, with a credential, which databases look like Hasavshevet or SAP B1. Names the defects of a hand install and suggests a spec | nothing |
+| `discover [--spec -]` | optional `{"db":{"user","password"[,"host","port"]}}`, or `{"db":{"mode":"none"}}` for a box without a database (an empty stdin is `{}`) | Reads the machine: SQL Server instances, their ports and login mode, the connector's service and `config.yaml` (secrets shown as `set`/`missing`), the listeners, the firewall, has.exe candidates and, with a credential, which databases look like Hasavshevet or SAP B1. Names the defects of a hand install and suggests a spec | nothing |
 | `apply --spec -` | the spec (below) | Makes the connector match the spec | see below |
-| `verify [--spec -]` | optional `{"expectVersion","firewallRule"}` | Checks the running connector against `config.yaml`: service, login, `/api/ping`, `/api/health`, the order queue, recovery, the SQL dependency, the firewall rule | nothing |
+| `verify [--spec -]` | optional `{"expectVersion","firewallRule","db"?:{"mode":"none"}}` (an empty stdin is `{}`) | Checks the running connector against `config.yaml`: service, login, `/api/ping`, `/api/health`, the order queue, recovery, the SQL dependency, the firewall rule | nothing |
 | `restore <changeSet> [--assume-idle]` | none | Puts a change set's pre-image back and restarts on it | the pre-image's files, firewall rule, dependencies |
 | `apply --check --spec -` | the spec | Every check `apply` makes, its refusals included, then what it would change (`check`) | nothing |
 | `options [--check] --spec -` | `{"version":1,"changeSet","options":{…},"assumeIdle"?,"expect"?}` | Sets `options` (below) on a connector that is already configured, and nothing else: no credential, database, listener, firewall or service setting is read from stdin or changed | `config.yaml` |
+| `auth [--check] --spec -` | `{"version":1,"changeSet","auth":{"password","username"?},"rotateSecret"?,"assumeIdle"?,"expect"?}` | Sets the API credential (and, with `rotateSecret`, a new signing secret) and nothing else — no DB credential (below) | `config.yaml` |
+| `db [--check] --spec -` | `{"version":1,"changeSet","db":{…},"admin"?:{"user","password"},"assumeIdle"?,"expect"?}` | Changes the database login and settings only, or turns the database off — the API credential is not restated (below) | `config.yaml`, the DB secret, the SQL login |
+| `service [--check] --spec -` | `{"version":1,"changeSet","dependOn"?:[…],"recovery"?:true}` | The daemon service's SQL Server dependencies and recovery actions only; no restart (below) | the service |
+| `firewall-remove [--check] --spec -` | `{"version":1,"changeSet","names":[…]}` | Removes inbound rules this tool made (the connector's group); allowed behind the link (below) | the firewall |
+| `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
@@ -39,7 +45,7 @@ UTF-8 as mojibake; every JSON reader decodes it back. Exit codes: 0 done, 1 refu
   "erp": "hasavshevet",                   // or "sap"
   "apiListen": "0.0.0.0:8082",            // an IP literal, never loopback
   "tls": { "mode": "self-signed", "hosts": ["203.0.113.58"] },   // optional; or {"mode":"off"}
-  "db": {
+  "db": {                                // or {"mode": "none"}: a box without a database (below), every other db field refused
     "host": "127.0.0.1\\WIZSOFT",         // this machine or its LAN; host, or host\instance (port 0 = ask the SQL Server Browser)
     "port": 0,
     "database": "erp_db",
@@ -206,6 +212,96 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 `check.config` and `check.restart`. No `config.yaml` is `config_refused`: run
 `apply` first.
 
+## `auth`: the API credential alone
+
+`apply` restates the database credential with every run, so a caller that holds none — digi-mcp setting the password
+it generated for erp-manager (G-127) — could not change the API credential without it. `auth` takes
+`auth.password` (16–256 characters of plain text, no edge spaces: apply's guard, `auth_password_weak`), optionally
+`auth.username` (left out keeps the box's) and `rotateSecret` (a new signing secret, the GUI's *Regenerate*: every
+token issued until now stops working and callers log in again on their next 401). A `db` key is refused as an
+unknown field.
+
+In order: the input's checks, the drift guard, the daemon's own startup check on the result; then, only when
+`config.yaml` would change, the order queue (`orders_pending` / `pending_unknown`, `assumeIdle`), the change set's
+pre-image of **`config.yaml` alone**, the write, the restart, and the proof with the **new** credential:
+`/auth/token`, `/api/ping`, `/api/health` (not asked on a box without a database). A failed proof puts `config.yaml`
+back and the service as it was (`rolledBack`); `restore <changeSet>` undoes a success. The same credential again
+writes nothing and does not restart, but proves the credential on the running daemon (or restarts a daemon older
+than the file); a stopped service stays stopped. The password never appears in the output.
+
+## `db`: the database alone
+
+```jsonc
+{
+  "version": 1, "changeSet": "cs-bfl-db-0001",
+  "db": {
+    "host": "127.0.0.1\\WIZSOFT2017", "port": 0, "database": "WIZDB",
+    "leastPrivilege": true,               // the connector's own login, erp_connector_… (login, rotateLogin as in apply)
+    "encrypt": true, "trustServerCertificate": true   // or "trust": the same; left out keeps the box's
+  },
+  "admin": { "user": "sa", "password": "…" }   // only to create or rotate the login and install the procedures; never stored
+}
+```
+
+The API credential is not restated (an `auth` key is an unknown field). With `leastPrivilege`, a login that works
+with a password this box knows is **kept without any administrator** — a host, port or encryption change needs no
+`sa`; `admin` (or `db.user`/`db.password`, apply's convention — not both) is needed only to create or take over the
+login (`least_privilege_failed` otherwise) and installs the Hasavshevet procedures when it comes. Without
+`leastPrivilege` (WinRM only: behind the link `sa_link_mode`) the connector logs in as `db.user` with `db.password`,
+or with the stored password when it is left out and `db.user` is the login in use; `sa` needs `allowSa`. `"db":
+{"mode": "none"}` turns the database off.
+
+Guarantees as `apply`'s: every check before the first write (the database host on this machine or its LAN, the
+order queue, the login opened), the change set's pre-image of `config.yaml` and the DB secret (a least-privilege
+login's own key never goes back), then the login, the secret, `config.yaml`, the restart and the proof **including
+`/api/health`**: a connector that answers but not its database after the change is `port_proof_failed`, and the
+pre-image goes back. Nothing to change writes nothing and proves the running daemon.
+
+## A box without a database (`"db": {"mode": "none"}`)
+
+A write node that only sends orders (BFL's DIGI) has no SQL Server of its own. `apply`, `db`, `discover` and
+`verify` take `"db": {"mode": "none"}`; any other `db` field beside it is refused. `apply` writes a `config.yaml`
+that names no database, opens nothing, and skips the login, the procedures and the DB secret (left as it is);
+behind the link it needs no `leastPrivilege`. The proof does not ask `/api/health` (`proof.health`: `no_database`):
+its 503 there is by design. `discover` suggests `dbMode: none` when asked, or when `config.yaml` names no database
+(the note `no_database`). `verify` with `"db": {"mode": "none"}` passes its `database` check when `config.yaml`
+names none, and fails it when it names one; without it, a config with no database fails that check and says so.
+
+## `service`: dependencies and recovery alone
+
+`dependOn` is the whole list of SQL Server services the daemon depends on (`MSSQLSERVER` or `MSSQL$<instance>`, at
+most 8; `[]` removes them all; left out keeps the list); `recovery: true` sets the restart-on-failure actions. Every
+dependency must be a service installed on this machine (`dependency_missing`): one that is not would stop the
+daemon starting at the next boot. The change set's pre-image keeps the dependencies before (`restore` puts them
+back); the recovery actions are not in a pre-image. No restart: the service manager reads both at the next start.
+
+## `firewall-remove`: closing the old inbound rules
+
+Once a box is on the link nothing listens on the network, and `apply` refuses a `firewall` block there. This
+command removes the named inbound rules (1–16) that **this tool made** — the connector's group; a rule of that name
+that is not is refused for the whole run (`firewall_foreign`), and a name with no rule is already gone. Every rule
+is read before the first removal; the change set's pre-image keeps each removed rule, `restore <changeSet>`
+re-creates them, and a removal failing half way puts back what the run removed. No restart. `--check` reports
+`check.firewall` (`remove` / `keep`) and `check.rules`.
+
+## `daemon`: restart, stop, start
+
+`daemon restart|stop|start [--assume-idle]` is what a person does in services.msc after a hand edit or before a
+reboot. A stop or a restart of a running service asks the order queue first (it is in memory: a restart drops it;
+`--assume-idle` goes on when it cannot be read, and is the only way to stop a service whose `config.yaml` does not
+read). A start or a restart first checks `config.yaml` with the daemon's own startup check, so a running service is
+never stopped onto a config it would refuse (`config_refused`). `start` and `restart` end with the proof with
+`config.yaml`'s credential (`/auth/token`, `/api/ping`, `/api/health`); a start of a running service only proves it,
+a restart of a stopped one starts it. Nothing is written, so there is no pre-image and nothing to roll back: a
+failed proof is reported (`port_proof_failed`) and the service is left as the action left it. It takes the run lock
+(`busy` while an `apply` runs).
+
+## `restore` and pre-images without files
+
+A pre-image holding no file (`service`, `firewall-remove`) changes nothing the service reads: its `restore` neither
+asks the order queue nor restarts, and leaves the DB secret alone. A pre-image with files restarts only when a file
+actually changed.
+
 ## Refusals
 
 | Code | Meaning |
@@ -230,11 +326,12 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 | `firewall_foreign` | a rule of the spec's name exists and this tool did not make it |
 | `order_number_conflict` | the old and the new order folder hold different order counters |
 | `busy` | another run holds `provision\.lock` |
-| `port_proof_failed` | the restarted connector did not answer; the pre-image was put back |
+| `port_proof_failed` | the restarted connector did not answer (for `db`: or its database did not); the pre-image was put back (`daemon`: nothing to put back) |
 | `sa_link_mode` | behind the link (below), `allowSa`: the connector never keeps `sa` there |
 | `importer_not_erp` | behind the link, an importer that is not `has.exe` or a `.bat`/`.cmd`, or one in a system folder |
 | `image_folder_forbidden` | behind the link, an image folder in a system folder or a user's `AppData` |
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
+| `dependency_missing` | `service`: a dependency that is not a service on this machine |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
 
@@ -253,7 +350,13 @@ the WinRM path is unchanged:
 - **Image folders** are outside those folders and outside any `AppData` (`image_folder_forbidden`): `/api/file` serves
   what is in them.
 
-These bound what a signed command can make a box do (Digitrade plan 083 §8 A16).
+These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
+takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login
+the client gave (`sa_link_mode`), and `firewall-remove` is allowed — it is how the old inbound rules close.
+
+`discover`'s suggested `dependOn` (and `verify`'s `dependency` check) names the instance that has the database's
+port: a database reached as `127.0.0.1:63501` belongs to `MSSQL$WIZSOFT2017` when that instance has the port, not to
+`MSSQLSERVER` (plan 083 §19).
 
 ## What it does not do
 

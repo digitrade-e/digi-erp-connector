@@ -34,6 +34,20 @@ is for this box, that it has not expired and was not seen before, and the digest
 `--check`), `verify`, `restore <change-set>`; or answers `hashes` itself (the digests of the installed executables).
 There is no shell and no other program. Every answer is signed by this server's key.
 
+From v1.0.29 (Digitrade plan 086) also, each a fixed `provision` command line
+([provisioning.md](provisioning.md)):
+
+| Command | Runs | Input |
+|---|---|---|
+| `auth-check`, `auth` | `auth [--check] --spec -` — the API credential alone | **sealed only** |
+| `db-check`, `db` | `db [--check] --spec -` — the database login and settings alone | **sealed only** |
+| `service-check`, `service` | `service [--check] --spec -` — the service's SQL Server dependencies and recovery | JSON |
+| `firewall-remove-check`, `firewall-remove` | `firewall-remove [--check] --spec -` — the connector's own inbound rules | JSON |
+| `daemon-restart`, `daemon-stop`, `daemon-start` | `daemon <action>`, optional argument `--assume-idle` | none |
+
+A command whose input carries a password (**sealed only** above) is refused `input_not_sealed`, and never run,
+unless its input is sealed to this server's key: the relay never sees it in clear, whatever the sender does.
+
 ## For the client's IT
 
 - **State:** `link.yaml` in `%ProgramData%\digi-erp-connector\` — the relay, this box's id once paired, the proxy.
