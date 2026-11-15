@@ -51,7 +51,7 @@ type ApplyResult struct {
 // missing at apply; the check does not look.
 type CheckResult struct {
 	Config       string `json:"config"`                 // "unchanged", or configDiff's "changed: …"
-	Login        string `json:"login"`                  // given | keep | create | rotate
+	Login        string `json:"login"`                  // given | keep | create | rotate | none
 	DBSecret     bool   `json:"dbSecret"`               // the stored DB password would change
 	TLS          string `json:"tls,omitempty"`          // keep | generate, when the spec asks for a pair
 	Firewall     string `json:"firewall,omitempty"`     // keep | set, when the spec names a rule
@@ -80,6 +80,9 @@ type Proof struct {
 
 // HealthNoDatabase is Proof.Health on a box that has no database (plan 086 C6).
 const HealthNoDatabase = "no_database"
+
+// loginNone is the login plan of a box without a database (DBSpec.Mode none).
+const loginNone = "none"
 
 // orderNumberFile is the order counter, kept in sendOrderDir
 // (hasavshevet.OrderNumberStore). A missing one starts again at 1.
@@ -146,7 +149,7 @@ type applier struct {
 
 	running    bool          // the service ran before this run
 	fwBefore   *FirewallRule // the rule of the spec's name before this run (ours, or none)
-	loginPlan  string        // given | keep | create | rotate
+	loginPlan  string        // given | keep | create | rotate | none (loginNone)
 	moveOrders bool          // carry lastOrderNumber.json to the new sendOrderDir at the restart
 
 	dbPassword string // what the connector will log in to SQL with
@@ -177,6 +180,9 @@ func (a *applier) run(ctx context.Context) error {
 	if a.s.DB.LeastPrivilege {
 		dbUser = a.s.DB.login()
 	}
+	if a.s.DB.None() {
+		dbUser = ""
+	}
 	a.tgt = buildTarget(a.cur, a.s, a.dir, dbUser)
 	if strings.TrimSpace(a.tgt.Auth.Secret) == "" {
 		secret, err := auth.NewSecret()
@@ -200,16 +206,21 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
 	}
-	if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
-		return r
-	}
-	admin, err := a.openAdmin()
-	if err != nil {
-		return err
-	}
-	defer admin.Close()
-	if err := a.planLogin(ctx, admin); err != nil {
-		return err
+	var admin Database // nil on a box without a database: nothing is opened
+	if a.s.DB.None() {
+		a.loginPlan = loginNone
+	} else {
+		if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
+			return r
+		}
+		var err error
+		if admin, err = a.openAdmin(); err != nil {
+			return err
+		}
+		defer admin.Close()
+		if err := a.planLogin(ctx, admin); err != nil {
+			return err
+		}
 	}
 	if a.check {
 		a.res.Check = a.wouldDo()
@@ -250,6 +261,7 @@ func (a *applier) wouldDo() *CheckResult {
 	switch a.loginPlan {
 	case "create", "rotate":
 		c.DBSecret = true
+	case loginNone:
 	default:
 		cur, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP))
 		c.DBSecret = err != nil || string(cur) != a.dbPassword
@@ -585,6 +597,10 @@ func (a *applier) planLogin(ctx context.Context, admin Database) error {
 		return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password; anything else that logs in as it then needs the new one",
 			"%s's stored password does not log in: %v", login, last)
 	}
+	if admin == nil { // the db command without an administrator: only a login this box knows
+		return refuse(CodeLeastPrivilege, "send admin (an administrator's login, used once and never stored) to create or take over "+login,
+			"this box knows no password that logs in as %s", login)
+	}
 	exists, err := admin.LoginExists(ctx, login)
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "the given login needs VIEW ANY DEFINITION or to be an administrator", "look for %s: %v", login, err)
@@ -628,7 +644,11 @@ func (a *applier) captureState(files []string, st preState) error {
 }
 
 func (a *applier) procedures(ctx context.Context, admin Database) error {
-	if a.tgt.ERP != config.ERPHasavshevet {
+	if a.tgt.ERP != config.ERPHasavshevet || a.loginPlan == loginNone {
+		return nil
+	}
+	if admin == nil {
+		a.step("procedures", false, "not checked: no administrator was given")
 		return nil
 	}
 	results, err := admin.EnsureProcedures(ctx)
@@ -653,6 +673,9 @@ func (a *applier) procedures(ctx context.Context, admin Database) error {
 // applyLogin carries out planLogin's decision.
 func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 	switch a.loginPlan {
+	case loginNone:
+		a.step("login", false, "no database")
+		return nil
 	case "given":
 		a.step("login", false, "the given login")
 		return nil
@@ -728,6 +751,10 @@ func (a *applier) tlsCovered() bool {
 }
 
 func (a *applier) writeSecret() error {
+	if a.loginPlan == loginNone {
+		a.step("db_secret", false, "no database: the stored password, if any, is not read")
+		return nil
+	}
 	key := config.DBPasswordKey(a.tgt.ERP)
 	if cur, err := a.env.Sys.SecretGet(key); err == nil && string(cur) == a.dbPassword {
 		a.step("db_secret", false, "")

@@ -67,6 +67,8 @@ var provisionCommands086 = map[string]func(args []string) ([]string, bool){
 	"daemon-start":   daemonCmd086("start"),
 	"service-check":  fixed("service", "--check", "--spec", "-"),
 	"service":        fixed("service", "--spec", "-"),
+	"db-check":       fixed("db", "--check", "--spec", "-"),
+	"db":             fixed("db", "--spec", "-"),
 }
 
 // sealedOnly086 are the commands whose stdin carries a secret (the API
@@ -76,6 +78,8 @@ var provisionCommands086 = map[string]func(args []string) ([]string, bool){
 var sealedOnly086 = map[string]bool{
 	"auth-check": true,
 	"auth":       true,
+	"db-check":   true,
+	"db":         true,
 }
 
 // CodeInputNotSealed refuses a secret-carrying command whose stdin was sent in

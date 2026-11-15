@@ -33,6 +33,8 @@ func TestPlan086ProvisionCommands(t *testing.T) {
 		{"service-check", nil, "service --check --spec -"},
 		{"service", nil, "service --spec -"},
 		{"service", []string{"MSSQL$X"}, ""},
+		{"db-check", nil, "db --check --spec -"},
+		{"db", nil, "db --spec -"},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})
@@ -64,7 +66,7 @@ func TestASecretCarryingCommandMustBeSealed(t *testing.T) {
 	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
 	plain := []byte(`{"version":1,"changeSet":"cs-auth-0001","auth":{"password":"correct-horse-battery-staple"}}`)
 
-	for _, cmd := range []string{"auth", "auth-check"} {
+	for _, cmd := range []string{"auth", "auth-check", "db", "db-check"} {
 		raw, _ := envelope(priv, "team-1", "bfl-read", cmd, nil, plain, time.Now())
 		stdout, sa := send(t, rc, raw, plain)
 		if a := answerOf(sa); a.Refusal != CodeInputNotSealed || len(stdout) != 0 {

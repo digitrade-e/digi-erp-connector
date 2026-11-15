@@ -23,6 +23,15 @@ type VerifyInput struct {
 	// DefaultFirewallRule is checked if it exists, and its absence is no
 	// failure (the spec may not have asked for one).
 	FirewallRule string `json:"firewallRule,omitempty"`
+	// DB {"mode":"none"} says the box has no database (plan 086 C6): the
+	// database check then passes when config.yaml names none (its
+	// /api/health 503 is by design) and fails when it names one.
+	DB *VerifyDB `json:"db,omitempty"`
+}
+
+// VerifyDB is what verify expects of the database: only {"mode":"none"}.
+type VerifyDB struct {
+	Mode string `json:"mode"`
 }
 
 // VerifyResult is every check and whether all passed.
@@ -44,6 +53,10 @@ type Check struct {
 // writes nothing.
 func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error) {
 	res := &VerifyResult{Checks: []Check{}}
+	if in.DB != nil && in.DB.Mode != DBModeNone {
+		return res, refuse(CodeSpecInvalid, `send "db": {"mode": "none"} for a box without a database, or leave db out`, "db.mode %q is not known", in.DB.Mode)
+	}
+	dbless := in.DB != nil
 	add := func(name string, ok bool, format string, args ...any) {
 		res.Checks = append(res.Checks, Check{Name: name, OK: ok, Detail: fmt.Sprintf(format, args...)})
 	}
@@ -100,8 +113,17 @@ func Verify(ctx context.Context, env Env, in VerifyInput) (*VerifyResult, error)
 		default:
 			add("ping", true, "version %s", p.Version)
 		}
-		status, err := d.get(ctx, "/api/health", tok, nil)
-		add("database", err == nil && status == http.StatusOK, "/api/health %d", status)
+		switch {
+		case dbless && db.IsConfigured(cfg):
+			add("database", false, "config.yaml names a database (%s), and none was expected", cfg.DB.Host)
+		case dbless:
+			add("database", true, "no database, as expected: /api/health not asked")
+		case !db.IsConfigured(cfg):
+			add("database", false, `config.yaml names no database (send "db": {"mode": "none"} to verify a box without one)`)
+		default:
+			status, err := d.get(ctx, "/api/health", tok, nil)
+			add("database", err == nil && status == http.StatusOK, "/api/health %d", status)
+		}
 		queued, running, err := d.queue(ctx, tok)
 		if errors.Is(err, errNoQueueRoute) {
 			add("orders", true, "this connector cannot report its queue")

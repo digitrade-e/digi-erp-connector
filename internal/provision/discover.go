@@ -27,8 +27,10 @@ type DiscoverInput struct {
 }
 
 // DiscoverDB is a credential for one server. Host and Port default to
-// config.yaml's.
+// config.yaml's. Mode "none" (alone) says the box has no database (plan 086
+// C6): nothing is opened, and the suggestion is a spec without one.
 type DiscoverDB struct {
+	Mode     string `json:"mode,omitempty"`
 	Host     string `json:"host,omitempty"`
 	Port     int    `json:"port,omitempty"`
 	User     string `json:"user"`
@@ -145,8 +147,11 @@ type Finding struct {
 // Suggestion is a spec for this box without its secrets: what Apply would be
 // given if nobody chose otherwise.
 type Suggestion struct {
-	ERP          string        `json:"erp"`
-	APIListen    string        `json:"apiListen"`
+	ERP       string `json:"erp"`
+	APIListen string `json:"apiListen"`
+	// DBMode is "none" for a box without a database (asked for, or
+	// config.yaml names none): the spec's db is then {"mode":"none"}.
+	DBMode       string        `json:"dbMode,omitempty"`
 	DBHost       string        `json:"dbHost"`
 	DBPort       int           `json:"dbPort,omitempty"`
 	Database     string        `json:"database,omitempty"`
@@ -294,8 +299,14 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 	}
 
 	// The databases, only with a credential.
-	if in.DB != nil {
+	dbless := in.DB != nil && in.DB.Mode == DBModeNone
+	if in.DB != nil && !dbless {
 		f.Databases, f.DatabaseCount, f.DatabaseError = fingerprint(env, cfg, *in.DB)
+	}
+	if cfg != nil && !db.IsConfigured(*cfg) {
+		dbless = dbless || in.DB == nil
+		note("no_database", `a write node needs none (provision it with "db": {"mode": "none"}); otherwise the db command names one`,
+			"config.yaml names no database: saved queries, price/stock and /api/health answer 503")
 	}
 
 	// The defects of a hand install.
@@ -348,6 +359,11 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 	}
 
 	f.Suggested = suggest(cfg, f, LinkMode(dir))
+	if dbless {
+		f.Suggested.DBMode = DBModeNone
+		f.Suggested.DBHost, f.Suggested.DBPort, f.Suggested.Database = "", 0, ""
+		f.Suggested.LeastPriv, f.Suggested.DependOn = false, nil
+	}
 	return f, nil
 }
 
