@@ -43,6 +43,9 @@ From v1.0.29 (Digitrade plan 086) also, each a fixed `provision` command line
 | `db-check`, `db` | `db [--check] --spec -` — the database login and settings alone | **sealed only** |
 | `service-check`, `service` | `service [--check] --spec -` — the service's SQL Server dependencies and recovery | JSON |
 | `firewall-remove-check`, `firewall-remove` | `firewall-remove [--check] --spec -` — the connector's own inbound rules | JSON |
+| `receipts-check`, `receipts` | `receipts [--check] --spec -` — the receipt settings | JSON |
+| `orders-check`, `orders` | `orders [--check] --spec -` — the order settings, model (a) included | JSON |
+| `receipt-seed` | `receipt-seed <N>`, one argument N (1–9 digits) — the receipt number store, write-if-absent | none |
 | `daemon-restart`, `daemon-stop`, `daemon-start` | `daemon <action>`, optional argument `--assume-idle` | none |
 
 A command whose input carries a password (**sealed only** above) is refused `input_not_sealed`, and never run,

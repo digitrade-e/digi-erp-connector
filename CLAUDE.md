@@ -14,7 +14,7 @@ A Go application providing a local HTTP REST API gateway between the main app an
 Three binaries:
 - **`digi-erp-connectord`** — background daemon / Windows service; runs the REST API server
 - **`digi-erp-connector`** — Windows-only native UI (`walk` library) for config management and service control
-- **`digi-erp-connector-provision`** — headless discover / apply / options / verify / restore, and (plan 086) auth / db / service / firewall-remove / daemon, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068) or through the link's fixed command set (`internal/link/commands.go`; `docs/provisioning.md`, `docs/link.md`)
+- **`digi-erp-connector-provision`** — headless discover / apply / options / verify / restore, and (plan 086) auth / db / service / firewall-remove / daemon / receipts / orders / receipt-seed, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068) or through the link's fixed command set (`internal/link/commands.go`; `docs/provisioning.md`, `docs/link.md`)
 
 **Supported ERPs:** Hasavshevet (complete), SAP (price/stock query implemented), Priority (not implemented)
 **Primary target OS:** Windows. Linux supported for daemon only.
@@ -32,7 +32,8 @@ cmd/
   digi-erp-connectord/  ← Background daemon/service
   digi-erp-connector-provision/ ← entry point of internal/provision: headless
                           discover / apply / verify / restore / auth / db /
-                          service / firewall-remove / daemon (docs/provisioning.md)
+                          service / firewall-remove / daemon / receipts / orders /
+                          receipt-seed (docs/provisioning.md)
   cutover-seed/         ← operator tool: seed config/secret/queries for a
                           replacement install (not part of the service)
 
@@ -78,7 +79,8 @@ internal/
     dataacl/            ← protected DACL on DataDir + config.yaml (Windows; no-op elsewhere)
   secrets/              ← Windows DPAPI (machine scope)
   provision/            ← discover / apply / verify / restore (+ the narrow
-                          commands auth, db, service, firewall-remove, daemon:
+                          commands auth, db, service, firewall-remove, daemon,
+                          receipts, orders, receipt-seed:
                           plan 086, each one part of apply) behind a System
                           interface (Windows: service manager, registry, TCP
                           table, firewall via fixed PowerShell); pre-images in
@@ -160,7 +162,7 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 
 `POST /api/sendReceipt` → `ReceiptWriter.Write`, synchronously, under the **import lock shared with the order worker** (`importmu.go`). Full doc: `docs/hasavshevet-send-receipt.md`.
 
-- The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` creates it (write-if-absent).
+- The number store (`DataDir/receipts/receiptNumber.json`) **fails closed** — never restarts at 1; only `cutover-seed -receipt-seed N` or `provision receipt-seed N` (plan 086; also over the link) creates it (write-if-absent).
 - One index file per key (`DataDir/receipts/index/<uuid>.json`) is what makes a retry the same receipt. Never delete one to "unblock" a 500 — that turns the retry into a second receipt. Never restore or copy `DataDir/receipts` while the service runs — stop it first (a running writer trusts its in-memory recovery state).
 - **One process per data directory**: the writer holds an OS lock on `DataDir/receipts/writer.lock` (`internal/platform/filelock`: flock / LockFileEx) from its first Recover/Write to `Close` (called last in `Stop`) or exit; a second process answers receipts 503 `RECEIPT_DATA_IN_USE`. The importMu is in-process only.
 - The store never persists a next number outside 1…999 999 999 + 1; history and index files are 0600 in 0700 dirs on Unix (no chmod on Windows — the DataDir's protected DACL, `internal/platform/dataacl`).

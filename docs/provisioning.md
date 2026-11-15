@@ -25,6 +25,9 @@ same way in an elevated PowerShell. The code is
 | `db [--check] --spec -` | `{"version":1,"changeSet","db":{…},"admin"?:{"user","password"},"assumeIdle"?,"expect"?}` | Changes the database login and settings only, or turns the database off — the API credential is not restated (below) | `config.yaml`, the DB secret, the SQL login |
 | `service [--check] --spec -` | `{"version":1,"changeSet","dependOn"?:[…],"recovery"?:true}` | The daemon service's SQL Server dependencies and recovery actions only; no restart (below) | the service |
 | `firewall-remove [--check] --spec -` | `{"version":1,"changeSet","names":[…]}` | Removes inbound rules this tool made (the connector's group); allowed behind the link (below) | the firewall |
+| `receipts [--check] --spec -` | `{"version":1,"changeSet","sendReceiptDir"?,"hasReceiptBatFile"?,"hasReceiptParamFile"?,"receiptCardNames"?,"allowWritable"?,"assumeIdle"?,"expect"?}` | The receipt settings only (below) | `config.yaml` |
+| `orders [--check] --spec -` | `{"version":1,"changeSet","sendOrderDir"?,"importer"?,"sendOrderPickupDir"?,"sendOrderFormat"?,"assumeIdle"?,"expect"?}` | The order settings only, model (a) included (below) | `config.yaml`, the order counter |
+| `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 
@@ -296,6 +299,31 @@ a restart of a stopped one starts it. Nothing is written, so there is no pre-ima
 failed proof is reported (`port_proof_failed`) and the service is left as the action left it. It takes the run lock
 (`busy` while an `apply` runs).
 
+## `receipts`, `orders`: those settings alone
+
+Each field left out keeps the box's; both run `options`' flow (the pre-image of `config.yaml`, the order queue, the
+restart only on change, the proof with the box's own credential, the rollback). Neither carries a credential.
+
+- **`receipts`**: `sendReceiptDir` (`""` turns receipts off), model (b)'s `hasReceiptBatFile` or
+  `hasReceiptParamFile` (`""` clears one), `receiptCardNames` (the whole block; `{}` clears it). Refused: a folder or
+  file that is not on the machine (`receipt_dir_missing`, `importer_missing`), a runner others can change
+  (`importer_writable`; `allowWritable` over WinRM only — it runs as LocalSystem once per receipt), anything the
+  daemon's own receipt guard refuses (`config_refused`: the order folder, both runners). Behind the link: plain local
+  paths outside the system folders, a `.bat`/`.cmd` only.
+- **`orders`**: `sendOrderDir` and `importer` with `apply`'s checks (the importer stated, its files present and
+  administrators-only, the counter carried to a new folder at the restart, two counters refused), and model (a)'s
+  `sendOrderPickupDir` (`""` off) and `sendOrderFormat` (`official` / `legacy`; required with a pickup folder —
+  the daemon's `ValidateOrders`). Behind the link: `apply`'s importer rules, folders outside the system folders.
+
+## `receipt-seed <N>`
+
+What `cutover-seed -receipt-seed N` does — the installer does not ship `cutover-seed`: creates
+`receipts\receiptNumber.json` with N (1–999999999) as the number the **next** receipt gets. Write-if-absent only: an
+existing store, valid or damaged, is never touched (`receipt_store_exists`), so a seed can neither lower the
+numbering nor hide a damaged file; a seed at or below a receipt already written (`history\receipts\<n>`) is refused
+(`receipt_seed_low`). No pre-image (there was no file) and no restart: the receipt writer reads the store on every
+request.
+
 ## `restore` and pre-images without files
 
 A pre-image holding no file (`service`, `firewall-remove`) changes nothing the service reads: its `restore` neither
@@ -332,6 +360,8 @@ actually changed.
 | `image_folder_forbidden` | behind the link, an image folder in a system folder or a user's `AppData` |
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
 | `dependency_missing` | `service`: a dependency that is not a service on this machine |
+| `receipt_dir_missing` | `receipts`: `sendReceiptDir` is not a folder on this machine |
+| `receipt_store_exists`, `receipt_seed_low` | `receipt-seed`: the store exists already / N is at or below a receipt already written |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
 
@@ -368,8 +398,8 @@ port: a database reached as `127.0.0.1:63501` belongs to `MSSQL$WIZSOFT2017` whe
   login, its current password is kept.
 - **It never turns a firewall profile on.** That would change the client's whole
   server.
-- **It does not replace `cutover-seed` yet.** `cutover-seed -receipt-seed N` is still
-  the only way to create the receipt number store (hasavshevet-send-receipt.md).
+- **`receipt-seed` creates the receipt number store**, as `cutover-seed -receipt-seed N`
+  does (hasavshevet-send-receipt.md); it never changes an existing one.
 
 `restore` also works when `config.yaml` no longer reads — that is what it is for — but
 then the running connector's order queue cannot be asked, so it needs
