@@ -30,6 +30,9 @@ func TestPlan086ProvisionCommands(t *testing.T) {
 		{"daemon-stop", []string{"--force"}, ""},
 		{"daemon-stop", []string{"--assume-idle", "--assume-idle"}, ""},
 		{"daemon-restart", []string{"stop"}, ""},
+		{"service-check", nil, "service --check --spec -"},
+		{"service", nil, "service --spec -"},
+		{"service", []string{"MSSQL$X"}, ""},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})

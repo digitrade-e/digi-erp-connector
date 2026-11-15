@@ -55,3 +55,8 @@ const (
 	CodeImporterWritable     = "importer_writable"
 	CodeInternal             = "internal_error"
 )
+
+// Plan 086 B1's codes.
+const (
+	CodeDependencyMissing = "dependency_missing" // service: a dependency that is not a service on this machine
+)

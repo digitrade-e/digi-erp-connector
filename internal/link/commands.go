@@ -65,6 +65,8 @@ var provisionCommands086 = map[string]func(args []string) ([]string, bool){
 	"daemon-restart": daemonCmd086("restart"),
 	"daemon-stop":    daemonCmd086("stop"),
 	"daemon-start":   daemonCmd086("start"),
+	"service-check":  fixed("service", "--check", "--spec", "-"),
+	"service":        fixed("service", "--spec", "-"),
 }
 
 // sealedOnly086 are the commands whose stdin carries a secret (the API
