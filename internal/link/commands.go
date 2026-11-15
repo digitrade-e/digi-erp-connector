@@ -60,8 +60,11 @@ func restore(args []string) ([]string, bool) {
 // builders add theirs without touching these lines. Each one is a provision
 // subcommand with fixed argv; the pin test lists them all.
 var provisionCommands086 = map[string]func(args []string) ([]string, bool){
-	"auth-check": fixed("auth", "--check", "--spec", "-"),
-	"auth":       fixed("auth", "--spec", "-"),
+	"auth-check":     fixed("auth", "--check", "--spec", "-"),
+	"auth":           fixed("auth", "--spec", "-"),
+	"daemon-restart": daemonCmd086("restart"),
+	"daemon-stop":    daemonCmd086("stop"),
+	"daemon-start":   daemonCmd086("start"),
 }
 
 // sealedOnly086 are the commands whose stdin carries a secret (the API
@@ -85,6 +88,19 @@ func init() {
 
 // MustBeSealed reports whether command's stdin must arrive sealed.
 func MustBeSealed(command string) bool { return sealedOnly086[command] }
+
+// daemonCmd086 is provision's daemon <action>, optionally with --assume-idle.
+func daemonCmd086(action string) func([]string) ([]string, bool) {
+	return func(args []string) ([]string, bool) {
+		switch {
+		case len(args) == 0:
+			return []string{"daemon", action}, true
+		case len(args) == 1 && args[0] == "--assume-idle":
+			return []string{"daemon", action, "--assume-idle"}, true
+		}
+		return nil, false
+	}
+}
 
 // --- end plan 086 B1 ---
 

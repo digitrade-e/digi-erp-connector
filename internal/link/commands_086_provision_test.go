@@ -21,6 +21,15 @@ func TestPlan086ProvisionCommands(t *testing.T) {
 		{"auth-check", nil, "auth --check --spec -"},
 		{"auth", nil, "auth --spec -"},
 		{"auth", []string{"--check"}, ""},
+		{"daemon-restart", nil, "daemon restart"},
+		{"daemon-restart", []string{"--assume-idle"}, "daemon restart --assume-idle"},
+		{"daemon-stop", nil, "daemon stop"},
+		{"daemon-stop", []string{"--assume-idle"}, "daemon stop --assume-idle"},
+		{"daemon-start", nil, "daemon start"},
+		{"daemon-start", []string{"--assume-idle"}, "daemon start --assume-idle"},
+		{"daemon-stop", []string{"--force"}, ""},
+		{"daemon-stop", []string{"--assume-idle", "--assume-idle"}, ""},
+		{"daemon-restart", []string{"stop"}, ""},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})
