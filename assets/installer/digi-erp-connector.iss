@@ -72,7 +72,7 @@ Filename: "{cmd}"; Parameters: "/C sc.exe failure {#LinkService} reset= 86400 ac
 Filename: "{cmd}"; Parameters: "/C sc.exe failureflag {#LinkService} 1 >nul 2>&1 & exit /b 0"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/C powershell.exe -NoProfile -NonInteractive -Command ""if (-not [Diagnostics.EventLog]::SourceExists('{#LinkService}')) {{ New-EventLog -LogName Application -Source '{#LinkService}' }"" >nul 2>&1 & exit /b 0"; Flags: runhidden
 ; Pairing (a code from Digitrade, typed on the page below or passed as /PAIRCODE=...) runs in
-; CurStepChanged, before the link service starts; the service starts last.
+; CurStepChanged(ssPostInstall); a link already running picks the code up within 15 s.
 Filename: "{cmd}"; Parameters: "/C sc.exe start {#LinkService} >nul 2>&1 & exit /b 0"; Flags: runhidden
 
 ; No [UninstallRun]: stopping, waiting for STOPPED and deleting the service are
@@ -200,6 +200,13 @@ begin
   PairPage.Values[0] := ExpandConstant('{param:PAIRCODE|}');
 end;
 
+function PairCode(): String;
+begin
+  Result := Trim(ExpandConstant('{param:PAIRCODE|}'));
+  if (PairPage <> nil) and (Trim(PairPage.Values[0]) <> '') then
+    Result := Trim(PairPage.Values[0]);
+end;
+
 // Only letters, digits and dashes reach the command line below (the code is typed or
 // passed as /PAIRCODE=, and cmd.exe would run whatever follows an & in it).
 function ValidPairCode(const Code: String): Boolean;
@@ -242,18 +249,21 @@ begin
   end;
 end;
 
+// Leaving the pairing page: a code that cannot be one is retyped there (a silent install
+// logs it in CurStepChanged instead), then the preflight runs.
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if (PairPage <> nil) and (CurPageID = PairPage.ID) then
-    Result := RunPreflight();
-end;
-
-function PairCode(): String;
-begin
-  Result := Trim(ExpandConstant('{param:PAIRCODE|}'));
-  if (PairPage <> nil) and (Trim(PairPage.Values[0]) <> '') then
-    Result := Trim(PairPage.Values[0]);
+  if (PairPage = nil) or (CurPageID <> PairPage.ID) then
+    Exit;
+  if (PairCode() <> '') and (not ValidPairCode(PairCode())) and (not WizardSilent()) then
+  begin
+    MsgBox('That is not a pairing code: ten letters and digits, like ABCDE-FGHJK. ' +
+      'Correct it, or leave it empty to pair later.', mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  Result := RunPreflight();
 end;
 
 // After the files are in and before [Run] starts the services: store the code. The

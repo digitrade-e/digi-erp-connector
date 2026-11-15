@@ -138,7 +138,8 @@ func TestInstallerShipsTheLink(t *testing.T) {
 		// The preflight: before anything is installed, from a temporary copy; a STOP asks, never aborts silently.
 		`ExtractTemporaryFile('{#LinkExe}');`,
 		`ExpandConstant('{tmp}\{#LinkExe}') + '" preflight > "'`,
-		`if (PairPage <> nil) and (CurPageID = PairPage.ID) then`,
+		`if (PairPage = nil) or (CurPageID <> PairPage.ID) then`,
+		`if (PairCode() <> '') and (not ValidPairCode(PairCode())) and (not WizardSilent()) then`,
 		`'Install anyway?',`,
 	} {
 		if !strings.Contains(src, want) {
