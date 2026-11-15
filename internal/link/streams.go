@@ -55,9 +55,15 @@ func (l *Link) pipe(st net.Conn) {
 		return // the relay answers 504 forwarded-no-answer, or 503 if nothing was written
 	}
 	if l.cfg.APITLS {
-		// The daemon's own self-signed pair, on loopback: the identity is the address.
-		t := tls.Client(api, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // loopback only
-		api = t
+		// Only the daemon's own certificate, read from its certFile, is trusted — never "skip verification", even on
+		// loopback (CodeQL go/disabled-certificate-check). Unreadable, the data stream is not served.
+		conf, err := APITLSConfig(l.cfg.APICert)
+		if err != nil {
+			_ = api.Close()
+			l.cfg.Log.Error("link: the connector's TLS certificate", err)
+			return
+		}
+		api = tls.Client(api, conf)
 	}
 	defer func() { _ = api.Close() }()
 	var wg sync.WaitGroup

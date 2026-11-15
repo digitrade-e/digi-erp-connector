@@ -3,6 +3,8 @@ package link
 import (
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -90,7 +93,7 @@ func (m Machine) Config() (Config, error) {
 	}
 	return Config{
 		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
-		APIAddr: LocalAddr(daemon.APIListen), APITLS: daemon.TLS.Enabled(),
+		APIAddr: LocalAddr(daemon.APIListen), APITLS: daemon.TLS.Enabled(), APICert: readCert(daemon.TLS.CertFile),
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,
 	}, nil
@@ -156,4 +159,40 @@ func HTTPClientVia(f *ProxyFinder) (*http.Client, error) {
 		TLSHandshakeTimeout: 15 * time.Second,
 		ForceAttemptHTTP2:   false, // a WebSocket upgrade is HTTP/1.1
 	}}, nil
+}
+
+// readCert is the daemon's certificate file, nil when unset or unreadable (the data path then refuses: APITLSConfig).
+func readCert(path string) []byte {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// APITLSConfig trusts exactly the daemon's own certificate: it is the root, and the name checked is one it names.
+func APITLSConfig(certPEM []byte) (*tls.Config, error) {
+	blk, _ := pem.Decode(certPEM)
+	if blk == nil {
+		return nil, errors.New("the daemon serves TLS but its certFile could not be read as PEM")
+	}
+	cert, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("the daemon's certificate: %w", err)
+	}
+	name := ""
+	switch {
+	case len(cert.IPAddresses) > 0:
+		name = cert.IPAddresses[0].String()
+	case len(cert.DNSNames) > 0:
+		name = cert.DNSNames[0]
+	default:
+		return nil, errors.New("the daemon's certificate names no host")
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return &tls.Config{RootCAs: pool, ServerName: name, MinVersion: tls.VersionTLS12}, nil
 }

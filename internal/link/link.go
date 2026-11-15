@@ -40,6 +40,7 @@ type Config struct {
 	// APITLS when the daemon serves TLS there.
 	APIAddr string
 	APITLS  bool
+	APICert []byte // the daemon's certificate (PEM, its certFile) when APITLS: the only one the link trusts
 
 	HTTPClient *http.Client // the proxy and the TLS roots for the relay
 	Runner     Runner       // provision.exe
