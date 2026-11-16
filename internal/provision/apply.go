@@ -179,6 +179,14 @@ type applier struct {
 	// or newly makes typed or bound (plan 087 review R1a), by folderKey: the
 	// others are only reported (reportWritableFolders).
 	folderChecked map[string]bool
+	// acceptUnreadable is the command's acceptUnreadable; unreadable and
+	// unreadableWhy what its guards could not read, by index (review m3:
+	// one total, settled once — unreadableSettled); unreadableDeferred: a
+	// later guard settles it.
+	acceptUnreadable   *int
+	unreadable         map[string]int
+	unreadableWhy      []string
+	unreadableDeferred bool
 
 	cur      config.Config
 	curBytes []byte // nil: there is no config.yaml

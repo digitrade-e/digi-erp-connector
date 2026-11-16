@@ -195,7 +195,7 @@ func ApplyFolderACL(ctx context.Context, env Env, in FolderACLInput, check bool)
 		return res, r
 	}
 	a := &applier{env: env, s: Spec{Version: in.Version, ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle, Expect: in.Expect},
-		dir: env.Sys.DataDir(), res: res, check: check}
+		dir: env.Sys.DataDir(), res: res, check: check, acceptUnreadable: in.AcceptUnreadable}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -284,7 +284,7 @@ func (a *applier) finalPathRefusal(name, p, final string) error {
 // documents command): orders frozen for a typed folder, orders without a rule
 // for sendOrderDir and the pickup folder, reserved receipts for the receipt
 // folder; and index entries it cannot read unless accepted (review R7).
-func (a *applier) folderACLIdle(folders map[string]string, accept *int) error {
+func (a *applier) folderACLIdle(folders map[string]string) error {
 	orders, err := hasavshevet.ScanOrdersInFlight(a.dir)
 	if err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the order index: %v", err)
@@ -293,7 +293,9 @@ func (a *applier) folderACLIdle(folders map[string]string, accept *int) error {
 	if err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the receipt index: %v", err)
 	}
-	if r := a.unreadableAccepted(orders.Unreadable+rUnreadable, "order or receipt", "an unfinished one among them could be in the folder", accept); r != nil {
+	a.noteUnreadable(config.DocumentKindOrders, orders.Unreadable, "an unfinished one among them could be in the folder")
+	a.noteUnreadable(config.DocumentKindReceipts, rUnreadable, "an unfinished one among them could be in the folder")
+	if r := a.unreadableSettled(); r != nil { // review m3: the command's one total
 		return r
 	}
 	for _, name := range sortedKeys(folders) {
@@ -343,7 +345,7 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 		}
 		paths[n] = p
 	}
-	if err := a.folderACLIdle(paths, in.AcceptUnreadable); err != nil {
+	if err := a.folderACLIdle(paths); err != nil {
 		return err
 	}
 	trustedFor := map[string][]string{}
@@ -477,7 +479,7 @@ func (a *applier) folderACLRestore(ctx context.Context, in FolderACLInput) error
 		return refuse(CodePreimageMissing, "give the preimage recorded for this folder at its configured path",
 			"pre-image %s was recorded for folder %s at %s, not folder %s at %s", in.Preimage, pre.Folder, pre.Path, in.Folder, path)
 	}
-	if err := a.folderACLIdle(map[string]string{in.Folder: path}, in.AcceptUnreadable); err != nil {
+	if err := a.folderACLIdle(map[string]string{in.Folder: path}); err != nil {
 		return err
 	}
 	out := FolderACLFolder{Name: in.Folder, Path: path, Entries: len(pre.Entries), Preimage: in.Preimage}

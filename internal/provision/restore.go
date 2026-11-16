@@ -72,7 +72,7 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	}
 	defer unlock()
 
-	a := &applier{env: env, s: Spec{ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle}, dir: dir, res: res}
+	a := &applier{env: env, s: Spec{ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle}, dir: dir, res: res, acceptUnreadable: in.AcceptUnreadable}
 	// A pre-image of no file (the service or firewall-remove commands) changes
 	// nothing the service reads: no restart, so no queue to ask.
 	files := len(p.m.Files) > 0
@@ -105,11 +105,18 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 		if a.curBytes == nil {
 			a.warn("config.yaml did not read: the counters and documents guards were not run (--assume-idle)")
 		} else {
-			if err := a.documentsIdle(a.cur, restored, in.AcceptUnreadable); err != nil {
+			// Review m3: both guards note what they cannot read; the one total is
+			// settled after them.
+			a.unreadableDeferred = true
+			if err := a.documentsIdle(a.cur, restored); err != nil {
 				return res, err
 			}
-			if err := a.countersRestorable(a.cur, restored, in.AcceptUnreadable); err != nil {
+			if err := a.countersRestorable(a.cur, restored); err != nil {
 				return res, err
+			}
+			a.unreadableDeferred = false
+			if r := a.unreadableSettled(); r != nil {
+				return res, r
 			}
 		}
 	}

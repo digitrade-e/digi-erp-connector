@@ -193,7 +193,7 @@ func ApplyReceipts(ctx context.Context, env Env, in ReceiptsInput, check bool) (
 		return res, r
 	}
 	a := &applier{env: env, s: Spec{Version: in.Version, ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle, Expect: in.Expect},
-		dir: env.Sys.DataDir(), res: res, check: check}
+		dir: env.Sys.DataDir(), res: res, check: check, acceptUnreadable: in.AcceptUnreadable}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -224,7 +224,7 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 	}
 	// A reserved receipt is finished into the receipt folder in use: it does
 	// not move under one (review m5, as the documents command).
-	if err := a.documentsIdle(a.cur, t, in.AcceptUnreadable); err != nil {
+	if err := a.documentsIdle(a.cur, t); err != nil {
 		return err
 	}
 	if err := a.checkSetFolderPaths(); err != nil { // review T3, behind the link
@@ -399,6 +399,9 @@ func (a *applier) runConfigChange(ctx context.Context, set func(*config.Config),
 		if err := f(); err != nil {
 			return err
 		}
+	}
+	if r := a.unreadableSettled(); r != nil { // review m3: the command's one total
+		return r
 	}
 	out, err := config.Marshal(a.tgt)
 	if err != nil {

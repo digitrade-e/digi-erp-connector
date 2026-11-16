@@ -156,7 +156,7 @@ func ApplyDocuments(ctx context.Context, env Env, in DocumentsInput, check bool)
 		return res, r
 	}
 	a := &applier{env: env, s: Spec{Version: in.Version, ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle, Expect: in.Expect},
-		dir: env.Sys.DataDir(), res: res, check: check}
+		dir: env.Sys.DataDir(), res: res, check: check, acceptUnreadable: in.AcceptUnreadable}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -285,7 +285,7 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 		}
 	}
 	a.reportWritableFolders(a.tgt)
-	return a.documentsIdle(a.cur, a.tgt, in.AcceptUnreadable)
+	return a.documentsIdle(a.cur, a.tgt)
 }
 
 // documentsIdle refuses changing, from cur to tgt, what unfinished work
@@ -300,7 +300,7 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 // kupain*.doc importer takes both of). Restore runs it too (review m9). An
 // index entry it cannot read refuses unless accept is their number (review
 // R7: an unfinished one among them would be stranded unseen).
-func (a *applier) documentsIdle(cur, tgt config.Config, accept *int) error {
+func (a *applier) documentsIdle(cur, tgt config.Config) error {
 	var changed []string
 	for _, k := range cur.FolderKeys() {
 		if nf, ok := tgt.Documents.Folders[k]; !ok || !sameFolderConfig(cur.Documents.Folders[k], nf) {
@@ -312,13 +312,14 @@ func (a *applier) documentsIdle(cur, tgt config.Config, accept *int) error {
 		return nil
 	}
 	var orders hasavshevet.OrdersInFlight
-	var receipts, unreadable int
+	var receipts int
+	const why = "an unfinished one among them would be stranded unseen by the change"
 	if len(changed) > 0 {
 		var err error
 		if orders, err = hasavshevet.ScanOrdersInFlight(a.dir); err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the order index: %v", err)
 		}
-		unreadable += orders.Unreadable
+		a.noteUnreadable(config.DocumentKindOrders, orders.Unreadable, why)
 	}
 	if binding {
 		var n int
@@ -326,10 +327,14 @@ func (a *applier) documentsIdle(cur, tgt config.Config, accept *int) error {
 		if receipts, n, err = hasavshevet.ScanReceiptsInFlight(a.dir); err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the receipt index: %v", err)
 		}
-		unreadable += n
+		a.noteUnreadable(config.DocumentKindReceipts, n, why)
 	}
-	if r := a.unreadableAccepted(unreadable, "order or receipt", "an unfinished one among them would be stranded unseen by the change", accept); r != nil {
-		return r
+	// Review m3: settled here only when no other guard follows (the restore
+	// settles after the counters guards too).
+	if !a.unreadableDeferred {
+		if r := a.unreadableSettled(); r != nil {
+			return r
+		}
 	}
 	for _, k := range changed {
 		what := "removed"

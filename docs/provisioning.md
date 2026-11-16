@@ -375,7 +375,8 @@ Each op takes exactly its fields (another one is `spec_invalid`): `create` kind,
 `range` min, max; `start-from` from, expectLast; `retire` nothing — and every op `acceptUnreadable?`. Every op scans
 the kind's index; an entry it cannot read refuses (`index_unreadable`, review m8: its number would not be counted in
 the floor, the range checks or the in-flight count, so it could be issued again) unless `acceptUnreadable` is exactly
-the number of such entries a human checked (another number refuses too; then a warning). Keys `[a-z][a-z0-9_]{0,31}` and never a Windows
+the number of such entries a human checked (another number refuses too; then a warning) — [one total per
+command](#acceptunreadable-one-total-per-command). Keys `[a-z][a-z0-9_]{0,31}` and never a Windows
 device name (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`: a store `aux.json` names a device; folder keys
 too); `1 ≤ min ≤ max ≤ 999 999 999`.
 
@@ -469,7 +470,20 @@ the old name would be written again under the new one). The `receipts` command m
 clears `sendReceiptDir`. An index entry these guards cannot read refuses (`index_unreadable`, review R7: an unfinished
 one among them would be stranded unseen) unless `acceptUnreadable` is the number of such entries a human checked —
 `documents` and `receipts` take it in their input, `restore` as `--accept-unreadable=N` (the link takes it after
-`--assume-idle`). Config-command flow; `restore` puts
+`--assume-idle`).
+
+#### `acceptUnreadable`: one total per command
+
+Plan 087 review m3. Every guard a command runs notes the unreadable entries of the index it reads — each index, the
+order index and the receipt index, counted **once** (every scan reads it whole, so all see the same entries) — and the
+command checks the **total** once, after its guards and before its first write: unless it is 0, `acceptUnreadable` must
+be exactly that total (`index_unreadable` otherwise; the refusal's fix names the number, and its message the split,
+e.g. `2 order and 1 receipt`). A `restore` that runs both the documents guards and the counters guards — the
+implicit-store trap's scan included — takes the one sum (before, each guard wanted its own count, and no value got
+through). An accepted total is one warning (`index_unreadable: N index entries could not be read (…) and were
+accepted`).
+
+Config-command flow; `restore` puts
 `config.yaml` back, after the same in-flight guards (`folder_in_flight`, `receipts_in_flight`; review m9). Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
 `documents` (and refuses index entries holding a frozen rule), its recovery pushes the production counters into the
 test ranges, and its GUI save drops the block —
@@ -531,7 +545,7 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   into the folder.
 - **Unfinished work**: `folder_in_flight` (as the `documents` command) — orders frozen for a typed folder, rule-less
   orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
-  unless `acceptUnreadable` names their number.
+  unless `acceptUnreadable` is their total over both indexes (review m3).
 - **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
 - The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, parentWritable?,
   preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
@@ -584,7 +598,7 @@ actually changed.
 | `counter_range` | `counters`: the range would exclude the counter's last or an issued number, or `from` is outside it |
 | `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished; `counters range`: the new range would leave one of them out |
 | `counter_store` | `counters`: the counter's store cannot be read; `create`: `store: lastOrderNumber` on a box that writes no orders |
-| `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore` (review R7): the same, for the order and receipt index entries their in-flight guard reads (`acceptUnreadable`; `restore --accept-unreadable=N`) |
+| `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore`, `folder-acl` (review R7): the same, for the order and receipt index entries their guards read (`acceptUnreadable`; `restore --accept-unreadable=N`) — review m3: one total per command, each index counted once |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`, `folder-acl`: no folder of that key / the path is not a folder here / inside the data directory, not a path link mode takes, or one of the [places a document folder may not be](#where-a-document-folder-may-be) (review T3: typed folders behind the link, every `folder-acl` target, and behind the link the `sendOrderDir`, pickup and receipt folders `apply`, `orders` and `receipts` set or move) |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through), or — with `documents` and, behind the link, `apply`/`orders`/`receipts` — a junction, link or mount point on the configured path, or a folder whose handle resolves to another path (review T3) / more than 20 000 entries |

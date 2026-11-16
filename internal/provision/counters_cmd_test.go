@@ -719,3 +719,58 @@ func TestInFlightGuards_UnreadableEntriesRefuse(t *testing.T) {
 	_, err = Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-r7-d1", AcceptUnreadable: n(0)})
 	wantRefusal(t, err, CodeSpecInvalid)
 }
+
+// Review m3: acceptUnreadable is one total per command — each index counted
+// once, over every guard it runs. A restore that changes the documents block
+// (the order and the receipt index scanned) and a counter's range (the order
+// index again), with 2 unreadable order entries and 1 unreadable receipt
+// entry, takes exactly 3: before, the documents guard wanted 3 and the
+// counters guard 2, so no value got through.
+func TestAcceptUnreadable_OneTotalPerCommand(t *testing.T) {
+	sys, env, _ := countersBox(t)
+	herp, kupain := mkdir(t, "herp"), mkdir(t, "kupain")
+	if _, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.ChangeSet = "cs-m3-d1"
+		in.Folders = map[string]*FolderInput{
+			"herp":          {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"},
+			"herp_receipts": {Kind: "receipts", Path: kupain, NamePattern: "KUPAIN_{n}.doc"},
+		}
+		in.Receipts = &DocumentsReceiptsInput{Folder: strp("herp_receipts")}
+	}), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyCounters(context.Background(), env, countersIn("range", "b2b", func(in *CountersInput) {
+		in.ChangeSet, in.Min, in.Max = "cs-m3-c1", i64(1_000_000), i64(1_499_999)
+	}), false); err != nil {
+		t.Fatal(err)
+	}
+	for dir, names := range map[string][]string{
+		hasavshevet.OrderIndexDir(sys.dir):          {"damaged-1.json", "damaged-2.json"},
+		filepath.Join(sys.dir, "receipts", "index"): {"damaged-3.json"},
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte("{not an entry"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	n := func(v int) *int { return &v }
+	restore := func(accept *int) (*ApplyResult, error) {
+		return Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-m3-d1", AcceptUnreadable: accept})
+	}
+	_, err := restore(nil)
+	if r := wantRefusal(t, err, CodeIndexUnreadable); !strings.Contains(r.Fix, "acceptUnreadable: 3") || !strings.Contains(r.Message, "2 order and 1 receipt") {
+		t.Errorf("refusal %+v", r)
+	}
+	for _, wrong := range []int{1, 2, 4} {
+		_, err := restore(n(wrong))
+		wantRefusal(t, err, CodeIndexUnreadable)
+	}
+	res, err := restore(n(3))
+	if err != nil || !warned(res, "index_unreadable: 3 index entries") {
+		t.Fatalf("restore with the one total: %+v, %v", res, err)
+	}
+}

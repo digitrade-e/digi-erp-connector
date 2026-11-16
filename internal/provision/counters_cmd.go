@@ -178,7 +178,7 @@ func ApplyCounters(ctx context.Context, env Env, in CountersInput, check bool) (
 		return res, r
 	}
 	a := &applier{env: env, s: Spec{Version: in.Version, ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle, Expect: in.Expect},
-		dir: env.Sys.DataDir(), res: res, check: check}
+		dir: env.Sys.DataDir(), res: res, check: check, acceptUnreadable: in.AcceptUnreadable}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -208,29 +208,64 @@ func (a *applier) counterOf(cfg config.Config, key string) (*hasavshevet.Counter
 // in create's and start-from's floor, in range's checks, in retire's
 // in-flight count — so a new counter over that range could issue one of them
 // again), unless accept names exactly how many a human checked.
-func (a *applier) scanCounter(kind string, cfg config.Config, min, max int64, accept *int) (hasavshevet.IssuedScan, *Refusal) {
+func (a *applier) scanCounter(kind string, cfg config.Config, min, max int64) (hasavshevet.IssuedScan, *Refusal) {
 	scan, err := hasavshevet.ScanIssued(kind, a.dir, strings.TrimSpace(cfg.SendOrderDir), min, max)
 	if err != nil {
 		return scan, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", kind, err)
 	}
-	return scan, a.unreadableAccepted(scan.Unreadable, kind, "their numbers are not counted, so one of them could be issued again", accept)
+	a.noteUnreadable(kind, scan.Unreadable, "their numbers are not counted, so one of them could be issued again")
+	return scan, nil
 }
 
-// unreadableAccepted refuses when n index entries (of what) could not be read
-// — why says what that costs — unless accept is exactly n: a human checked
-// them (review m8, R7). An accepted count is a warning, once.
-func (a *applier) unreadableAccepted(n int, what, why string, accept *int) *Refusal {
+// Review m3: acceptUnreadable is ONE total per command. Every guard a
+// command runs notes the unreadable entries of the index it read
+// (noteUnreadable) — each index, the order index and the receipt index,
+// counted once (every scan reads it whole, so all see the same entries) —
+// and the total is checked once, after the guards and before the first
+// write (unreadableSettled): unless it is 0, it must be exactly
+// acceptUnreadable, the count a human checked (review m8, R7). A restore
+// that runs the documents and the counters guards over both indexes takes
+// the one sum.
+
+// noteUnreadable records n unreadable entries of index (orders, receipts)
+// and why they matter to the guard that met them.
+func (a *applier) noteUnreadable(index string, n int, why string) {
+	if n <= 0 {
+		return
+	}
+	if a.unreadable == nil {
+		a.unreadable = map[string]int{}
+	}
+	a.unreadable[index] = max(a.unreadable[index], n)
+	if !slices.Contains(a.unreadableWhy, why) {
+		a.unreadableWhy = append(a.unreadableWhy, why)
+	}
+}
+
+// unreadableSettled refuses when the command met unreadable index entries,
+// unless a.acceptUnreadable is exactly their total. An accepted total is a
+// warning, once.
+func (a *applier) unreadableSettled() *Refusal {
+	n, what := 0, []string{}
+	for _, index := range []string{config.DocumentKindOrders, config.DocumentKindReceipts} {
+		if c := a.unreadable[index]; c > 0 {
+			n += c
+			what = append(what, fmt.Sprintf("%d %s", c, strings.TrimSuffix(index, "s")))
+		}
+	}
 	if n == 0 {
 		return nil
 	}
-	fix := fmt.Sprintf("repair or move them (docs/troubleshooting.md § The order index; the logs name them), or — once a human checked them — send acceptUnreadable: %d", n)
+	detail := strings.Join(what, " and ")
+	fix := fmt.Sprintf("repair or move them (docs/troubleshooting.md § The order index; the logs name them), or — once a human checked them — send acceptUnreadable: %d (the total over every index this command reads)", n)
+	accept := a.acceptUnreadable
 	switch {
 	case accept == nil:
-		return refuse(CodeIndexUnreadable, fix, "%d %s index entries cannot be read: %s", n, what, why)
+		return refuse(CodeIndexUnreadable, fix, "%d index entries cannot be read (%s): %s", n, detail, strings.Join(a.unreadableWhy, "; "))
 	case *accept != n:
-		return refuse(CodeIndexUnreadable, fix, "acceptUnreadable is %d, and %d %s index entries cannot be read now: read the box again", *accept, n, what)
+		return refuse(CodeIndexUnreadable, fix, "acceptUnreadable is %d, and %d index entries cannot be read now (%s): read the box again", *accept, n, detail)
 	}
-	if w := fmt.Sprintf("index_unreadable: %d %s index entries could not be read and were accepted (acceptUnreadable)", n, what); !slices.Contains(a.res.Warnings, w) {
+	if w := fmt.Sprintf("index_unreadable: %d index entries could not be read (%s) and were accepted (acceptUnreadable)", n, detail); !slices.Contains(a.res.Warnings, w) {
 		a.res.Warnings = append(a.res.Warnings, w)
 	}
 	return nil
@@ -292,7 +327,7 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 			return r
 		}
 		tc := a.tgt.Documents.Counters[in.Key]
-		scan, r := a.scanCounter(tc.Kind, a.tgt, tc.Min, tc.Max, in.AcceptUnreadable)
+		scan, r := a.scanCounter(tc.Kind, a.tgt, tc.Min, tc.Max)
 		if r != nil {
 			return r
 		}
@@ -324,7 +359,7 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 			}
 		case CounterOpRange:
 			old, _ := a.counterOf(a.cur, in.Key)
-			oldScan, r := a.scanCounter(tc.Kind, a.cur, old.Min, old.Max, in.AcceptUnreadable)
+			oldScan, r := a.scanCounter(tc.Kind, a.cur, old.Min, old.Max)
 			if r != nil {
 				return r
 			}
@@ -375,9 +410,10 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 // other counter dropped is harmless: its numbers stay in the index and the
 // history, a re-queue needs no counter (m3), and a reserved receipt's counter
 // is the receipt binding's guard (documentsIdle).
-func (a *applier) countersRestorable(cur, tgt config.Config, accept *int) error {
-	// Review R7: each kind's index is read whole by every scan; an entry it
-	// cannot read refuses unless the count was accepted.
+func (a *applier) countersRestorable(cur, tgt config.Config) error {
+	// Review R7, m3: each kind's index is read whole by every scan; the
+	// entries it cannot read are noted, counted once per index, and settled
+	// with the restore's other guards (unreadableSettled).
 	curSet := hasavshevet.NewCounterSet(cur, a.dir)
 	for _, k := range cur.CounterKeys() {
 		cc := cur.Documents.Counters[k]
@@ -397,9 +433,7 @@ func (a *applier) countersRestorable(cur, tgt config.Config, accept *int) error 
 		if err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", cc.Kind, err)
 		}
-		if r := a.unreadableAccepted(scan.Unreadable, cc.Kind, "an unfinished one among them could be left out of the restored range", accept); r != nil {
-			return r
-		}
+		a.noteUnreadable(cc.Kind, scan.Unreadable, "an unfinished one among them could be left out of the restored range")
 		outside := scan.LowestInFlight
 		if outside >= tc.Min {
 			outside = scan.HighestInFlight
@@ -436,9 +470,9 @@ func (a *applier) countersRestorable(cur, tgt config.Config, accept *int) error 
 		if err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", kind, err)
 		}
-		if r := a.unreadableAccepted(scan.Unreadable, kind, "a number among them would not be counted, and today's store could issue it again", accept); r != nil {
-			return r
-		}
+		// The implicit-store trap (review m3): unreadable entries are noted like
+		// every other guard's, and settled before the restore writes.
+		a.noteUnreadable(kind, scan.Unreadable, "a number among them would not be counted, and today's store could issue it again")
 		if scan.Highest > max(last, 0) {
 			return refuse(CodeCounterRange, "retire the counters instead of restoring them away (counters retire), or restore a later change set",
 				"the restored config.yaml numbers %s from today's store again (no %s counter is left): its recovery runs over 1-%d and would move it from %d past %d, a number its counters issued",
@@ -517,8 +551,11 @@ func (a *applier) counterStartFrom(ctx context.Context, in CountersInput) error 
 	if r != nil {
 		return r
 	}
-	scan, r := a.scanCounter(c.Kind, a.cur, c.Min, c.Max, in.AcceptUnreadable)
+	scan, r := a.scanCounter(c.Kind, a.cur, c.Min, c.Max)
 	if r != nil {
+		return r
+	}
+	if r := a.unreadableSettled(); r != nil { // review m3: the one total
 		return r
 	}
 	from := *in.From
