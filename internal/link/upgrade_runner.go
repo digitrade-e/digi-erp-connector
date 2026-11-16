@@ -20,6 +20,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
+	"github.com/digitrade-e/digi-erp-connector/pkg/linkproto"
 )
 
 // The upgrade runner (plan 086 C8): `digi-erp-connector-upgrade.exe upgrade-run <ticket>`, a copy of the link's own
@@ -179,6 +180,17 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 	if got, err := fileSHA256(setup); err != nil || got != job.SHA256 {
 		res.Error = fmt.Sprintf("the setup is not the one checked (%s, %v): not run", got, err)
 		return res, r.write(res)
+	}
+	// Review m6: the link checked the order queue up to a quarter of an hour ago (the download, the grace): again now,
+	// right before the setup restarts the connector — unless the person said assumeIdle.
+	if !job.AssumeIdle {
+		if n := r.queuedAfter(job, setupIdleWait); n > 0 {
+			res.Error = fmt.Sprintf("orders_pending: %d order(s) queued right before the setup, still after %s: the setup was not run, "+
+				"and nothing changed (the upgrade goes again at the next check, or with a new command)", n, setupIdleWait)
+			res.Outcome = linkproto.OutcomeDeferred
+			_ = os.Remove(setup)
+			return res, r.write(res)
+		}
 	}
 	// G-143: the connector's windows in other sessions, which the setup cannot close itself
 	if res.ClosedApps = r.closeConnectorWindows(job.InstallDir); res.ClosedApps != nil && res.ClosedApps.StillOpen > 0 {

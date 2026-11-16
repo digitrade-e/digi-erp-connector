@@ -40,6 +40,7 @@ const (
 	healthPoll       = 15 * time.Second
 	sessionFresh     = 3 * time.Minute // the link confirms its connection every LiveEvery (60 s)
 	rollbackIdleWait = 5 * time.Minute // a rollback waits this long for the order queue to empty before its setup
+	setupIdleWait    = 5 * time.Minute // the upgrade's setup waits this long for it, then is deferred (review m6)
 )
 
 // stateProbe is the part of provision's state (`state --spec -`) the health check reads. These fields are a contract
@@ -389,19 +390,28 @@ func (r UpgradeRunner) rollback(job UpgradeJob, tdir string, res *UpgradeResult)
 // waitIdle waits up to rollbackIdleWait for the daemon's order queue to empty (the setup restarts it). A daemon that
 // does not answer holds nothing. The note says why it went ahead anyway.
 func (r UpgradeRunner) waitIdle(job UpgradeJob) string {
-	if !job.DaemonWasRunning {
-		return ""
+	if n := r.queuedAfter(job, rollbackIdleWait); n > 0 {
+		return fmt.Sprintf("%d order(s) still queued after %s; the rollback goes ahead (the connector's stop drains its queue, up to 120 s)",
+			n, rollbackIdleWait)
 	}
-	deadline := r.Now().Add(rollbackIdleWait)
+	return ""
+}
+
+// queuedAfter waits up to wait for the daemon's order queue to empty and returns what is still queued then: 0 when it
+// is idle, when the daemon was stopped before the upgrade, or when it does not answer (it holds nothing then).
+func (r UpgradeRunner) queuedAfter(job UpgradeJob, wait time.Duration) int {
+	if !job.DaemonWasRunning {
+		return 0
+	}
+	deadline := r.Now().Add(wait)
 	for {
 		p, err := r.probe(job.InstallDir)
 		q := p.Result.Daemon.Queue
 		if err != nil || !p.OK || q == nil || q.Queued+q.Running == 0 {
-			return ""
+			return 0
 		}
 		if !r.Now().Before(deadline) {
-			return fmt.Sprintf("%d order(s) still queued after %s; the rollback goes ahead (the connector's stop drains its queue, up to 120 s)",
-				q.Queued+q.Running, rollbackIdleWait)
+			return q.Queued + q.Running
 		}
 		r.Sleep(healthPoll)
 	}

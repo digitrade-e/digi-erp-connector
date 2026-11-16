@@ -261,7 +261,9 @@ func decideAuto(in autoInputs) autoView {
 		if a.Scope.Key() != eff.Scope.Key() || a.Seq != eff.Seq || a.To != target.String() {
 			continue
 		}
-		last = a
+		if a.Outcome != linkproto.OutcomeDeferred { // a setup deferred for orders is "not now": the window stays open
+			last = a
+		}
 		switch a.Outcome {
 		case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack, linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor,
 			linkproto.OutcomeLinkInconclusive:

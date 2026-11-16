@@ -480,3 +480,22 @@ func TestAnUnhealthyTargetWithoutARollbackStops(t *testing.T) {
 		})
 	}
 }
+
+// Review m6: a ticket whose setup was deferred for queued orders is "not now" — no failure, and the window stays open
+// for the next check.
+func TestADeferredTicketIsNotNow(t *testing.T) {
+	a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
+	a.deliver(t, "", "", a.policy(1))
+	for i := 1; i <= 4; i++ {
+		a.b.link.autoCheck()
+		if a.spawns() != i {
+			t.Fatalf("check %d: spawned %d", i, a.spawns())
+		}
+		a.finish(t, UpgradeResult{Ticket: a.lastTicket(), From: "1.0.29", To: "1.0.30", Outcome: linkproto.OutcomeDeferred,
+			Error: "orders_pending: 2 order(s) queued right before the setup"})
+		a.clk.add(10 * time.Minute) // the same window
+	}
+	if af := a.auto(t); af.View.Effective.Why == linkproto.WhyStopped {
+		t.Fatalf("deferred tickets stopped the target: %+v", af.View.Effective)
+	}
+}

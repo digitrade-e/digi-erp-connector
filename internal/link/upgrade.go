@@ -133,6 +133,8 @@ type UpgradeJob struct {
 	Auto          bool                   `json:"auto,omitempty"`
 	Policy        *PolicyRef             `json:"policy,omitempty"`
 	Rollback      *linkproto.RollbackPin `json:"rollback,omitempty"`
+	// AssumeIdle: the command said to go ahead without the order queue (the runner does not check it again).
+	AssumeIdle bool `json:"assumeIdle,omitempty"`
 }
 
 // UpgradeResult is DataDir\results\upgrade-<ticket>.json.
@@ -379,7 +381,8 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 	}
 	job := UpgradeJob{Ticket: ticket, From: from.String(), To: to.String(), SHA256: sha, Setup: setup,
 		InstallDir: l.cfg.InstallDir, DaemonWasRunning: daemonRunning, By: req.By, AcceptedAt: l.cfg.Now().UTC(),
-		FromSHA256: l.knownSetupSHA(from.String()), HealthMinutes: health, Auto: req.Policy != nil, Policy: req.Policy}
+		FromSHA256: l.knownSetupSHA(from.String()), HealthMinutes: health, Auto: req.Policy != nil, Policy: req.Policy,
+		AssumeIdle: req.AssumeIdle}
 	if req.Rollback != nil {
 		job.Rollback = &linkproto.RollbackPin{Version: from.String(), SHA256: req.Rollback.SHA256}
 	}

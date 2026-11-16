@@ -271,8 +271,13 @@ func TestUpgradeAssumeIdleAndAStoppedDaemon(t *testing.T) {
 	if exit != 0 || !ans.Accepted {
 		t.Fatalf("assumeIdle: %+v", ans)
 	}
-	if _, err := os.Stat(filepath.Join(g.dir, "upgrade", ticket, jobFile)); err != nil {
-		t.Fatal(err)
+	var assumed UpgradeJob
+	jb, err := os.ReadFile(filepath.Join(g.dir, "upgrade", ticket, jobFile))
+	if err == nil {
+		err = json.Unmarshal(jb, &assumed)
+	}
+	if err != nil || !assumed.AssumeIdle { // review m6: the runner does not ask the queue again either
+		t.Fatalf("job %+v (%v)", assumed, err)
 	}
 	g2 := newUpgradeRig(t, "v1.0.29")
 	g2.runner.state, g2.runner.queue = "stopped", ""

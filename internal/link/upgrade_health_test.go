@@ -318,13 +318,15 @@ func TestAStoppedDaemonIsNotAsked(t *testing.T) {
 // A setup still running when the runner stops waiting is never followed by a health check, let alone a second setup.
 func TestNoHealthCheckWhileTheSetupRuns(t *testing.T) {
 	g := newHealthRig(t, true, nil)
+	before := -1
 	g.r.RunSetup = func(string, string, time.Duration) (int, error) {
 		g.ran++
+		before = g.probes // the order queue was asked before the setup (review m6)
 		return -1, errors.New("still running after 45m0s; left running")
 	}
 	r := g.run(t)
-	if r.Health != nil || r.Rollback != nil || g.ran != 1 || g.probes != 0 {
-		t.Fatalf("result %+v", r)
+	if r.Health != nil || r.Rollback != nil || g.ran != 1 || g.probes != before {
+		t.Fatalf("result %+v, %d probes after the setup", r, g.probes-before)
 	}
 }
 
@@ -389,15 +391,70 @@ func TestTheRollbackWaitsForTheQueue(t *testing.T) {
 	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.31" }
 	g.probe = func(installed string) (stateProbe, error) {
 		p, _ := healthyProbe(installed)
-		p.Result.Daemon.Queue = &struct {
-			Queued  int `json:"queued"`
-			Running int `json:"running"`
-		}{Queued: 2}
+		if installed == "1.0.32" { // the new build's connector takes orders while its link fails
+			p.Result.Daemon.Queue = &struct {
+				Queued  int `json:"queued"`
+				Running int `json:"running"`
+			}{Queued: 2}
+		}
 		return p, nil
 	}
 	r := g.run(t)
 	if r.Rollback == nil || !r.Rollback.OK || !g.log.has("2 order(s) still queued after 5m0s") {
 		t.Fatalf("rollback %+v", r.Rollback)
+	}
+}
+
+// Review m6: the link checked the order queue up to a quarter of an hour before the setup; the runner asks again right
+// before it, waits up to five minutes, and defers the setup — nothing run, nothing changed — when orders are still
+// queued. assumeIdle (the person's word) and a connector stopped before the upgrade are not asked.
+func TestTheSetupWaitsForAnIdleQueue(t *testing.T) {
+	queued := func(n *int) func(string) (stateProbe, error) {
+		return func(installed string) (stateProbe, error) {
+			p, _ := healthyProbe(installed)
+			if *n > 0 {
+				*n--
+				p.Result.Daemon.Queue = &struct {
+					Queued  int `json:"queued"`
+					Running int `json:"running"`
+				}{Queued: 1, Running: 1}
+			}
+			return p, nil
+		}
+	}
+	// busy for three looks, then idle: the setup runs once it is
+	busy := 3
+	g := newHealthRig(t, true, nil)
+	g.probe = queued(&busy)
+	if r := g.run(t); r.Outcome != linkproto.OutcomeOK || g.ran != 1 || busy != 0 {
+		t.Fatalf("outcome %q, ran %d, %d busy looks left", r.Outcome, g.ran, busy)
+	}
+	// busy all along: deferred
+	busy = 1 << 30
+	g = newHealthRig(t, true, nil)
+	g.probe = queued(&busy)
+	r := g.run(t)
+	if g.ran != 0 || r.Outcome != linkproto.OutcomeDeferred || r.Health != nil || !strings.Contains(r.Error, "orders_pending: 2 order(s) queued right before the setup") {
+		t.Fatalf("ran %d, outcome %q, error %q", g.ran, r.Outcome, r.Error)
+	}
+	waited := time.Duration(0)
+	for _, d := range g.slept {
+		if d == healthPoll {
+			waited += d
+		}
+	}
+	if waited < setupIdleWait {
+		t.Fatalf("waited %s", waited)
+	}
+	if _, err := os.Stat(filepath.Join(g.tdir, setupFile("1.0.32"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the deferred setup was kept")
+	}
+	// assumeIdle: not asked again
+	busy = 1 << 30
+	g = newHealthRig(t, true, func(j *UpgradeJob) { j.AssumeIdle = true })
+	g.probe = queued(&busy)
+	if r := g.run(t); g.ran != 1 || r.Outcome == linkproto.OutcomeDeferred {
+		t.Fatalf("assumeIdle: ran %d, outcome %q", g.ran, r.Outcome)
 	}
 }
 
