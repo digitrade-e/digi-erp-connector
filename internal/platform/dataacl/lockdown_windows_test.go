@@ -278,15 +278,19 @@ func TestLockdown_LongPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if last := plan.Entries[len(plan.Entries)-1]; !strings.HasSuffix(last.Rel, "KUPAIN_500001.doc") || len(herp)+1+len(last.Rel) <= 260 {
+	last := plan.Entries[len(plan.Entries)-1]
+	if !strings.HasSuffix(last.Rel, "KUPAIN_500001.doc") || len(herp)+1+len(last.Rel) <= 260 {
 		t.Fatalf("the deepest entry %q (%d chars)", last.Rel, len(herp)+1+len(last.Rel))
+	}
+	if !strings.Contains(last.SDDL, "0x1301bf;;;BU)") {
+		t.Fatalf("the plan read the deep file as %s (before: %s)", last.SDDL, before)
 	}
 	if _, err := ApplyLockdown(herp, nil, plan); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := daclOf(t, longPath(file))
-	if !strings.Contains(after, "(A;;0x1200a9;;;BU)") || strings.Contains(after, "0x1301bf;;;BU") {
-		t.Errorf("the deep file after the lock-down: %s", after)
+	after := ownerAndDACL(t, longPath(file))
+	if !strings.Contains(after, "0x1200a9;;;BU)") || strings.Contains(after, "0x1301bf;;;BU") {
+		t.Errorf("the deep file after the lock-down: %s (before: %s)", after, before)
 	}
 	if _, skipped, err := RestoreFolder(herp, plan.Entries); err != nil || skipped != 0 {
 		t.Fatalf("RestoreFolder: %d skipped, %v", skipped, err)
