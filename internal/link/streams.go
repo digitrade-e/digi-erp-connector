@@ -50,16 +50,7 @@ func (l *Link) handleStream(st *yamux.Stream) {
 // pipe connects a data stream to the daemon's local API, byte for byte. The address is read per stream (plan 086
 // C5: daemonTargets), so an apply that moves the port or turns TLS on does not strand the data path.
 func (l *Link) pipe(st net.Conn) {
-	var api net.Conn
-	var err error
-	for _, t := range l.daemonTargets() {
-		if api, err = dialDaemon(t); err == nil {
-			break
-		}
-		if errors.Is(err, errDaemonCert) {
-			l.cfg.Log.Error("link: the connector's TLS certificate", err)
-		}
-	}
+	api := l.dialTargets()
 	if api == nil {
 		return // the relay answers 504 forwarded-no-answer, or 503 if nothing was written
 	}
@@ -76,6 +67,49 @@ func (l *Link) pipe(st net.Conn) {
 	_, _ = io.Copy(st, api)
 	_ = st.Close()
 	wg.Wait()
+}
+
+// dialTargets connects to the first target that answers (review B1): an unusable certificate ends the search — no other
+// address, never plaintext — and a target whose far end is not the connector's process is skipped. The current
+// target answering retires the previous one (DaemonWatch.Answered). nil when none answered.
+func (l *Link) dialTargets() net.Conn {
+	var owner func(net.Conn) error
+	if l.cfg.Daemon != nil {
+		owner = l.cfg.Daemon.Owner
+	}
+	for i, t := range l.daemonTargets() {
+		api, err := dialDaemon(t, owner)
+		switch {
+		case err == nil:
+			if i == 0 && l.cfg.Daemon != nil {
+				l.cfg.Daemon.Answered(t)
+			}
+			return api
+		case errors.Is(err, errDaemonCert):
+			l.logEvery("cert", func() { l.cfg.Log.Error("link: the connector's TLS certificate; no data stream is served", err) })
+			return nil
+		case errors.Is(err, errDaemonOwner):
+			l.logEvery("owner", func() { l.cfg.Log.Warn(fmt.Sprintf("link: %s refused for data streams: %v", t.Addr, err)) })
+		}
+	}
+	return nil
+}
+
+// logEvery runs log at most once a minute per kind: a refusal repeated on every data stream (a squatter answering
+// for minutes) must not flood link.log and the Event Log.
+func (l *Link) logEvery(kind string, log func()) {
+	l.logMu.Lock()
+	now := l.cfg.Now()
+	if last, ok := l.loggedAt[kind]; ok && now.Sub(last) < time.Minute {
+		l.logMu.Unlock()
+		return
+	}
+	if l.loggedAt == nil {
+		l.loggedAt = map[string]time.Time{}
+	}
+	l.loggedAt[kind] = now
+	l.logMu.Unlock()
+	log()
 }
 
 // frameWait bounds the wait for each frame of a command: a relay that announces a frame and stalls holds the stream no

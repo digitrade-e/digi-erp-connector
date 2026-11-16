@@ -187,7 +187,11 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 | `upgrade` / `upgrade-result` | link/upgrade.go, upgrade_runner.go, upgrade_windows.go | D2: official release only (compiled-in `releasePrefix`, tests alone change it), newer than the link's build, setup SHA-256 = envelope pin = release SHA256SUMS line; every check before `accepted`; the runner is a detached copy of the link in DataDir\upgrade\<ticket>\ (never in the install folder the setup replaces); a failed setup's stopped services are started again; results through plain folders only |
 
 The data path reads the daemon's address/TLS per stream (`DaemonWatch`, link/daemon.go) — never cache it at service
-start again: an apply that moved the port stranded the data path until someone restarted the link. The link starts
+start again: an apply that moved the port stranded the data path until someone restarted the link. The previous
+address is a 3-minute bridge only (`prevTTL`, dropped once the new one answers), never plaintext behind TLS, and an
+unusable certificate serves nothing (review B1). On Windows `DaemonOwnerCheck` pipes only to a socket the
+`digi-erp-connectord` service's process owns (`internal/platform/tcptable`, shared with provision's discover) — never
+drop it: a port squatter otherwise receives erp-manager's `/auth/token` login. The link starts
 without config.yaml (a fresh install). release-windows.yml lists the setup in SHA256SUMS; the box refuses an upgrade
 without that line.
 

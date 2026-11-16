@@ -81,7 +81,8 @@ func (m Machine) Config() (Config, error) {
 	}
 	// The daemon's address is read per data stream (plan 086 C5), not here: a config.yaml written later — by an apply
 	// over this very link on a fresh install, or one that moves the port — reaches the data path without a restart.
-	watch := &DaemonWatch{Load: m.LoadDaemon, ConfigPath: filepath.Join(m.DataDir, "config.yaml"), Log: m.Log}
+	// On Windows a stream goes only to a socket the connector's service owns (review B1).
+	watch := &DaemonWatch{Load: m.LoadDaemon, ConfigPath: filepath.Join(m.DataDir, "config.yaml"), Log: m.Log, Owner: DaemonOwnerCheck()}
 	if _, err := m.LoadDaemon(); err != nil && m.Log != nil {
 		m.Log.Warn("link: the connector's config.yaml cannot be read yet (" + err.Error() + "); commands work, data streams wait for it")
 	}

@@ -75,6 +75,9 @@ type Link struct {
 	moveMu  sync.Mutex
 	movedAt time.Time
 
+	logMu    sync.Mutex
+	loggedAt map[string]time.Time // logEvery
+
 	status liveStatus // for link-status (plan 086 C5)
 }
 

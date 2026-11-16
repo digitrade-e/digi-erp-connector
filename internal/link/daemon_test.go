@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,8 +129,162 @@ func TestADataStreamFollowsTLS(t *testing.T) {
 	if got := get(t, rc); got != "tls" {
 		t.Fatalf("after TLS was turned on: %q", got)
 	}
-	if s := watch.Status(); !s.TLS || !s.CertReadable || s.Address != secure.Listener.Addr().String() || s.Previous != plain.Listener.Addr().String() {
+	// the plaintext address is never tried again: TLS never falls back to plaintext (review B1)
+	if s := watch.Status(); !s.TLS || !s.CertReadable || s.Address != secure.Listener.Addr().String() || s.Previous != "" {
 		t.Fatalf("status %+v", s)
+	}
+}
+
+func tlsCertFile(t *testing.T, s *httptest.Server) string {
+	certFile := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile
+}
+
+// Review B1, the reviewer's scenario: TLS turned on, then the daemon is down (any restart) while a local user squats
+// the old plaintext port. The stream must not go there in clear — before the fix the link fell back to it.
+func TestTLSNeverFallsBackToAPlaintextSquatter(t *testing.T) {
+	squatter := namedAPI(t, "plain-squatter") // the old plaintext address, now held by someone else
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, "tls") }))
+	certFile := tlsCertFile(t, secure)
+	secureAddr := secure.Listener.Addr().String()
+	fc := newFakeConfig(t, squatter.Listener.Addr().String())
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	_, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "plain-squatter" { // the daemon before TLS was turned on
+		t.Fatalf("first stream: %q", got)
+	}
+	fc.set(t, func(c *config.Config) {
+		c.APIListen, c.TLS = secureAddr, config.TLSConfig{CertFile: certFile, KeyFile: certFile + ".key"}
+	})
+	secure.Close() // the daemon restarts: nothing answers on the TLS address
+	if got := get(t, rc); got != "" {
+		t.Fatalf("the stream went in clear to %q", got)
+	}
+}
+
+// An unusable certificate serves nothing (daemon.go's errDaemonCert): never another address, never plaintext.
+func TestAnUnusableCertificateServesNoStream(t *testing.T) {
+	old := namedAPI(t, "old-plaintext")
+	fc := newFakeConfig(t, old.Listener.Addr().String())
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "old-plaintext" {
+		t.Fatalf("first stream: %q", got)
+	}
+	missing := filepath.Join(t.TempDir(), "no-cert.pem")
+	// TLS on a TLS daemon of the same kind (the old address stays plaintext), and the certificate file is unreadable
+	secure := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(secure.Close)
+	fc.set(t, func(c *config.Config) {
+		c.APIListen, c.TLS = secure.Listener.Addr().String(), config.TLSConfig{CertFile: missing, KeyFile: missing + ".key"}
+	})
+	if got := get(t, rc); got != "" {
+		t.Fatalf("an unusable certificate still served %q", got)
+	}
+	if !b.log.has("TLS certificate") {
+		t.Fatal("not logged")
+	}
+	// the same with a TLS previous address: still nothing (no fallback at all on a bad pin)
+	fc2 := newFakeConfig(t, secure.Listener.Addr().String())
+	good := tlsCertFile(t, secure)
+	fc2.set(t, func(c *config.Config) { c.TLS = config.TLSConfig{CertFile: good, KeyFile: good + ".key"} })
+	w2 := &DaemonWatch{Load: fc2.load, ConfigPath: fc2.path, Log: &testLog{}}
+	if ts := w2.Targets(); len(ts) != 1 {
+		t.Fatal(ts)
+	}
+	other := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(other.Close)
+	fc2.set(t, func(c *config.Config) { c.APIListen, c.TLS.CertFile = other.Listener.Addr().String(), missing })
+	l := New(Config{Daemon: w2, Log: &testLog{}})
+	if conn := l.dialTargets(); conn != nil {
+		_ = conn.Close()
+		t.Fatal("the previous address was tried after the certificate failed")
+	}
+}
+
+// The previous address is a bridge for a config.yaml saved before the restart, no more: dropped once the new address
+// has answered (review B1), and after prevTTL whatever happens.
+func TestThePreviousAddressIsDroppedOnceTheNewOneAnswers(t *testing.T) {
+	one, two := namedAPI(t, "one"), namedAPI(t, "two")
+	fc := newFakeConfig(t, one.Listener.Addr().String())
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	_, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "one" {
+		t.Fatalf("first stream: %q", got)
+	}
+	fc.set(t, func(c *config.Config) { c.APIListen = two.Listener.Addr().String() })
+	if got := get(t, rc); got != "two" {
+		t.Fatalf("after the move: %q", got)
+	}
+	two.Close() // the daemon restarts; a squatter (here: the old listener) holds the old port
+	if got := get(t, rc); got != "" {
+		t.Fatalf("the old address was tried after the new one had answered: %q", got)
+	}
+	if s := watch.Status(); s.Previous != "" {
+		t.Fatalf("status %+v", s)
+	}
+}
+
+func TestThePreviousAddressExpires(t *testing.T) {
+	one := namedAPI(t, "one")
+	now := time.Now()
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	fc := newFakeConfig(t, one.Listener.Addr().String())
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}, Now: clock}
+	if ts := watch.Targets(); len(ts) != 1 {
+		t.Fatal(ts)
+	}
+	idle := httptest.NewServer(http.NotFoundHandler())
+	idleAddr := idle.Listener.Addr().String()
+	idle.Close()
+	fc.set(t, func(c *config.Config) { c.APIListen = idleAddr })
+	if ts := watch.Targets(); len(ts) != 2 || ts[1].Addr != one.Listener.Addr().String() {
+		t.Fatalf("right after the change: %+v", ts)
+	}
+	mu.Lock()
+	now = now.Add(prevTTL)
+	mu.Unlock()
+	if ts := watch.Targets(); len(ts) != 1 || ts[0].Addr != idleAddr {
+		t.Fatalf("after %s: %+v", prevTTL, ts)
+	}
+}
+
+// On Windows the data path pipes only to a socket the connector's service owns (DaemonOwnerCheck): a stream whose
+// far end is another process is closed unanswered, whichever address it is.
+func TestAStreamGoesOnlyToTheDaemonsOwnProcess(t *testing.T) {
+	squatter := namedAPI(t, "squatter")
+	fc := newFakeConfig(t, squatter.Listener.Addr().String())
+	var asked []string
+	var mu sync.Mutex
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}, Owner: func(c net.Conn) error {
+		mu.Lock()
+		asked = append(asked, c.RemoteAddr().String())
+		mu.Unlock()
+		return fmt.Errorf("%w: held by process 4242", errDaemonOwner)
+	}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "" {
+		t.Fatalf("piped to %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] != squatter.Listener.Addr().String() {
+		t.Fatalf("asked %v", asked)
+	}
+	if !b.log.has("process 4242") {
+		t.Fatal("not logged")
 	}
 }
 

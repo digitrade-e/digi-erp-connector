@@ -113,7 +113,12 @@ by handle only: a link, a hard link or a file outside the data directory in a lo
 **The data path follows the daemon.** The link reads the daemon's address, TLS and certificate from `config.yaml`
 again whenever it (or the certificate) changes, so an `apply` that moves the port or turns TLS on reaches the data
 path at the next call — no restart of the link. Until the daemon restarts on a new port, the previous address is
-tried second. The link also starts on a server with no `config.yaml` yet: commands work, data waits for one.
+tried second — for at most 3 minutes after the change, only until the new address has answered once, and never a
+plaintext address behind a TLS one. A certificate that cannot be read serves no data stream at all, to no address. On
+Windows a stream is piped only to a socket owned by the connector's own service (`digi-erp-connectord`'s process, from
+the TCP table): a local user who takes the port while the daemon restarts, or a port left behind, gets nothing — not
+erp-manager's `/auth/token` login. The link also starts on a server with no `config.yaml` yet: commands work, data
+waits for one.
 
 ### Upgrade over the link
 
