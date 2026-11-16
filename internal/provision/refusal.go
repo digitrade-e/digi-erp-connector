@@ -74,7 +74,7 @@ const (
 	CodeCounterMoved     = "counter_moved"      // counters start-from: last is not expectLast (someone issued a number)
 	CodeCounterLower     = "counter_lower"      // counters: a number at or below one issued (a counter never moves back)
 	CodeCounterRange     = "counter_range"      // counters: the range would exclude the last or an issued number
-	CodeCounterInFlight  = "counter_in_flight"  // counters retire: orders or receipts of its range not finished
+	CodeCounterInFlight  = "counter_in_flight"  // counters retire / range: orders or receipts of its range not finished (range: left out)
 	CodeCounterStore     = "counter_store"      // counters: its store cannot be read (or is missing)
 	CodeFolderUnknown    = "folder_unknown"     // documents: no folder of that key to remove
 	CodeFolderMissing    = "folder_missing"     // documents: the path is not a folder on this machine

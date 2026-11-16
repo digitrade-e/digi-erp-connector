@@ -460,8 +460,12 @@ type IssuedScan struct {
 	// history folder.
 	Highest int64
 	// InFlight counts the range's index entries that are not finished: orders
-	// reserved or retryable (a resend writes them), receipts reserved.
-	InFlight int
+	// reserved (unknown after a restart) or retryable (a resend writes them),
+	// receipts reserved. LowestInFlight and HighestInFlight are their lowest
+	// and highest numbers (0 when there is none): a new range must keep them
+	// (review m4).
+	InFlight                        int
+	LowestInFlight, HighestInFlight int64
 	// Unreadable counts index entries the scan could not read.
 	Unreadable int
 }
@@ -491,6 +495,12 @@ func ScanIssued(kind, dataDir, sendOrderDir string, min, max int64) (IssuedScan,
 		}
 		if inFlight[e.State] {
 			out.InFlight++
+			if out.LowestInFlight == 0 || e.Number < out.LowestInFlight {
+				out.LowestInFlight = e.Number
+			}
+			if e.Number > out.HighestInFlight {
+				out.HighestInFlight = e.Number
+			}
 		}
 	}, func() { out.Unreadable++ })
 	if err != nil {

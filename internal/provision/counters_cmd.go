@@ -294,10 +294,22 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 			if r != nil {
 				return r
 			}
+			// review m4: every unfinished entry of the old range stays inside —
+			// a receipt reserved at the store's last number (a crash after the
+			// store moved, a failed complete) passes the last-number check, and
+			// outside the range the writer answers it 503 and Recover skips it.
+			outside := oldScan.LowestInFlight
+			if outside >= tc.Min {
+				outside = oldScan.HighestInFlight
+			}
 			switch {
 			case last >= 0 && (last < tc.Min-1 || last > tc.Max):
 				return refuse(CodeCounterRange, fmt.Sprintf("keep min ≤ %d and max ≥ %d (move the counter with start-from first)", last+1, last),
 					"the range %d-%d would exclude the counter's last number %d", tc.Min, tc.Max, last)
+			case oldScan.InFlight > 0 && (oldScan.LowestInFlight < tc.Min || oldScan.HighestInFlight > tc.Max):
+				return refuse(CodeCounterInFlight, fmt.Sprintf("keep %d inside the range, or let it finish first (a repeat of its key, the next start; docs/troubleshooting.md)", outside),
+					"the range %d-%d would leave out %s %d of counter %s, which is not finished (reserved, or waiting for a resend)",
+					tc.Min, tc.Max, strings.TrimSuffix(tc.Kind, "s"), outside, in.Key)
 			case oldScan.Highest > tc.Max:
 				return refuse(CodeCounterRange, fmt.Sprintf("keep max ≥ %d", oldScan.Highest),
 					"number %d is already issued and the new max %d is below it", oldScan.Highest, tc.Max)

@@ -381,8 +381,10 @@ too); `1 ≤ min ≤ max ≤ 999 999 999`.
   the range (order or receipt index, and history, scanned). `from` at or below one of those is `counter_lower`, past
   `max` `counter_range`; a store already above `max` is `counter_range`.
 - **`range`** sets min/max: the counter's last stays inside (`last ≥ min-1`, `last ≤ max`; otherwise
-  `counter_range` — move it with `start-from` first), and no number already issued in the old range is above the new
-  max.
+  `counter_range` — move it with `start-from` first), no number already issued in the old range is above the new
+  max, and no unfinished entry of the old range — an order reserved (unknown) or waiting for a resend, a receipt
+  reserved — is left outside it (`counter_in_flight`, review m4: a receipt reserved at the store's last number would
+  otherwise be answered 503 and never finished).
 - **`start-from`** moves the store **forward only**: `from` is the number the next document gets, inside the range,
   above the last and above every number issued in the range (`counter_lower`, `counter_range`); `expectLast` is the
   last number as the plan read it (`-1` = the store is missing; a missing store is then created): another value on
@@ -479,7 +481,7 @@ actually changed.
 | `counter_moved` | `counters start-from`: the last number is not `expectLast` (a number was issued in between) |
 | `counter_lower` | `counters`: a number at or below one already issued, or below the range — a counter never moves back |
 | `counter_range` | `counters`: the range would exclude the counter's last or an issued number, or `from` is outside it |
-| `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished |
+| `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished; `counters range`: the new range would leave one of them out |
 | `counter_store` | `counters`: the counter's store cannot be read |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |

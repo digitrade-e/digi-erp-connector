@@ -462,3 +462,59 @@ func TestCountersAndDocuments_RefuseDeviceNameKeys(t *testing.T) {
 	}), false)
 	wantRefusal(t, err, CodeSpecInvalid)
 }
+
+// Review m4: range never leaves out an unfinished entry. A receipt reserved
+// at the store's last number (the store moved past it, then complete failed)
+// passed the last-number check with min = last+1, and outside the range the
+// writer answers that key 503 and Recover skips it.
+func TestCounters_RangeKeepsWhatIsInFlight(t *testing.T) {
+	sys, env, orders := countersBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.SendReceiptDir = mkdir(t, "kupain")
+	writeConfig(t, sys.dir, cfg)
+	if err := hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(sys.dir)).Seed(500_051); err != nil {
+		t.Fatal(err)
+	}
+	rix := filepath.Join(sys.dir, "receipts", "index")
+	if err := os.MkdirAll(rix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rix, "r.json"), []byte(`{"key":"r","number":500050,"state":"reserved"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyCounters(context.Background(), env, countersIn("range", "receipts", func(in *CountersInput) {
+		in.Min, in.Max = i64(500_051), i64(599_999)
+	}), false)
+	if r := wantRefusal(t, err, CodeCounterInFlight); !strings.Contains(r.Message, "receipt 500050") {
+		t.Errorf("refusal %+v", r)
+	}
+	// Above the range too; and an order reserved (unknown) the same way.
+	_, err = ApplyCounters(context.Background(), env, countersIn("range", "receipts", func(in *CountersInput) {
+		in.Min, in.Max = i64(400_000), i64(500_049)
+	}), false)
+	if err == nil {
+		t.Fatal("a range below the reserved receipt (and the store's last) was accepted")
+	}
+	writeOrderCounter(t, orders, 1_000_400)
+	ix := hasavshevet.OrderIndexDir(sys.dir)
+	if err := os.MkdirAll(ix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ix, "o.json"), []byte(`{"key":"o","number":1000400,"state":"reserved","reservedAt":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ApplyCounters(context.Background(), env, countersIn("range", "b2b", func(in *CountersInput) {
+		in.Min, in.Max = i64(1_000_401), i64(1_999_999)
+	}), false)
+	if r := wantRefusal(t, err, CodeCounterInFlight); !strings.Contains(r.Message, "order 1000400") {
+		t.Errorf("refusal %+v", r)
+	}
+	// Finished, the same range is accepted.
+	_ = os.Remove(filepath.Join(rix, "r.json"))
+	if _, err := ApplyCounters(context.Background(), env, countersIn("range", "receipts", func(in *CountersInput) {
+		in.ChangeSet = "cs-counters-range-02"
+		in.Min, in.Max = i64(500_051), i64(599_999)
+	}), false); err != nil {
+		t.Fatalf("nothing in flight: %v", err)
+	}
+}
