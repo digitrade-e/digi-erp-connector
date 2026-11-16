@@ -227,6 +227,9 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 	if err := a.documentsIdle(a.cur, t, in.AcceptUnreadable); err != nil {
 		return err
 	}
+	if err := a.checkSetFolderPaths(); err != nil { // review T3, behind the link
+		return err
+	}
 	if !t.ReceiptsConfigured() {
 		return nil
 	}
@@ -327,6 +330,7 @@ func (a *applier) checkOrders(allowWritable bool) error {
 	if !a.tgt.OrdersPickup() { // model (a): the ERP's scheduler imports
 		checks = append([]func() error{a.checkImporterStated}, checks...)
 	}
+	checks = append([]func() error{a.checkSetFolderPaths}, checks...) // review T3, behind the link
 	for _, f := range checks {
 		if err := f(); err != nil {
 			return err

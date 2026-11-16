@@ -129,7 +129,7 @@ func TestDocuments_Refusals(t *testing.T) {
 		}), CodeSpecInvalid},
 		{"missing folder", docsIn(func(in *DocumentsInput) { in.Folders = folder(filepath.Join(herp, "nope")) }), CodeFolderMissing},
 		{"a file", docsIn(func(in *DocumentsInput) { in.Folders = folder(file) }), CodeFolderMissing},
-		{"a link", docsIn(func(in *DocumentsInput) { in.Folders = folder(link) }), CodeFolderForbidden},
+		{"a link", docsIn(func(in *DocumentsInput) { in.Folders = folder(link) }), CodeFolderReparse},
 		{"in the data directory", docsIn(func(in *DocumentsInput) { in.Folders = folder(inData) }), CodeFolderForbidden},
 		{"the sendOrderDir", docsIn(func(in *DocumentsInput) { in.Folders = folder(orders) }), CodeConfigRefused},
 		{"no layout", docsIn(func(in *DocumentsInput) {

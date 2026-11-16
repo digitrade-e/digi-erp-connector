@@ -372,6 +372,9 @@ func ApplyLockdown(dir string, trusted []string, plan LockdownPlan) (int, error)
 	if err != nil {
 		return 0, err
 	}
+	if !strings.EqualFold(rootFinal, plan.FinalPath) { // the path judged (review T3)
+		return 0, fmt.Errorf("%w: %s resolves to %s, not %s as the check read", ErrOutsideTree, dir, rootFinal, plan.FinalPath)
+	}
 	apply := func(path string, n node, isRoot bool) error {
 		e, _, err := planEntry(path, n, trustedSet, t, isRoot)
 		if err != nil {

@@ -51,6 +51,9 @@ func (otherSystem) Service(string) (autostart.ServiceInfo, error) {
 	return autostart.ServiceInfo{}, errUnsupported
 }
 
+func (otherSystem) FolderRules() FolderRules                   { return machineFolderRules("") }
+func (otherSystem) ReparsePointOn(path string) (string, error) { return reparseAlong(path) }
+
 func (otherSystem) PlanFolderLockdown(string, []string, map[string]bool) (dataacl.LockdownPlan, error) {
 	return dataacl.LockdownPlan{}, errUnsupported
 }

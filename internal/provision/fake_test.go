@@ -113,6 +113,8 @@ type fakeSys struct {
 	finalPath     map[string]string   // the plan's final path, by folder (default \\?\<dir>)
 	lastExecExts  map[string]bool     // what the last plan was asked to flag
 	lastTrusted   []string            // and whom it trusted
+	folderRules   FolderRules         // FolderRules (review T3); none by default
+	reparse       map[string]string   // ReparsePointOn by path; otherwise only the path itself is looked at
 	daemon        *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
@@ -530,4 +532,19 @@ func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 	sys.calls = nil
 	d.set(func(d *fakeDaemon) { d.user, d.pass = cfg.Auth.Username, cfg.Auth.Password })
 	return sys, &fakeDB{saPass: testSaPass}, orders
+}
+
+func (s *fakeSys) FolderRules() FolderRules { return s.folderRules }
+
+// ReparsePointOn is the test's answer for path, else whether path itself is
+// a link: the test's temp folder above it is the machine's (on macOS /var is
+// a symbolic link).
+func (s *fakeSys) ReparsePointOn(path string) (string, error) {
+	if at, ok := s.reparse[path]; ok {
+		return at, nil
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return path, nil
+	}
+	return "", nil
 }

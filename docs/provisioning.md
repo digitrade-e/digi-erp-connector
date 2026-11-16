@@ -449,8 +449,10 @@ folder's path replaces `sendReceiptDir`, its pattern the receipt file's name (`K
 Checked before any write: the name pattern's closed grammar (`{prefix}` optional and first, a stem of ASCII letters,
 digits and `_` starting with a letter and ending in a letter or `_` (review m11: `IMOVEIN_1{n}` with n = 23 is `IMOVEIN_123`), `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
 is `COM1.doc`), `tempPrefix` exactly with `{prefix}` (orders only), `layout` `official`/`legacy` for orders; the
-folder exists (`folder_missing`; the connector never creates it), is not a link or junction and not inside the data
-directory (`folder_forbidden`), and — when the command adds or moves it, and for the receipt folder a binding newly
+folder exists (`folder_missing`; the connector never creates it), has no junction, link or mount point anywhere on its
+path, its own name included (`folder_reparse`, review T3), is not inside the data directory (`folder_forbidden`), and
+behind the link is none of the [document folder places](#where-a-document-folder-may-be) (`folder_forbidden`); and —
+when the command adds or moves it, and for the receipt folder a binding newly
 names — only the administrators can write to it (`folder_writable`, plan 087 review M1/R1a: `allowWritable` accepts it
 over WinRM with a warning; a folder left where it was is reported in `writableFolders`); behind the link a plain local
 path outside the system folders (link mode's rules), never `allowWritable`.
@@ -484,8 +486,14 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
 ```
 
 - **Named folders only**: a typed folder's key, or the roles `sendOrderDir`, `pickup`, `sendReceiptDir`, resolved from
-  `config.yaml` — never a path (`spec_invalid`); one the box does not have is `folder_unknown`; a drive's root, a system
-  folder or the data directory, or a folder holding one, is `folder_forbidden`. At most 8 per run.
+  `config.yaml` — never a path (`spec_invalid`); one the box does not have is `folder_unknown`. At most 8 per run.
+- **Judged where Windows resolves it** (review T3), link or WinRM: a junction, link or mount point anywhere on the
+  configured path is `folder_reparse`; a folder in or holding one of the
+  [places a document folder may not be](#where-a-document-folder-may-be) is `folder_forbidden`. Once the folder is
+  opened by handle, the path the handle resolves to (`GetFinalPathNameByHandle`) is judged the same way and must be the
+  configured path itself (`folder_reparse` otherwise); the write re-opens it and refuses a folder that resolves anywhere
+  else than the check read. A `restore` is never blocked by these: it puts back only a recorded pre-image, on the
+  objects recorded.
 - **Never a folder code runs from** (review T1): a folder holding an importer file (has.exe, a BAT, a parameter file)
   or a file Windows runs — PATHEXT's extensions (never fewer than Windows' defaults), `.dll`, `.ps1`, `.scr`, `.cpl`,
   `.ocx`, `.sys`, `.drv`; never `.php` — anywhere beneath is `folder_has_executables`. Where an importer runs or reads
@@ -576,9 +584,9 @@ actually changed.
 | `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished; `counters range`: the new range would leave one of them out |
 | `counter_store` | `counters`: the counter's store cannot be read; `create`: `store: lastOrderNumber` on a box that writes no orders |
 | `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore` (review R7): the same, for the order and receipt index entries their in-flight guard reads (`acceptUnreadable`; `restore --accept-unreadable=N`) |
-| `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
+| `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`, `folder-acl`: no folder of that key / the path is not a folder here / inside the data directory, not a path link mode takes, or one of the [places a document folder may not be](#where-a-document-folder-may-be) (review T3: typed folders behind the link, every `folder-acl` target, and behind the link the `sendOrderDir`, pickup and receipt folders `apply`, `orders` and `receipts` set or move) |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
-| `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through) / more than 20 000 entries |
+| `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through), or — with `documents` and, behind the link, `apply`/`orders`/`receipts` — a junction, link or mount point on the configured path, or a folder whose handle resolves to another path (review T3) / more than 20 000 entries |
 | `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
@@ -642,6 +650,22 @@ Every path a command takes behind the link is a plain path on a local drive with
 cmd.exe's characters, and — since the system-folder rules compare text — none Windows resolves to another folder
 (plan 087 review m6): no `~` (an 8.3 short name, `C:\PROGRA~1`), no `:` after the drive letter (a stream), no part
 ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`).
+
+### Where a document folder may be
+
+Plan 087 review T3. A typed folder (`documents`, behind the link), every `folder-acl` target (link or WinRM), and —
+behind the link — the `sendOrderDir`, `sendOrderPickupDir` and `sendReceiptDir` that `apply`, `orders` or `receipts`
+set or move, are refused (`folder_forbidden`) when they are, are in, or hold:
+- a drive's root;
+- the Windows folder (`%SystemRoot%`), `%ProgramFiles%`, `%ProgramFiles(x86)%`, all of `%ProgramData%`;
+- the profiles' folder (`%SystemDrive%\Users` and the registry's `ProfilesDirectory`): every profile, `Public`,
+  `Default`, `All Users` — and `C:\Documents and Settings`;
+- the connector's install folder and its data directory;
+- or when any part of the path is `AppData`, `System Volume Information` or `$Recycle.Bin`.
+
+And none has a junction, a symbolic link or a mount point anywhere on its path (`folder_reparse`): `C:\Users\All
+Users` is a link to `C:\ProgramData`, which a rule reading only text would never see. `C:\xampp\htdocs\herp` and
+`C:\xampp\htdocs\herp\receipts` (BFL) pass. Folders left where they were are not judged again.
 
 These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
 takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login

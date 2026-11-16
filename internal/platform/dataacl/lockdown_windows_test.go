@@ -233,3 +233,29 @@ func TestLockdown_ReportsParentWriters(t *testing.T) {
 		t.Error("the lock-down changed the parent")
 	}
 }
+
+// Review T3: the lock-down writes only the folder whose path the check
+// judged. Moved after the check behind a junction of the old name, the same
+// folder (same file ID) now resolves elsewhere: refused, nothing written.
+func TestLockdown_RefusesAFolderThatResolvesElsewhere(t *testing.T) {
+	root := longTemp(t)
+	a := filepath.Join(root, "a")
+	herp := filepath.Join(a, "herp")
+	mkfile(t, filepath.Join(herp, "x.doc"))
+	plan, err := PlanLockdown(herp, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := filepath.Join(root, "b")
+	if err := os.Rename(a, b); err != nil {
+		t.Fatal(err)
+	}
+	mklinkJ(t, a, b)
+	before := ownerAndDACL(t, filepath.Join(b, "herp"))
+	if _, err := ApplyLockdown(herp, nil, plan); !errors.Is(err, ErrOutsideTree) {
+		t.Fatalf("ApplyLockdown through a junction: %v, want ErrOutsideTree", err)
+	}
+	if ownerAndDACL(t, filepath.Join(b, "herp")) != before {
+		t.Error("the refused lock-down wrote")
+	}
+}

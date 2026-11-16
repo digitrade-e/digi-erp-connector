@@ -183,6 +183,10 @@ func (winSystem) FolderWriters(dir string) ([]dataacl.Writer, error) {
 func (winSystem) LookupAccount(name string) (dataacl.Account, error) {
 	return dataacl.LookupAccount(name)
 }
+func (winSystem) FolderRules() FolderRules { return machineFolderRules(profilesDirectory()) }
+
+func (winSystem) ReparsePointOn(path string) (string, error) { return reparseAlong(path) }
+
 func (winSystem) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
 	return dataacl.PlanLockdown(dir, trusted, execExts)
 }

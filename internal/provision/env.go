@@ -61,6 +61,15 @@ type System interface {
 	// folder-acl command's (dataacl; review R1c): read what a lock-down of a
 	// folder would do, write it, put a recorded pre-image back.
 	PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error)
+	// FolderRules are what a document folder may not be in or hold on this
+	// machine (review T3): its Windows, Program Files and ProgramData folders,
+	// the profiles' folder, the connector's install folder; AppData, System
+	// Volume Information and $Recycle.Bin as parts.
+	FolderRules() FolderRules
+	// ReparsePointOn is the first part of path, from its drive down to path
+	// itself, that is a reparse point (a junction, a symbolic link, a mount
+	// point); "" when none is (review T3).
+	ReparsePointOn(path string) (string, error)
 	ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error)
 	RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (restored, skipped int, err error)
 }

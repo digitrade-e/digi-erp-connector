@@ -219,9 +219,15 @@ func ApplyFolderACL(ctx context.Context, env Env, in FolderACLInput, check bool)
 }
 
 // resolveFolder is a folder name's configured path, refused when it is not
-// configured, or is (or holds) the data directory, a drive's root or a
-// system folder.
-func (a *applier) resolveFolder(name string) (string, *Refusal) {
+// configured, has a reparse point on it (folder_reparse), or is in or holds
+// a folder a document folder may not be (folder_forbidden; review T3:
+// documentFolderRefusal — a drive's root, the system, profile and
+// ProgramData folders, any AppData, the connector's install folder and data
+// directory). PlanFolderLockdown's final path is judged again
+// (finalPathRefusal). A restore (lockdown false) skips the T3 rules: it
+// puts back only a pre-image this box recorded for the folder, on objects
+// that are still the ones recorded — an undo is never blocked.
+func (a *applier) resolveFolder(name string, lockdown bool) (string, error) {
 	var p string
 	switch name {
 	case FolderRoleSendOrderDir:
@@ -243,16 +249,35 @@ func (a *applier) resolveFolder(name string) (string, *Refusal) {
 	if p == "" {
 		return "", refuse(CodeFolderUnknown, "name a folder config.yaml has (state lists them)", "there is no folder %s on this box", name)
 	}
-	root := filepath.Dir(filepath.Clean(p)) == filepath.Clean(p)
-	holdsSystem := false
-	for _, d := range SystemDirs() {
-		holdsSystem = holdsSystem || winUnder(d, []string{p})
-	}
-	if !filepath.IsAbs(p) || root || inside(p, a.dir) || inside(a.dir, p) || winUnder(p, SystemDirs()) || holdsSystem {
+	if !filepath.IsAbs(p) || inside(p, a.dir) || inside(a.dir, p) {
 		return "", refuse(CodeFolderForbidden, "lock down the folder the ERP's importer reads, not a drive, a system folder or the connector's data directory",
-			"folder %s (%s) is a drive's root, a system folder or the data directory, or holds one", name, p)
+			"folder %s (%s) is not absolute, or is or holds the data directory", name, p)
+	}
+	if lockdown {
+		if err := a.folderPathRefusal("folder "+name, p); err != nil {
+			return "", err
+		}
 	}
 	return p, nil
+}
+
+// finalPathRefusal judges the path the opened folder's handle resolves to
+// (review T3): on a drive, under the same rules, and the configured path
+// itself — anything else means Windows took the configured text elsewhere.
+func (a *applier) finalPathRefusal(name, p, final string) error {
+	fp, ok := finalDrivePath(final)
+	if !ok {
+		return refuse(CodeFolderReparse, "name a folder on a local drive", "folder %s (%s) resolves to %s, on no drive letter", name, p, final)
+	}
+	if why := documentFolderRefusal(fp, a.folderRules()); why != "" {
+		return refuse(CodeFolderForbidden, "name the folder the ERP reads: not a drive's root, a system or profile folder, nor the connector's own",
+			"folder %s (%s) resolves to %s: %s", name, p, fp, why)
+	}
+	if !strings.EqualFold(filepath.Clean(fp), filepath.Clean(p)) {
+		return refuse(CodeFolderReparse, "name the folder by its real path (its long name, no junction, link or mount point on the way)",
+			"folder %s (%s) resolves to %s", name, p, fp)
+	}
+	return nil
 }
 
 // folderACLIdle refuses a folder with unfinished work in it (as the
@@ -312,7 +337,7 @@ func lockdownRefusal(name, path string, err error) *Refusal {
 func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 	paths := map[string]string{}
 	for _, n := range in.Folders {
-		p, r := a.resolveFolder(n)
+		p, r := a.resolveFolder(n, true)
 		if r != nil {
 			return r
 		}
@@ -343,6 +368,9 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trustedFor[n], exts)
 		if err != nil {
 			return lockdownRefusal(n, paths[n], err)
+		}
+		if err := a.finalPathRefusal(n, paths[n], plan.FinalPath); err != nil { // review T3
+			return err
 		}
 		if len(plan.Executables) > 0 {
 			return refuse(CodeFolderHasExecutables, "move the programs, scripts and libraries out of the folder: a lock-down never tightens a folder code is run from",
@@ -427,7 +455,7 @@ func (a *applier) recordFolderACL(name, path string, entries []dataacl.FolderEnt
 }
 
 func (a *applier) folderACLRestore(ctx context.Context, in FolderACLInput) error {
-	path, r := a.resolveFolder(in.Folder)
+	path, r := a.resolveFolder(in.Folder, false)
 	if r != nil {
 		return r
 	}

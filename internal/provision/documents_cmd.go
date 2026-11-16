@@ -251,12 +251,22 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 		case err != nil:
 			return refuse(CodeFolderMissing, "create the folder the ERP's importer reads (the connector never creates it)", "folder %s: %s is not a folder on this machine", k, p)
 		case fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0:
-			return refuse(CodeFolderForbidden, "name the folder itself, not a link or junction to it", "folder %s: %s is a link or a junction", k, p)
+			return refuse(CodeFolderReparse, "name the folder itself, not a link or junction to it", "folder %s: %s is a link or a junction", k, p)
 		case !fi.IsDir():
 			return refuse(CodeFolderMissing, "name a folder", "folder %s: %s is not a folder", k, p)
 		}
 		if inside(p, a.dir) {
 			return refuse(CodeFolderForbidden, "name the folder the ERP's importer reads, outside the connector's data directory", "folder %s: %s is in the data directory", k, p)
+		}
+		// Review T3: no reparse point on the way to it (link or WinRM); behind
+		// the link, none of the folders a document folder may not be in or hold.
+		if LinkMode(a.dir) {
+			if err := a.folderPathRefusal("folder "+k, p); err != nil {
+				return err
+			}
+		} else if at, err := a.env.Sys.ReparsePointOn(p); err != nil || at != "" {
+			return refuse(CodeFolderReparse, "name the folder by its real path: no junction, link or mount point on the way to it",
+				"folder %s (%s): %s is a junction, a link or a mount point (%v)", k, p, at, err)
 		}
 		// Review R1a: refused only for a folder the command adds, or moves; a
 		// folder set again where it was is reported, not refused.
