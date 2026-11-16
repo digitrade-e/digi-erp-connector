@@ -49,16 +49,27 @@ func fixed(argv ...string) func([]string) ([]string, bool) {
 	}
 }
 
-// restore takes a change-set id and, optionally, --assume-idle.
+// restore takes a change-set id and, optionally and in this order,
+// --assume-idle and --accept-unreadable=N (plan 087 review R7: the number of
+// unreadable index entries a human checked; 1-9 digits, no leading zero).
 func restore(args []string) ([]string, bool) {
-	switch {
-	case len(args) == 1 && changeSetShape.MatchString(args[0]):
-		return []string{"restore", args[0]}, true
-	case len(args) == 2 && changeSetShape.MatchString(args[0]) && args[1] == "--assume-idle":
-		return []string{"restore", args[0], "--assume-idle"}, true
+	if len(args) == 0 || len(args) > 3 || !changeSetShape.MatchString(args[0]) {
+		return nil, false
 	}
-	return nil, false
+	out, rest := []string{"restore", args[0]}, args[1:]
+	if len(rest) > 0 && rest[0] == "--assume-idle" {
+		out, rest = append(out, rest[0]), rest[1:]
+	}
+	if len(rest) > 0 && acceptUnreadableArg.MatchString(rest[0]) {
+		out, rest = append(out, rest[0]), rest[1:]
+	}
+	if len(rest) != 0 {
+		return nil, false
+	}
+	return out, true
 }
+
+var acceptUnreadableArg = regexp.MustCompile(`^--accept-unreadable=[1-9][0-9]{0,8}$`)
 
 // --- plan 086 B1: the provision commands of v1.0.29 (auth, daemon, service, db, firewall-remove) ---
 //

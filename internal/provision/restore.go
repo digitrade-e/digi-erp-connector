@@ -33,6 +33,10 @@ func preimageConfig(p preimage) (cfg config.Config, ok bool, err error) {
 type RestoreInput struct {
 	ChangeSet  string `json:"changeSet"`
 	AssumeIdle bool   `json:"assumeIdle,omitempty"`
+	// AcceptUnreadable (review R7; --accept-unreadable=N) is the number of
+	// unreadable index entries a human checked: the counters and documents
+	// guards refuse them otherwise.
+	AcceptUnreadable *int `json:"acceptUnreadable,omitempty"`
 }
 
 // Restore puts a change set's pre-image back — the files, the firewall rule,
@@ -49,6 +53,9 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	res := &ApplyResult{ChangeSet: in.ChangeSet, Steps: []Step{}}
 	if !changeSetRe.MatchString(in.ChangeSet) {
 		return res, refuse(CodeChangeSetID, "use the change set's id", "changeSet is not a valid id")
+	}
+	if r := validAcceptUnreadable(in.AcceptUnreadable); r != nil {
+		return res, r
 	}
 	dir := env.Sys.DataDir()
 	p, err := loadPreimage(preimageDir(dir, in.ChangeSet))
@@ -98,10 +105,10 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 		if a.curBytes == nil {
 			a.warn("config.yaml did not read: the counters and documents guards were not run (--assume-idle)")
 		} else {
-			if err := a.documentsIdle(a.cur, restored); err != nil {
+			if err := a.documentsIdle(a.cur, restored, in.AcceptUnreadable); err != nil {
 				return res, err
 			}
-			if err := a.countersRestorable(a.cur, restored); err != nil {
+			if err := a.countersRestorable(a.cur, restored, in.AcceptUnreadable); err != nil {
 				return res, err
 			}
 		}

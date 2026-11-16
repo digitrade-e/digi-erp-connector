@@ -443,7 +443,10 @@ taken" scan, the layout the record, the test flag whether production may write t
 receipt folder, its name pattern or test flag, the receipt counter — does not change while a receipt is reserved
 (`receipts_in_flight`: Recover finishes it into the folder in use, under its pattern; a file already written under
 the old name would be written again under the new one). The `receipts` command makes the same check when it moves or
-clears `sendReceiptDir`. Config-command flow; `restore` puts
+clears `sendReceiptDir`. An index entry these guards cannot read refuses (`index_unreadable`, review R7: an unfinished
+one among them would be stranded unseen) unless `acceptUnreadable` is the number of such entries a human checked —
+`documents` and `receipts` take it in their input, `restore` as `--accept-unreadable=N` (the link takes it after
+`--assume-idle`). Config-command flow; `restore` puts
 `config.yaml` back, after the same in-flight guards (`folder_in_flight`, `receipts_in_flight`; review m9). Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
 `documents` (and refuses index entries holding a frozen rule), its recovery pushes the production counters into the
 test ranges, and its GUI save drops the block —
@@ -496,7 +499,7 @@ actually changed.
 | `counter_range` | `counters`: the range would exclude the counter's last or an issued number, or `from` is outside it |
 | `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished; `counters range`: the new range would leave one of them out |
 | `counter_store` | `counters`: the counter's store cannot be read; `create`: `store: lastOrderNumber` on a box that writes no orders |
-| `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number |
+| `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore` (review R7): the same, for the order and receipt index entries their in-flight guard reads (`acceptUnreadable`; `restore --accept-unreadable=N`) |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |

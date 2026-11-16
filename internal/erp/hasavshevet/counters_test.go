@@ -204,11 +204,9 @@ func TestScanIssued_PerRange(t *testing.T) {
 	if err != nil || shop.Highest != 5_000_000 || shop.InFlight != 1 {
 		t.Errorf("shopify scan %+v %v", shop, err)
 	}
-	if n, err := OrdersInFlightForFolder(dataDir, "herp"); err != nil || n != 1 {
-		t.Errorf("in flight for herp: %d %v", n, err)
-	}
-	if n, _ := OrdersInFlightForFolder(dataDir, "herp_test"); n != 0 {
-		t.Errorf("in flight for herp_test: %d", n)
+	inFlight, err := ScanOrdersInFlight(dataDir)
+	if err != nil || inFlight.ByFolder["herp"] != 1 || inFlight.ByFolder["herp_test"] != 0 || inFlight.Default != 1 || inFlight.Unreadable != 0 {
+		t.Errorf("in flight %+v %v", inFlight, err)
 	}
 }
 

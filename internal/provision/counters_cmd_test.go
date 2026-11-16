@@ -643,3 +643,79 @@ func TestRestore_RunsTheCountersAndDocumentsGuards(t *testing.T) {
 		t.Errorf("refusal %+v", r)
 	}
 }
+
+// Review R7: the in-flight guards of documents, receipts and restore refuse
+// an index entry they cannot read — an unfinished one among them would be
+// stranded unseen (the path that fed R2) — unless acceptUnreadable is their
+// number, as the counters command does since m8.
+func TestInFlightGuards_UnreadableEntriesRefuse(t *testing.T) {
+	sys, env, _ := countersBox(t)
+	herp := mkdir(t, "herp")
+	setHerp := func(cs, pattern string, accept *int) DocumentsInput {
+		return docsIn(func(in *DocumentsInput) {
+			in.ChangeSet, in.AcceptUnreadable = cs, accept
+			in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: pattern, Layout: "legacy"}}
+		})
+	}
+	if _, err := ApplyDocuments(context.Background(), env, setHerp("cs-r7-d1", "IMOVEIN_{n}.doc", nil), false); err != nil {
+		t.Fatal(err)
+	}
+	ix := hasavshevet.OrderIndexDir(sys.dir)
+	if err := os.MkdirAll(ix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ix, "damaged.json"), []byte("{not an entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := func(v int) *int { return &v }
+
+	// documents: a change the guard scans for.
+	_, err := ApplyDocuments(context.Background(), env, setHerp("cs-r7-d2", "ORD_{n}.doc", nil), false)
+	if r := wantRefusal(t, err, CodeIndexUnreadable); !strings.Contains(r.Fix, "acceptUnreadable: 1") {
+		t.Errorf("refusal %+v", r)
+	}
+	_, err = ApplyDocuments(context.Background(), env, setHerp("cs-r7-d2", "ORD_{n}.doc", n(2)), false)
+	wantRefusal(t, err, CodeIndexUnreadable)
+	// Nothing the guard scans for (the folder set again as it is): no refusal.
+	if _, err := ApplyDocuments(context.Background(), env, setHerp("cs-r7-d3", "IMOVEIN_{n}.doc", nil), false); err != nil {
+		t.Fatalf("an unchanged folder: %v", err)
+	}
+	if res, err := ApplyDocuments(context.Background(), env, setHerp("cs-r7-d4", "ORD_{n}.doc", n(1)), false); err != nil || !warned(res, "index_unreadable:") {
+		t.Fatalf("documents with the count accepted: %v %v", res, err)
+	}
+	// restore of the change that added herp scans too.
+	_, err = Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-r7-d1"})
+	wantRefusal(t, err, CodeIndexUnreadable)
+	if _, err := Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-r7-d1", AcceptUnreadable: n(1)}); err != nil {
+		t.Fatalf("restore with the count accepted: %v", err)
+	}
+
+	// receipts: moving sendReceiptDir scans the receipt index.
+	sys2, fdb2, _ := handInstallBox(t)
+	env2 := testEnv(sys2, fdb2)
+	cfg, _ := readConfig(t, sys2.dir)
+	cfg.SendReceiptDir = mkdir(t, "kupain_old")
+	writeConfig(t, sys2.dir, cfg)
+	rix := filepath.Join(sys2.dir, "receipts", "index")
+	if err := os.MkdirAll(rix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rix, "damaged.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved := mkdir(t, "kupain_new")
+	_, err = ApplyReceipts(context.Background(), env2, receiptsInput(func(in *ReceiptsInput) { in.SendReceiptDir = &moved }), false)
+	wantRefusal(t, err, CodeIndexUnreadable)
+	if _, err := ApplyReceipts(context.Background(), env2, receiptsInput(func(in *ReceiptsInput) {
+		in.SendReceiptDir, in.AcceptUnreadable = &moved, n(1)
+	}), false); err != nil {
+		t.Fatalf("receipts with the count accepted: %v", err)
+	}
+
+	// The command line and the link take the flag; 0 is not a count.
+	if _, code := Run(context.Background(), env, []string{"restore", "cs-r7-d1", "--accept-unreadable=x"}, strings.NewReader("")); code != ExitUsage {
+		t.Error("a malformed --accept-unreadable is a usage error")
+	}
+	_, err = Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-r7-d1", AcceptUnreadable: n(0)})
+	wantRefusal(t, err, CodeSpecInvalid)
+}

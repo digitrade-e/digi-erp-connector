@@ -48,7 +48,7 @@ const Usage = `usage:
   digi-erp-connector-provision counters [--check] --spec - create a named counter, set its range, move it forward (start-from), or retire it (plan 087)
   digi-erp-connector-provision documents [--check] --spec - set the typed folders documentRule names, and the receipts' folder and counter (plan 087)
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
-  digi-erp-connector-provision restore <changeSet> [--assume-idle]
+  digi-erp-connector-provision restore <changeSet> [--assume-idle] [--accept-unreadable=N]
   digi-erp-connector-provision state [--spec -]         read the box's state: services, order queue, counters, indexes, TLS, link.yaml, disk (read-only; stdin {} or empty)
   digi-erp-connector-provision logs --spec -            read a log's tail, redacted (stdin: {"source":"server|link|ui|events-daemon|events-link",...})
   digi-erp-connector-provision version
@@ -317,6 +317,12 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			switch {
 			case a == "--assume-idle":
 				in.AssumeIdle = true
+			case strings.HasPrefix(a, "--accept-unreadable="): // review R7
+				n, err := strconv.Atoi(strings.TrimPrefix(a, "--accept-unreadable="))
+				if err != nil || in.AcceptUnreadable != nil {
+					return []byte(Usage + "\n"), ExitUsage
+				}
+				in.AcceptUnreadable = &n
 			case strings.HasPrefix(a, "-") || in.ChangeSet != "":
 				return []byte(Usage + "\n"), ExitUsage
 			default:

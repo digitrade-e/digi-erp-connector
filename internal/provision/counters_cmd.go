@@ -213,23 +213,27 @@ func (a *applier) scanCounter(kind string, cfg config.Config, min, max int64, ac
 	if err != nil {
 		return scan, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", kind, err)
 	}
-	if scan.Unreadable == 0 {
-		return scan, nil
+	return scan, a.unreadableAccepted(scan.Unreadable, kind, "their numbers are not counted, so one of them could be issued again", accept)
+}
+
+// unreadableAccepted refuses when n index entries (of what) could not be read
+// — why says what that costs — unless accept is exactly n: a human checked
+// them (review m8, R7). An accepted count is a warning, once.
+func (a *applier) unreadableAccepted(n int, what, why string, accept *int) *Refusal {
+	if n == 0 {
+		return nil
 	}
-	fix := fmt.Sprintf("repair or move them (docs/troubleshooting.md § The order index; the logs name them), or — once a human checked them — send acceptUnreadable: %d", scan.Unreadable)
+	fix := fmt.Sprintf("repair or move them (docs/troubleshooting.md § The order index; the logs name them), or — once a human checked them — send acceptUnreadable: %d", n)
 	switch {
 	case accept == nil:
-		return scan, refuse(CodeIndexUnreadable, fix,
-			"%d %s index entries cannot be read: their numbers are not counted, so one of them could be issued again", scan.Unreadable, kind)
-	case *accept != scan.Unreadable:
-		return scan, refuse(CodeIndexUnreadable, fix,
-			"acceptUnreadable is %d, and %d %s index entries cannot be read now: read the box again", *accept, scan.Unreadable, kind)
+		return refuse(CodeIndexUnreadable, fix, "%d %s index entries cannot be read: %s", n, what, why)
+	case *accept != n:
+		return refuse(CodeIndexUnreadable, fix, "acceptUnreadable is %d, and %d %s index entries cannot be read now: read the box again", *accept, n, what)
 	}
-	if w := fmt.Sprintf("index_unreadable: %d %s index entries could not be read and were accepted (acceptUnreadable); their numbers are not counted",
-		scan.Unreadable, kind); !slices.Contains(a.res.Warnings, w) {
+	if w := fmt.Sprintf("index_unreadable: %d %s index entries could not be read and were accepted (acceptUnreadable)", n, what); !slices.Contains(a.res.Warnings, w) {
 		a.res.Warnings = append(a.res.Warnings, w)
 	}
-	return scan, nil
+	return nil
 }
 
 // counterLast is a store's last number: -1 when the store is missing.
@@ -371,7 +375,9 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 // other counter dropped is harmless: its numbers stay in the index and the
 // history, a re-queue needs no counter (m3), and a reserved receipt's counter
 // is the receipt binding's guard (documentsIdle).
-func (a *applier) countersRestorable(cur, tgt config.Config) error {
+func (a *applier) countersRestorable(cur, tgt config.Config, accept *int) error {
+	// Review R7: each kind's index is read whole by every scan; an entry it
+	// cannot read refuses unless the count was accepted.
 	curSet := hasavshevet.NewCounterSet(cur, a.dir)
 	for _, k := range cur.CounterKeys() {
 		cc := cur.Documents.Counters[k]
@@ -390,6 +396,9 @@ func (a *applier) countersRestorable(cur, tgt config.Config) error {
 		scan, err := hasavshevet.ScanIssued(cc.Kind, a.dir, strings.TrimSpace(cur.SendOrderDir), cc.Min, cc.Max)
 		if err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", cc.Kind, err)
+		}
+		if r := a.unreadableAccepted(scan.Unreadable, cc.Kind, "an unfinished one among them could be left out of the restored range", accept); r != nil {
+			return r
 		}
 		outside := scan.LowestInFlight
 		if outside >= tc.Min {
@@ -426,6 +435,9 @@ func (a *applier) countersRestorable(cur, tgt config.Config) error {
 		scan, err := hasavshevet.ScanIssued(kind, a.dir, strings.TrimSpace(tgt.SendOrderDir), 1, config.MaxDocumentNumber)
 		if err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", kind, err)
+		}
+		if r := a.unreadableAccepted(scan.Unreadable, kind, "a number among them would not be counted, and today's store could issue it again", accept); r != nil {
+			return r
 		}
 		if scan.Highest > max(last, 0) {
 			return refuse(CodeCounterRange, "retire the counters instead of restoring them away (counters retire), or restore a later change set",

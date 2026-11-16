@@ -518,29 +518,45 @@ func ScanIssued(kind, dataDir, sendOrderDir string, min, max int64) (IssuedScan,
 	return out, nil
 }
 
-// OrdersInFlightForFolder counts the order index entries whose frozen rule
-// names folder and that are not finished (reserved or retryable): a resend
-// writes them into that folder.
-func OrdersInFlightForFolder(dataDir, folder string) (int, error) {
-	n := 0
-	err := eachIndexEntry(OrderIndexDir(dataDir), func(e scannedEntry) {
-		if e.Rule != nil && e.Rule.Folder == folder && (e.State == string(orderReserved) || e.State == string(orderRetryable)) {
-			n++
-		}
-	}, func() {})
-	return n, err
+// OrdersInFlight is one pass over the order index: the unfinished entries
+// (reserved — unknown after a restart — or retryable: a resend writes them),
+// by the typed folder their frozen rule names, and those without a rule (they
+// go to sendOrderDir or the pickup folder). Unreadable counts the entries the
+// pass could not read: an unfinished one among them is not counted (review
+// R7 — callers refuse unless a human accepted that count).
+type OrdersInFlight struct {
+	ByFolder   map[string]int
+	Default    int
+	Unreadable int
 }
 
-// ReceiptsInFlight counts the receipt index entries still reserved: Recover
-// or a repeat finishes them into the receipt folder in use.
-func ReceiptsInFlight(dataDir string) (int, error) {
-	n := 0
-	err := eachIndexEntry(filepath.Join(dataDir, "receipts", "index"), func(e scannedEntry) {
-		if e.State == string(receiptReserved) {
-			n++
+// ScanOrdersInFlight reads the order index once (a missing index holds
+// nothing).
+func ScanOrdersInFlight(dataDir string) (OrdersInFlight, error) {
+	out := OrdersInFlight{ByFolder: map[string]int{}}
+	err := eachIndexEntry(OrderIndexDir(dataDir), func(e scannedEntry) {
+		if e.State != string(orderReserved) && e.State != string(orderRetryable) {
+			return
 		}
-	}, func() {})
-	return n, err
+		if e.Rule == nil {
+			out.Default++
+			return
+		}
+		out.ByFolder[e.Rule.Folder]++
+	}, func() { out.Unreadable++ })
+	return out, err
+}
+
+// ScanReceiptsInFlight counts the receipt index entries still reserved —
+// Recover or a repeat finishes them into the receipt folder in use — and the
+// entries it could not read.
+func ScanReceiptsInFlight(dataDir string) (reserved, unreadable int, err error) {
+	err = eachIndexEntry(filepath.Join(dataDir, "receipts", "index"), func(e scannedEntry) {
+		if e.State == string(receiptReserved) {
+			reserved++
+		}
+	}, func() { unreadable++ })
+	return reserved, unreadable, err
 }
 
 type scannedEntry struct {

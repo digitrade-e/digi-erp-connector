@@ -37,9 +37,12 @@ type ReceiptsInput struct {
 	// AllowWritable is apply's importer.allowWritable (WinRM only): it
 	// accepts a receipt importer — and a receipt folder (plan 087 review M1)
 	// — that accounts besides the administrators can change.
-	AllowWritable bool    `json:"allowWritable,omitempty"`
-	AssumeIdle    bool    `json:"assumeIdle,omitempty"`
-	Expect        *Expect `json:"expect,omitempty"`
+	AllowWritable bool `json:"allowWritable,omitempty"`
+	// AcceptUnreadable is documents' (review R7): the unreadable receipt index
+	// entries a human checked, when the receipt folder moves.
+	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
+	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
+	Expect           *Expect `json:"expect,omitempty"`
 }
 
 // OrdersInput is the orders command's stdin. Each field left out keeps the
@@ -119,6 +122,9 @@ func (in ReceiptsInput) Validate(linked bool, systemDirs []string) *Refusal {
 	}
 	if in.SendReceiptDir == nil && in.HasReceiptBatFile == nil && in.HasReceiptParamFile == nil && in.ReceiptCardNames == nil {
 		return refuse(CodeSpecInvalid, "name at least one receipt setting", "the input changes nothing")
+	}
+	if r := validAcceptUnreadable(in.AcceptUnreadable); r != nil {
+		return r
 	}
 	for field, p := range map[string]*string{"sendReceiptDir": in.SendReceiptDir, "hasReceiptBatFile": in.HasReceiptBatFile,
 		"hasReceiptParamFile": in.HasReceiptParamFile} {
@@ -218,7 +224,7 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 	}
 	// A reserved receipt is finished into the receipt folder in use: it does
 	// not move under one (review m5, as the documents command).
-	if err := a.documentsIdle(a.cur, t); err != nil {
+	if err := a.documentsIdle(a.cur, t, in.AcceptUnreadable); err != nil {
 		return err
 	}
 	if !t.ReceiptsConfigured() {
@@ -333,6 +339,15 @@ func (a *applier) checkOrders(allowWritable bool) error {
 		if err := a.checkFolderWriters(f.Name, f.Path, allowWritable); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validAcceptUnreadable refuses an acceptUnreadable that is not a count.
+func validAcceptUnreadable(n *int) *Refusal {
+	if n != nil && *n < 1 {
+		return refuse(CodeSpecInvalid, "give the number of unreadable index entries a human checked (1 or more), or leave it out",
+			"acceptUnreadable %d is not a count", *n)
 	}
 	return nil
 }

@@ -41,3 +41,25 @@ func TestPlan087Commands(t *testing.T) {
 		t.Errorf("plan 087 has %d commands", len(provisionCommands087))
 	}
 }
+
+// Review R7: restore takes --accept-unreadable=N after --assume-idle; nothing
+// else, and N a count.
+func TestRestoreAcceptUnreadable(t *testing.T) {
+	for args, want := range map[string]string{
+		"cs-bfl-0001 --accept-unreadable=2":               "restore cs-bfl-0001 --accept-unreadable=2",
+		"cs-bfl-0001 --assume-idle --accept-unreadable=1": "restore cs-bfl-0001 --assume-idle --accept-unreadable=1",
+		"cs-bfl-0001 --accept-unreadable=0":               "",
+		"cs-bfl-0001 --accept-unreadable=-1":              "",
+		"cs-bfl-0001 --accept-unreadable=01":              "",
+		"cs-bfl-0001 --accept-unreadable=1 --assume-idle": "",
+		"cs-bfl-0001 --accept-unreadable=1 x":             "",
+	} {
+		argv, err := Argv(linkproto.Envelope{Command: "restore", Args: strings.Fields(args)})
+		switch {
+		case want == "" && err == nil:
+			t.Errorf("%s: ran %v, want refused", args, argv)
+		case want != "" && (err != nil || strings.Join(argv, " ") != want):
+			t.Errorf("%s = %v %v, want %q", args, argv, err, want)
+		}
+	}
+}

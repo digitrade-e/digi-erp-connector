@@ -32,9 +32,13 @@ type DocumentsInput struct {
 	// AllowWritable accepts, over WinRM only, a folder set or bound that
 	// accounts besides the administrators can write to (review M1): a risk a
 	// human was shown. Behind the link it is refused.
-	AllowWritable bool    `json:"allowWritable,omitempty"`
-	AssumeIdle    bool    `json:"assumeIdle,omitempty"`
-	Expect        *Expect `json:"expect,omitempty"`
+	AllowWritable bool `json:"allowWritable,omitempty"`
+	// AcceptUnreadable is the number of unreadable order and receipt index
+	// entries a human checked (review R7): without it, or with another count,
+	// a change the in-flight guard must scan for refuses (index_unreadable).
+	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
+	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
+	Expect           *Expect `json:"expect,omitempty"`
 }
 
 // FolderInput is one typed folder (config.FolderConfig).
@@ -76,6 +80,9 @@ func (in DocumentsInput) Validate(linked bool, systemDirs []string) *Refusal {
 		if r := refuseAllowWritableLinked(in.AllowWritable); r != nil {
 			return r
 		}
+	}
+	if r := validAcceptUnreadable(in.AcceptUnreadable); r != nil {
+		return r
 	}
 	for _, k := range sortedFolderKeys(in.Folders) {
 		f := in.Folders[k]
@@ -197,7 +204,7 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 			return err
 		}
 	}
-	return a.documentsIdle(a.cur, a.tgt)
+	return a.documentsIdle(a.cur, a.tgt, in.AcceptUnreadable)
 }
 
 // documentsIdle refuses changing, from cur to tgt, what unfinished work
@@ -209,30 +216,53 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 // while a receipt is reserved: Recover or a repeat finishes it into the
 // folder in use, under its pattern (a reserved receipt whose file was written
 // under the old name would be written again under the new one: two copies a
-// kupain*.doc importer takes both of). Restore runs it too (review m9).
-func (a *applier) documentsIdle(cur, tgt config.Config) error {
+// kupain*.doc importer takes both of). Restore runs it too (review m9). An
+// index entry it cannot read refuses unless accept is their number (review
+// R7: an unfinished one among them would be stranded unseen).
+func (a *applier) documentsIdle(cur, tgt config.Config, accept *int) error {
+	var changed []string
 	for _, k := range cur.FolderKeys() {
-		nf, ok := tgt.Documents.Folders[k]
-		if ok && sameFolderConfig(cur.Documents.Folders[k], nf) {
-			continue
-		}
-		what := "removed"
-		if ok {
-			what = "changed (path, kind, name pattern, temporary prefix, layout or test)"
-		}
-		if r := a.folderIdle(k, what); r != nil {
-			return r
+		if nf, ok := tgt.Documents.Folders[k]; !ok || !sameFolderConfig(cur.Documents.Folders[k], nf) {
+			changed = append(changed, k)
 		}
 	}
-	if !sameReceiptBinding(cur, tgt) {
-		n, err := hasavshevet.ReceiptsInFlight(a.dir)
-		if err != nil {
+	binding := !sameReceiptBinding(cur, tgt)
+	if len(changed) == 0 && !binding {
+		return nil
+	}
+	var orders hasavshevet.OrdersInFlight
+	var receipts, unreadable int
+	if len(changed) > 0 {
+		var err error
+		if orders, err = hasavshevet.ScanOrdersInFlight(a.dir); err != nil {
+			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the order index: %v", err)
+		}
+		unreadable += orders.Unreadable
+	}
+	if binding {
+		var n int
+		var err error
+		if receipts, n, err = hasavshevet.ScanReceiptsInFlight(a.dir); err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the receipt index: %v", err)
 		}
-		if n > 0 {
-			return refuse(CodeReceiptsInFlight, "let the reserved receipts finish (a repeat of their key, or the next start), then run it again",
-				"%d receipt(s) are reserved: they would be finished into another folder, under another name or another counter", n)
+		unreadable += n
+	}
+	if r := a.unreadableAccepted(unreadable, "order or receipt", "an unfinished one among them would be stranded unseen by the change", accept); r != nil {
+		return r
+	}
+	for _, k := range changed {
+		what := "removed"
+		if _, ok := tgt.Documents.Folders[k]; ok {
+			what = "changed (path, kind, name pattern, temporary prefix, layout or test)"
 		}
+		if n := orders.ByFolder[k]; n > 0 {
+			return refuse(CodeFolderInFlight, "let them be written (or resolve them, docs/troubleshooting.md), then run it again",
+				"%d order(s) frozen for folder %s are not finished, and the folder would be %s under them (a resend writes by it)", n, k, what)
+		}
+	}
+	if binding && receipts > 0 {
+		return refuse(CodeReceiptsInFlight, "let the reserved receipts finish (a repeat of their key, or the next start), then run it again",
+			"%d receipt(s) are reserved: they would be finished into another folder, under another name or another counter", receipts)
 	}
 	return nil
 }
@@ -254,20 +284,6 @@ func sameReceiptBinding(a, b config.Config) bool {
 	da, db := a.ReceiptDir(), b.ReceiptDir()
 	return (da == db || (da != "" && db != "" && sameFolder(da, db))) && a.ReceiptNamePattern() == b.ReceiptNamePattern() &&
 		a.ReceiptCounterKey() == b.ReceiptCounterKey() && test(a) == test(b)
-}
-
-// folderIdle refuses when unfinished orders (reserved, or waiting for a
-// resend) are frozen for folder k.
-func (a *applier) folderIdle(k, what string) *Refusal {
-	n, err := hasavshevet.OrdersInFlightForFolder(a.dir, k)
-	if err != nil {
-		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the order index: %v", err)
-	}
-	if n > 0 {
-		return refuse(CodeFolderInFlight, "let them be written (or resolve them, docs/troubleshooting.md), then run it again",
-			"%d order(s) frozen for folder %s are not finished, and the folder would be %s under them (a resend writes by it)", n, k, what)
-	}
-	return nil
 }
 
 // inside reports whether p is dir or lies under it, compared as the file
