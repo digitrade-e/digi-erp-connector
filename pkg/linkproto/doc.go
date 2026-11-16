@@ -13,7 +13,9 @@
 // WebSocket carries one yamux session. The relay opens streams; the box opens
 // exactly one, its control stream. Every stream starts with one type byte
 // (StreamData, StreamCommand, StreamControl); command and control streams then
-// carry length-prefixed frames (WriteFrame, ReadFrame).
+// carry length-prefixed frames (WriteFrame, ReadFrame). Plan 088 adds a policy
+// stream the relay opens (StreamPolicy) and a report stream the box opens once
+// the relay has shown it takes them (StreamReport): policy.go.
 //
 // # Who can make a box do what
 //
@@ -23,7 +25,9 @@
 // its Answer with its own key, which digi-mcp pinned at pairing. Secrets for
 // the box are sealed to its X25519 key (Seal). Requests to the relay's own
 // admin operations (pairing, the box list) are signed the same way
-// (AdminRequest), so the relay needs no identity provider of its own.
+// (AdminRequest), so the relay needs no identity provider of its own. An
+// upgrade policy (plan 088) is signed by a team key too (SignPolicy): the relay
+// stores and delivers it, and can neither invent nor alter one.
 package linkproto
 
 // Version is the protocol version every message carries in "v".
