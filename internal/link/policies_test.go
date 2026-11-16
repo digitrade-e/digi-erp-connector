@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -739,8 +740,21 @@ func TestAnUnreadablePolicyFileStartsOverAgainstTheFloors(t *testing.T) {
 // with it) and the key-epoch floor; the seq floors (secrets\link_policy_floors) stay.
 func reinstall(t *testing.T, b *box) {
 	t.Helper()
-	if err := os.RemoveAll(linkDir(b.store.Dir)); err != nil {
-		t.Fatal(err)
+	// The test's link keeps running (an uninstall stops it first): on Windows a session.json it is writing that moment
+	// holds the folder for an instant, so the removal is tried again for a while.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := os.RemoveAll(linkDir(b.store.Dir))
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(policyPath(b.store.Dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("policy.json survived the reinstall: %v", err)
 	}
 	if s, ok := b.store.Secrets.(*memSecrets); ok {
 		s.mu.Lock()
