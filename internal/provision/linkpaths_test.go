@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ func TestLinkedPaths_ImageFoldersAndImporter(t *testing.T) {
 	sys, fdb, _ := handInstallBox(t)
 	env := testEnv(sys, fdb)
 	linkBox(t, sys)
-	images := mkdir(t, "images")
+	images := outsideProfiles(t, "images")
 	hash := mkdir(t, "Hash7")
 	exe := touch(t, filepath.Join(hash, "has.exe"))
 	bat := touch(t, filepath.Join(hash, "kupain.bat"))
@@ -69,9 +70,24 @@ func TestLinkedPaths_ImageFoldersAndImporter(t *testing.T) {
 	// Over WinRM none of this runs.
 	unlinkBox(t, sys)
 	sys.reparse = map[string]string{images: filepath.Dir(images)}
-	if _, err := ApplyOptions(context.Background(), env, optionsInput(OptionsSpec{ImageFolders: &[]string{images, mkdir(t, "more")}}), true); err != nil {
+	if _, err := ApplyOptions(context.Background(), env, optionsInput(OptionsSpec{ImageFolders: &[]string{images, outsideProfiles(t, "more")}}), true); err != nil {
 		t.Fatalf("over WinRM: %v", err)
 	}
+}
+
+// outsideProfiles is a new folder link mode takes as an image folder: the
+// Windows CI's temp folder is under a profile's AppData, which it refuses.
+func outsideProfiles(t *testing.T, name string) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return mkdir(t, name)
+	}
+	d, err := os.MkdirTemp(os.Getenv("SystemDrive")+`\`, "dg-"+name+"-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	return d
 }
 
 func unlinkBox(t *testing.T, sys *fakeSys) {
