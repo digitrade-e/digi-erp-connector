@@ -1,0 +1,219 @@
+package link
+
+import (
+	"bufio"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/pkg/linkproto"
+)
+
+// fakeConfig is config.yaml as the watch loads it: the test changes it and touches the file the watch stats.
+type fakeConfig struct {
+	mu   sync.Mutex
+	cfg  config.Config
+	err  error
+	path string
+	n    int
+}
+
+func newFakeConfig(t *testing.T, listen string) *fakeConfig {
+	c := &fakeConfig{path: filepath.Join(t.TempDir(), "config.yaml")}
+	c.set(t, func(cfg *config.Config) { cfg.APIListen = listen })
+	return c
+}
+
+func (c *fakeConfig) load() (config.Config, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg, c.err
+}
+
+func (c *fakeConfig) set(t *testing.T, f func(*config.Config)) {
+	t.Helper()
+	c.mu.Lock()
+	f(&c.cfg)
+	c.n++
+	c.mu.Unlock()
+	// a different size each time, so the stat sees the change whatever the clock's resolution
+	if err := os.WriteFile(c.path, []byte(strings.Repeat("x", c.n)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func namedAPI(t *testing.T, name string) *httptest.Server {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, name) }))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// get sends one request over a fresh data stream and returns the body ("" when the stream was closed unanswered).
+func get(t *testing.T, rc *relayConn) string {
+	t.Helper()
+	st, err := rc.sess.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	_ = st.SetDeadline(time.Now().Add(10 * time.Second))
+	_, _ = st.Write([]byte{linkproto.StreamData})
+	_, _ = st.Write([]byte("GET /api/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"))
+	resp, err := http.ReadResponse(bufio.NewReader(st), nil)
+	if err != nil {
+		return ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
+
+// An apply that moves the daemon's port reaches the data path at the next stream, with no restart of the link
+// (plan 086 C5) — and until the daemon restarts on it, the old address still answers.
+func TestADataStreamFollowsTheDaemonsAddress(t *testing.T) {
+	one, two := namedAPI(t, "one"), namedAPI(t, "two")
+	fc := newFakeConfig(t, one.Listener.Addr().String())
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	_, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "one" {
+		t.Fatalf("first stream: %q", got)
+	}
+	fc.set(t, func(c *config.Config) { c.APIListen = two.Listener.Addr().String() })
+	if got := get(t, rc); got != "two" {
+		t.Fatalf("after the port moved: %q", got)
+	}
+	// config.yaml names a port nothing listens on yet (saved, not restarted): the last address answers
+	idle := httptest.NewServer(http.NotFoundHandler())
+	idleAddr := idle.Listener.Addr().String()
+	idle.Close()
+	fc.set(t, func(c *config.Config) { c.APIListen = idleAddr })
+	if got := get(t, rc); got != "two" {
+		t.Fatalf("a port nothing listens on: %q", got)
+	}
+	if !watch.Log.(*testLog).has("now at " + idleAddr) {
+		t.Fatal("the change was not logged")
+	}
+}
+
+// TLS turned on by an apply (a new self-signed pair) is picked up the same way, trusting only the new certificate.
+func TestADataStreamFollowsTLS(t *testing.T) {
+	plain := namedAPI(t, "plain")
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, "tls") }))
+	t.Cleanup(secure.Close)
+	certFile := filepath.Join(t.TempDir(), "cert.pem")
+	_ = os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secure.Certificate().Raw}), 0o600)
+	fc := newFakeConfig(t, plain.Listener.Addr().String())
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	_, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "plain" {
+		t.Fatalf("%q", got)
+	}
+	fc.set(t, func(c *config.Config) {
+		c.APIListen, c.TLS = secure.Listener.Addr().String(), config.TLSConfig{CertFile: certFile, KeyFile: certFile + ".key"}
+	})
+	if got := get(t, rc); got != "tls" {
+		t.Fatalf("after TLS was turned on: %q", got)
+	}
+	if s := watch.Status(); !s.TLS || !s.CertReadable || s.Address != secure.Listener.Addr().String() || s.Previous != plain.Listener.Addr().String() {
+		t.Fatalf("status %+v", s)
+	}
+}
+
+// A fresh install has no config.yaml: the link starts anyway (commands work), and data streams wait for one.
+func TestTheLinkStartsWithoutConfigYAML(t *testing.T) {
+	m := testMachine(t)
+	m.LoadDaemon = func() (config.Config, error) { return config.Config{}, config.ErrNotFound }
+	log := &testLog{}
+	m.Log = log
+	cfg, err := m.Config()
+	if err != nil {
+		t.Fatalf("no config.yaml stopped the link: %v", err)
+	}
+	if ts := cfg.Daemon.Targets(); len(ts) != 0 {
+		t.Fatalf("targets %+v", ts)
+	}
+	if s := cfg.Daemon.Status(); !strings.Contains(s.Error, "config not found") || s.Address != "" {
+		t.Fatalf("status %+v", s)
+	}
+	if !log.has("data streams wait") {
+		t.Fatal("not logged")
+	}
+}
+
+// An unreadable config.yaml keeps the last address known: the daemon still runs on it.
+func TestAnUnreadableConfigKeepsTheLastAddress(t *testing.T) {
+	fc := newFakeConfig(t, "127.0.0.1:8082")
+	w := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: &testLog{}}
+	if ts := w.Targets(); len(ts) != 1 || ts[0].Addr != "127.0.0.1:8082" {
+		t.Fatal(ts)
+	}
+	fc.set(t, func(*config.Config) { fc.err = errors.New("yaml: line 3: did not find expected key") })
+	if ts := w.Targets(); len(ts) != 1 || ts[0].Addr != "127.0.0.1:8082" {
+		t.Fatalf("after a bad config.yaml: %+v", ts)
+	}
+	if s := w.Status(); !strings.Contains(s.Error, "line 3") {
+		t.Fatalf("status %+v", s)
+	}
+}
+
+func TestLinkStatusIsAnsweredByTheLink(t *testing.T) {
+	fc := newFakeConfig(t, "0.0.0.0:8083")
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path}
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	proxy := &ProxyFinder{Explicit: "http://svc:proxy-pass@proxy.b4l.local:3128"}
+	b, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon, c.Proxy = watch, proxy })
+	b.link.status.failed(errors.New(`proxyconnect tcp: dial http://svc:proxy-pass@proxy.b4l.local:3128: refused`), time.Now())
+	raw, _ := envelope(priv, "team-1", "bfl-read", CommandLinkStatus, nil, nil, time.Now())
+	stdout, sa := send(t, rc, raw, nil)
+	if a := answerOf(sa); a.Refusal != "" || a.Exit != 0 || b.runner.count() != 0 {
+		t.Fatalf("answer %+v, %d provision runs", a, b.runner.count())
+	}
+	if strings.Contains(string(stdout), "proxy-pass") {
+		t.Fatalf("a credential left the box: %s", stdout)
+	}
+	var s LinkStatus
+	if err := json.Unmarshal(stdout, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Box != "bfl-read" || s.Build != "test" || s.Fingerprint != b.keys.Public().Fingerprint() || !s.Admin || s.Relay != r.url() {
+		t.Errorf("identity %+v", s)
+	}
+	if !s.Connection.Connected || s.Connection.Epoch != rc.epoch || s.Connection.Relay != "relay-1" || s.Connection.Since.IsZero() {
+		t.Errorf("connection %+v (epoch %d)", s.Connection, rc.epoch)
+	}
+	if s.Proxy.Via != "proxy.b4l.local:3128" || s.Proxy.Source != "link.yaml" {
+		t.Errorf("proxy %+v", s.Proxy)
+	}
+	if s.KeyEpoch.Floor != 1 || len(s.KeyEpoch.Keys) != 1 || s.KeyEpoch.Keys[0].ID != "team-1" {
+		t.Errorf("epoch %+v", s.KeyEpoch)
+	}
+	if s.Daemon.Address != "127.0.0.1:8083" || s.Daemon.TLS {
+		t.Errorf("daemon %+v", s.Daemon)
+	}
+	if s.LastConnectError == nil || !strings.Contains(s.LastConnectError.Message, "http://proxy.b4l.local:3128") {
+		t.Errorf("last error %+v", s.LastConnectError)
+	}
+	if s.Streams.Commands != 1 || s.StartedAt.IsZero() || s.UptimeSeconds < 0 {
+		t.Errorf("streams %+v started %v", s.Streams, s.StartedAt)
+	}
+	// args are refused, like hashes'
+	raw, _ = envelope(priv, "team-1", "bfl-read", CommandLinkStatus, []string{"x"}, nil, time.Now())
+	if _, sa := send(t, rc, raw, nil); answerOf(sa).Refusal != linkproto.CodeMalformed {
+		t.Fatalf("args: %+v", answerOf(sa))
+	}
+}

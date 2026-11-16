@@ -79,11 +79,14 @@ func (m Machine) Config() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	daemon, err := m.LoadDaemon()
-	if err != nil {
-		return Config{}, fmt.Errorf("the connector's config.yaml: %w", err)
+	// The daemon's address is read per data stream (plan 086 C5), not here: a config.yaml written later — by an apply
+	// over this very link on a fresh install, or one that moves the port — reaches the data path without a restart.
+	watch := &DaemonWatch{Load: m.LoadDaemon, ConfigPath: filepath.Join(m.DataDir, "config.yaml"), Log: m.Log}
+	if _, err := m.LoadDaemon(); err != nil && m.Log != nil {
+		m.Log.Warn("link: the connector's config.yaml cannot be read yet (" + err.Error() + "); commands work, data streams wait for it")
 	}
-	hc, err := HTTPClientVia(&ProxyFinder{Explicit: st.Proxy, Log: m.Log})
+	proxy := &ProxyFinder{Explicit: st.Proxy, Log: m.Log}
+	hc, err := HTTPClientVia(proxy)
 	if err != nil {
 		return Config{}, err
 	}
@@ -93,7 +96,7 @@ func (m Machine) Config() (Config, error) {
 	}
 	return Config{
 		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
-		APIAddr: LocalAddr(daemon.APIListen), APITLS: daemon.TLS.Enabled(), APICert: readCert(daemon.TLS.CertFile),
+		Daemon: watch, Proxy: proxy, Upgrade: UpgradeConfig{DataDir: m.DataDir, Protect: m.Protect},
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,
 	}, nil

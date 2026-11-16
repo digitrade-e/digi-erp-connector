@@ -47,8 +47,8 @@ func TestConfigReachesTheDaemonOnLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.APIAddr != "127.0.0.1:8082" {
-		t.Fatalf("APIAddr %q", cfg.APIAddr)
+	if ts := cfg.Daemon.Targets(); len(ts) != 1 || ts[0].Addr != "127.0.0.1:8082" || ts[0].TLS {
+		t.Fatalf("targets %+v", ts)
 	}
 	for in, want := range map[string]string{"0.0.0.0:8083": "127.0.0.1:8083", "127.0.0.1:8080": "127.0.0.1:8080", "192.168.0.5:8082": "192.168.0.5:8082"} {
 		if got := LocalAddr(in); got != want {

@@ -246,3 +246,18 @@ an absent header and bad credentials all 401; `/api/query` 404.
 The cost, recorded in decision 17: every probe now does a login round-trip, and
 the B2B backend's pre-provisioned-static-token mode no longer works against this
 connector.
+
+## 2026-11-16 — plan 086 B2: link diagnostics and upgrade over the link (for v1.0.29)
+
+Digitrade plan 086 (every connector operation through digi-mcp), builder B2, branch `feat/086-link-commands`:
+
+- `provision logs` (C4): server/link/ui logs and both services' Event Log, redacted on the box, ≤ 900 KiB; files read by
+  handle only (new `dataacl.OpenRead`/`PlainDir`).
+- `provision state` (C4): read-only diagnostics in one object (services, daemon queue, config vs start and model,
+  order/receipt numbers and indexes, pickup folder, TLS, link.yaml, disk).
+- `link-status` (C5), answered by the link; the data path re-reads the daemon's address per stream (`DaemonWatch`) —
+  the "apply moved the port, the link is stranded" bug — and the link now starts without config.yaml (a fresh install
+  could not start it at all).
+- `upgrade` / `upgrade-result` (C8, decision D2): official newer releases only, setup digest = envelope = SHA256SUMS,
+  a detached runner (copy of the link in DataDir\upgrade\<ticket>\) writes DataDir\results\upgrade-<ticket>.json;
+  the release workflow now lists the setup in SHA256SUMS.
