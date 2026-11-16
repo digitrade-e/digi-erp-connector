@@ -390,3 +390,49 @@ func TestSendOrderV2_RepeatAfterItsKeysAreGone(t *testing.T) {
 		}
 	}
 }
+
+// warnLog records warnings.
+type warnLog struct {
+	noopLogger
+	warns []string
+}
+
+func (l *warnLog) Warn(msg string) { l.warns = append(l.warns, msg) }
+
+// Review m7: GET /api/counters goes to every credential holder (the B2B shop
+// included): a store that is missing or damaged is a code, never the error's
+// text with the data directory's paths — that goes to the log, once.
+func TestCountersRoute_ErrorIsACode(t *testing.T) {
+	b := newV2Box(t)
+	if err := os.Remove(hasavshevet.CounterStorePath(b.dataDir, "b2b_test")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hasavshevet.CounterStorePath(b.dataDir, "receipts_test"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := &warnLog{}
+	h := NewCountersHandler(LogCounterErrors(log, func() []hasavshevet.CounterStatus {
+		return hasavshevet.ReportCounters(b.set, b.queue, nil, b.dataDir, b.cfg.SendOrderDir)
+	}))
+	for range 2 {
+		w := httptest.NewRecorder()
+		h(w, httptest.NewRequest(http.MethodGet, "/api/counters", nil))
+		if strings.Contains(w.Body.String(), b.dataDir) || strings.Contains(w.Body.String(), "json") {
+			t.Fatalf("the answer carries the error's text: %s", w.Body)
+		}
+		var got []map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		codes := map[string]any{}
+		for _, c := range got {
+			codes[c["key"].(string)] = c["error"]
+		}
+		if codes["b2b_test"] != "store_missing" || codes["receipts_test"] != "store_damaged" || codes["b2b"] != nil {
+			t.Errorf("error codes %v", codes)
+		}
+	}
+	if len(log.warns) != 2 || !strings.Contains(strings.Join(log.warns, "\n"), b.dataDir) {
+		t.Errorf("the log got %d lines, want the two texts once each (with their paths): %v", len(log.warns), log.warns)
+	}
+}

@@ -107,7 +107,10 @@ See [hasavshevet-send-order.md § documentRule](hasavshevet-send-order.md#docume
 ### `GET /api/counters`, `GET /api/documents/capabilities` (plan 087)
 
 Read-only. `GET /api/counters` → `[{"key","kind":"orders|receipts","min","max","last","highestIssued","remaining","test"}]`
-(+ `"retired":true`, and `"error"` when a store is missing or damaged — `last` is then 0). `last` is the last number
+(+ `"retired":true`, and `"error"` when something could not be read — a **code**, never text: `store_missing` (the
+store file does not exist, or has no folder), `store_damaged` (it holds no usable number or cannot be read) — `last`
+is then 0 — or `issued_unreadable` (the range's index or history could not be read: `highestIssued` is not known).
+The text, with its paths, is in the connector's log (review m7)). `last` is the last number
 issued, one meaning for both kinds; `highestIssued` the highest number an index entry or a history folder holds in the
 range (the index can run ahead of the store); `remaining` = `max − max(last, highestIssued)`. With no counter configured
 the box lists today's two under the keys `orders` and `receipts` (range 1–999 999 999).

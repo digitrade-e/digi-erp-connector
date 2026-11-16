@@ -21,8 +21,10 @@ type Counter struct {
 	Test      bool  `json:"test"`
 	// Retired: it issues no new number (its range stays reserved).
 	Retired bool `json:"retired,omitempty"`
-	// Error says why last or highestIssued could not be read (a missing or
-	// damaged store); they are 0 then.
+	// Error says why last or highestIssued could not be read, as a code —
+	// "store_missing", "store_damaged" or "issued_unreadable" (review m7:
+	// never the text, which names files; that goes to the connector's log);
+	// the value not read is 0 then.
 	Error string `json:"error,omitempty"`
 }
 

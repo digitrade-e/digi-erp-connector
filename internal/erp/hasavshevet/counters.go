@@ -643,9 +643,29 @@ type CounterStatus struct {
 	// InFlight counts the range's unfinished index entries (orders reserved
 	// or retryable, receipts reserved); -1 when not counted (the API route
 	// answers from memory).
-	InFlight int    `json:"inFlight"`
-	Error    string `json:"error,omitempty"`
+	InFlight int `json:"inFlight"`
+	// Error is why last or highestIssued could not be read, as a code
+	// (review m7: GET /api/counters goes to every credential holder, the B2B
+	// shop included, and the text names files under the data directory):
+	// CounterErrorStoreMissing, CounterErrorStoreDamaged or
+	// CounterErrorIssuedUnreadable. Detail is the text — for provision's
+	// state (signed, team-key holders) and the daemon's log, never the route.
+	Error  string `json:"error,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
+
+// The codes of CounterStatus.Error.
+const (
+	// CounterErrorStoreMissing: the store file does not exist (or has no
+	// folder: an empty or relative sendOrderDir).
+	CounterErrorStoreMissing = "store_missing"
+	// CounterErrorStoreDamaged: it exists but holds no usable number, or
+	// cannot be read.
+	CounterErrorStoreDamaged = "store_damaged"
+	// CounterErrorIssuedUnreadable: the index or history of its range could
+	// not be read, so highestIssued is not known.
+	CounterErrorIssuedUnreadable = "issued_unreadable"
+)
 
 // ReportCounters reads every counter of set: its last number, the highest
 // issued in its range, what remains. In the daemon q and w answer from
@@ -660,6 +680,10 @@ func ReportCounters(set *CounterSet, q *OrderQueue, w *ReceiptWriter, dataDir, s
 		var errs []string
 		if last, err := c.Last(); err != nil {
 			errs = append(errs, err.Error())
+			st.Error = CounterErrorStoreDamaged
+			if errors.Is(err, ErrCounterMissing) || !st.StorePresent {
+				st.Error = CounterErrorStoreMissing
+			}
 		} else {
 			st.Last = last
 		}
@@ -679,13 +703,16 @@ func ReportCounters(set *CounterSet, q *OrderQueue, w *ReceiptWriter, dataDir, s
 		}
 		if err != nil {
 			errs = append(errs, err.Error())
+			if st.Error == "" {
+				st.Error = CounterErrorIssuedUnreadable
+			}
 		}
 		st.HighestIssued = highest
 		top := max(st.Last, st.HighestIssued, c.Min-1)
 		if st.Remaining = c.Max - top; st.Remaining < 0 {
 			st.Remaining = 0
 		}
-		st.Error = strings.Join(errs, "; ")
+		st.Detail = strings.Join(errs, "; ")
 		out = append(out, st)
 	}
 	return out

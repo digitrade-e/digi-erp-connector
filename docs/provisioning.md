@@ -523,6 +523,8 @@ an older build, or misspelt). Index entries are read for their number and state 
 leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
 `writableFolders` (plan 087 review M1) lists every folder the connector writes documents into that accounts besides
 the administrators can write to: `{name, path, key?, typed?, receipts?, writers, error?}` — `[]` when there is none.
+`counters[].error` is a code (`store_missing`, `store_damaged`, `issued_unreadable`, as `GET /api/counters`) and
+`counters[].detail` its text (review m7).
 
 ## Behind the link (link mode)
 

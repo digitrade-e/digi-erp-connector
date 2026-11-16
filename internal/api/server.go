@@ -148,9 +148,9 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		counters = hasavshevet.NewCounterSet(cfg, deps.DataDir)
 	}
 	receiptWriter, _ := deps.ReceiptWriter.(*hasavshevet.ReceiptWriter)
-	countersHandler := handlers.NewCountersHandler(func() []hasavshevet.CounterStatus {
+	countersHandler := handlers.NewCountersHandler(handlers.LogCounterErrors(deps.Logger, func() []hasavshevet.CounterStatus {
 		return hasavshevet.ReportCounters(counters, deps.SendOrderQueue, receiptWriter, deps.DataDir, strings.TrimSpace(cfg.SendOrderDir))
-	})
+	}))
 	capabilitiesHandler := handlers.NewDocumentCapabilitiesHandler(cfg, counters)
 	sendOrderStatusHandler := handlers.NewSendOrderStatusHandler(deps.SendOrderQueue)
 	sendReceiptHandler := handlers.NewSendReceiptHandler(deps.ReceiptWriter, receiptsConfigured, deps.Logger)

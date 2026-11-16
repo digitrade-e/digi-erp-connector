@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
+	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
 
 // Plan 087 (DIG-1563): the read routes of named counters and typed folders.
@@ -17,9 +20,34 @@ import (
 // CountersReport is the counters as the box reads them now.
 type CountersReport func() []hasavshevet.CounterStatus
 
+// LogCounterErrors wraps report so that a counter's error text
+// (CounterStatus.Detail, which names files under the data directory) reaches
+// the log — once each time it changes, however often the route is asked —
+// while the route answers only its code (review m7).
+func LogCounterErrors(log logger.LoggerService, report CountersReport) CountersReport {
+	var mu sync.Mutex
+	last := map[string]string{}
+	return func() []hasavshevet.CounterStatus {
+		out := report()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range out {
+			if c.Detail == last[c.Key] {
+				continue
+			}
+			last[c.Key] = c.Detail
+			if c.Detail != "" && log != nil {
+				log.Warn(fmt.Sprintf("counter %s: %s — %s", c.Key, c.Error, c.Detail))
+			}
+		}
+		return out
+	}
+}
+
 // NewCountersHandler is GET /api/counters: [{key, kind, min, max, last,
-// highestIssued, remaining, test}] (+ retired, error when they apply), one
-// meaning of last (the last number issued) for both kinds.
+// highestIssued, remaining, test}] (+ retired, and error — a code, never the
+// text — when they apply), one meaning of last (the last number issued) for
+// both kinds.
 func NewCountersHandler(report CountersReport) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		out := []dto.Counter{}
