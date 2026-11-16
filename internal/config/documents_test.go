@@ -416,3 +416,47 @@ func TestValidateDocuments_ProductionReceiptCounterNeverIntoATestFolder(t *testi
 		t.Errorf("today's store into a test folder: %v", err)
 	}
 }
+
+// Review m11: a test folder never nests in a production folder (typed, the
+// pickup or the receipt folder), nor the reverse — an importer reading
+// subfolders would take test documents into the books; a stem never ends in
+// a digit — IMOVEIN_1 with n = 23 is IMOVEIN_123, the pickup's name for order
+// 123. BFL's layout (production receipts in production herp, test receipts
+// in test herp_test) stays valid.
+func TestValidateDocuments_TestAndProductionNeverNest(t *testing.T) {
+	if err := bflDocuments(t).ValidateOrders(); err != nil {
+		t.Fatalf("BFL's nested folders of one kind of use: %v", err)
+	}
+	for name, mutate := range map[string]func(c *Config){
+		"a test folder inside a production one": func(c *Config) {
+			c.Documents.Folders["deep_test"] = FolderConfig{Kind: DocumentKindOrders, Path: filepath.Join(c.Documents.Folders["herp_test"].Path, "..", "herp", "t"),
+				NamePattern: "T_{n}.doc", Layout: OrderFormatLegacy, Test: true}
+		},
+		"a production folder inside a test one": func(c *Config) {
+			c.Documents.Folders["deep"] = FolderConfig{Kind: DocumentKindOrders, Path: filepath.Join(c.Documents.Folders["herp_test"].Path, "prod"),
+				NamePattern: "P_{n}.doc", Layout: OrderFormatLegacy}
+		},
+		"a test folder inside the receipt folder": func(c *Config) {
+			c.Documents.Receipts = DocumentReceiptsConfig{}
+			c.Documents.Folders["herp_receipts_test"] = FolderConfig{Kind: DocumentKindReceipts, Path: filepath.Join(c.SendReceiptDir, "test"),
+				NamePattern: "KUPAIN_{n}.doc", Test: true}
+		},
+		"the pickup folder inside a test folder": func(c *Config) {
+			c.SendOrderPickupDir = filepath.Join(c.Documents.Folders["herp_test"].Path, "pickup")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := bflDocuments(t)
+			mutate(&cfg)
+			if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "nested") {
+				t.Errorf("ValidateOrders = %v, want nested refused", err)
+			}
+		})
+	}
+	for pattern, ok := range map[string]bool{"IMOVEIN_1{n}.doc": false, "A1{n}.doc": false, "{prefix}X9{n}.doc": false,
+		"A{n}.doc": true, "A_{n}.doc": true, "{prefix}X9_{n}.doc": true, "IMOVEIN_{n}.doc": true} {
+		if _, _, err := ParseNamePattern(pattern, "TMP_"); (err == nil) != ok {
+			t.Errorf("ParseNamePattern(%q) = %v, want ok %v", pattern, err, ok)
+		}
+	}
+}

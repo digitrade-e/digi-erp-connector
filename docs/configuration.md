@@ -150,9 +150,9 @@ any two counters on the box**; a store adopted twice or by the wrong kind; order
 adopting `lastOrderNumber` (or it test or retired); receipts on and receipts counters configured but none bound or
 adopting `receiptNumber` (or it retired); the key `orders` / `receipts` on a counter of the other kind (a kind with
 no configured counter keeps today's store under that implicit key); a
-folder path that is relative, is or holds `sendOrderDir`, or is another folder's; a test folder (or one of the other
+folder path that is relative, is or holds `sendOrderDir`, or is another folder's; a test folder inside a production folder (typed, the pickup or the receipt folder) or the reverse (review m11: an importer reading subfolders would take test documents into the books); a test folder (or one of the other
 kind) at the pickup or receipt folder; a name pattern outside the closed grammar (`{prefix}` optional and first, an
-ASCII stem starting with a letter, `{n}`, `.doc`; no device name); `tempPrefix` without `{prefix}` or the reverse; an
+ASCII stem starting with a letter and ending in a letter or `_` — review m11: a digit would run into the number —, `{n}`, `.doc`; no device name); `tempPrefix` without `{prefix}` or the reverse; an
 orders folder without `layout`; a test receipt counter into a production folder, or a production one (today's
 store included) into a test folder (review m10: a gap in the tax-document series); a test receipt folder with a model
 (b) receipt importer. Never downgrade a box with this block below v1.0.30.

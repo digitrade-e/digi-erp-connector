@@ -313,8 +313,11 @@ func WindowsDeviceName(name string) bool {
 	return len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '0' && stem[3] <= '9'
 }
 
-// namePatternRe is the closed grammar of a folder's file name.
-var namePatternRe = regexp.MustCompile(`^(\{prefix\})?([A-Za-z][A-Za-z0-9_]{0,31})\{n\}\.doc$`)
+// namePatternRe is the closed grammar of a folder's file name. The stem ends
+// in a letter or "_" (review m11): a stem ending in a digit runs into the
+// number — IMOVEIN_1 with n = 23 is IMOVEIN_123, another series' name for
+// order 123.
+var namePatternRe = regexp.MustCompile(`^(\{prefix\})?([A-Za-z](?:[A-Za-z0-9_]{0,30}[A-Za-z_])?)\{n\}\.doc$`)
 
 // tempPrefixRe is the grammar of a folder's temporary prefix.
 var tempPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,15}$`)
@@ -328,7 +331,7 @@ var tempPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,15}$`)
 func ParseNamePattern(pattern, tempPrefix string) (hasPrefix bool, stem string, err error) {
 	m := namePatternRe.FindStringSubmatch(pattern)
 	if m == nil {
-		return false, "", fmt.Errorf("name pattern %q is not {prefix}<stem>{n}.doc: an optional {prefix}, a stem of ASCII letters, digits and _ starting with a letter (32 at most), {n}, then .doc", pattern)
+		return false, "", fmt.Errorf("name pattern %q is not {prefix}<stem>{n}.doc: an optional {prefix}, a stem of ASCII letters, digits and _ starting with a letter and ending in a letter or _ (32 at most), {n}, then .doc", pattern)
 	}
 	hasPrefix, stem = m[1] != "", m[2]
 	forms := []string{stem}
@@ -526,6 +529,31 @@ func (c Config) validateFolders() error {
 		for _, b := range keys[i+1:] {
 			if sameDir(c.Documents.Folders[a].Path, c.Documents.Folders[b].Path, fold) {
 				return fmt.Errorf("folders %s and %s are the same folder: each key is a folder of its own", a, b)
+			}
+		}
+	}
+	// Review m11: a test folder is never inside a production folder, nor the
+	// reverse — an importer that reads subfolders would take test documents
+	// into the books. The pickup and receipt folders are production folders.
+	type named struct {
+		name, path string
+		test       bool
+	}
+	var all []named
+	for _, k := range keys {
+		all = append(all, named{"folder " + k, c.Documents.Folders[k].Path, c.Documents.Folders[k].Test})
+	}
+	if pickup != "" {
+		all = append(all, named{"the sendOrderPickupDir", pickup, false})
+	}
+	if receipt != "" {
+		all = append(all, named{"the sendReceiptDir", receipt, false})
+	}
+	for _, a := range all {
+		for _, b := range all {
+			if a.test && !b.test && (insideDir(a.path, b.path, fold) || insideDir(b.path, a.path, fold)) {
+				return fmt.Errorf("%s (%s, a test folder) and %s (%s, a production folder) are nested: an importer that reads subfolders would take test documents into the books",
+					a.name, a.path, b.name, b.path)
 			}
 		}
 	}

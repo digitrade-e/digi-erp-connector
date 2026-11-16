@@ -421,14 +421,14 @@ Each folder named is set whole (an object) or removed (`null`); folders not name
 folder's path replaces `sendReceiptDir`, its pattern the receipt file's name (`KUPAIN.prm` keeps its name).
 
 Checked before any write: the name pattern's closed grammar (`{prefix}` optional and first, a stem of ASCII letters,
-digits and `_` starting with a letter, `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
+digits and `_` starting with a letter and ending in a letter or `_` (review m11: `IMOVEIN_1{n}` with n = 23 is `IMOVEIN_123`), `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
 is `COM1.doc`), `tempPrefix` exactly with `{prefix}` (orders only), `layout` `official`/`legacy` for orders; the
 folder exists (`folder_missing`; the connector never creates it), is not a link or junction and not inside the data
 directory (`folder_forbidden`), and only the administrators can write to it — and to the receipt folder a binding
 names (`folder_writable`, plan 087 review M1: `allowWritable` accepts it over WinRM with a warning); behind the link a
 plain local path outside the system folders (link mode's rules), never `allowWritable`.
 The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
-distinct; a test folder never the pickup or receipt folder; a test counter only into a test folder, and a test receipt
+distinct; a test folder never the pickup or receipt folder, and never inside a production folder (typed, pickup or receipt) nor holding one (review m11); a test counter only into a test folder, and a test receipt
 folder only from a test counter (review m10; a documentRule is held to the same at the route); no model (b)
 receipt importer with a test receipt folder (it would import test receipts into the books). A folder with
 unfinished orders frozen for it (reserved, or waiting for a resend) is not removed and not changed at all — path,
