@@ -1,0 +1,536 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// bflDocuments is BFL's box as plan 087 sets it: today's order counter and
+// receipt store adopted as b2b and receipts, test counters beside them, and
+// typed folders for both kinds, production and test.
+func bflDocuments(t *testing.T) Config {
+	t.Helper()
+	root := t.TempDir()
+	dir := func(parts ...string) string {
+		p := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	return Config{
+		ERP:                ERPHasavshevet,
+		SendOrderDir:       dir("digi", "orders"),
+		SendOrderPickupDir: dir("herp"),
+		SendOrderFormat:    OrderFormatLegacy,
+		SendReceiptDir:     dir("herp", "receipts"),
+		Documents: DocumentsConfig{
+			Counters: map[string]CounterConfig{
+				"b2b":           {Kind: DocumentKindOrders, Min: 1_000_000, Max: 1_999_999, Store: CounterStoreLastOrderNumber},
+				"receipts":      {Kind: DocumentKindReceipts, Min: 500_000, Max: 599_999, Store: CounterStoreReceiptNumber},
+				"b2b_test":      {Kind: DocumentKindOrders, Min: 9_000_000, Max: 9_099_999, Test: true},
+				"receipts_test": {Kind: DocumentKindReceipts, Min: 9_100_000, Max: 9_199_999, Test: true},
+			},
+			Folders: map[string]FolderConfig{
+				"herp":               {Kind: DocumentKindOrders, Path: dir("herp"), NamePattern: "{prefix}IMOVEIN_{n}.doc", TempPrefix: "TMP_", Layout: OrderFormatLegacy},
+				"herp_receipts":      {Kind: DocumentKindReceipts, Path: dir("herp", "receipts"), NamePattern: "KUPAIN_{n}.doc"},
+				"herp_test":          {Kind: DocumentKindOrders, Path: dir("herp_test"), NamePattern: "{prefix}IMOVEIN_{n}.doc", TempPrefix: "TMP_", Layout: OrderFormatLegacy, Test: true},
+				"herp_receipts_test": {Kind: DocumentKindReceipts, Path: dir("herp_test", "receipts"), NamePattern: "KUPAIN_{n}.doc", Test: true},
+			},
+			Receipts: DocumentReceiptsConfig{Folder: "herp_receipts", Counter: "receipts"},
+		},
+	}
+}
+
+func TestValidateDocuments_BFLBoxIsAccepted(t *testing.T) {
+	cfg := bflDocuments(t)
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("ValidateOrders: %v", err)
+	}
+	if got := cfg.DefaultOrderCounterKey(); got != "b2b" {
+		t.Errorf("default order counter %q, want b2b", got)
+	}
+	if got := cfg.ReceiptCounterKey(); got != "receipts" {
+		t.Errorf("receipt counter %q, want receipts", got)
+	}
+	if got := cfg.ReceiptDir(); got != cfg.Documents.Folders["herp_receipts"].Path {
+		t.Errorf("receipt dir %q", got)
+	}
+}
+
+func TestValidateDocuments_EmptyIsTodaysBehaviour(t *testing.T) {
+	cfg := Config{ERP: ERPHasavshevet, SendOrderDir: t.TempDir()}
+	if err := cfg.ValidateDocuments(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CountersConfigured() || cfg.DefaultOrderCounterKey() != ImplicitOrderCounterKey || cfg.ReceiptCounterKey() != ImplicitReceiptCounterKey {
+		t.Error("an empty documents block must keep the implicit counters")
+	}
+	if cfg.ReceiptNamePattern() != DefaultReceiptNamePattern {
+		t.Error("an empty documents block must keep KUPAIN_{n}.doc")
+	}
+	// The block is omitted from config.yaml when empty: an apply that changes
+	// nothing writes nothing.
+	out, err := Marshal(cfg)
+	if err != nil || strings.Contains(string(out), "documents") {
+		t.Errorf("an empty documents block is written: %s %v", out, err)
+	}
+}
+
+func TestValidateDocuments_Refusals(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(c *Config)
+		want   string
+	}{
+		{"sap", func(c *Config) { c.ERP = ERPSAP }, "Hashavshevet"},
+		{"counter key with a slash", func(c *Config) {
+			c.Documents.Counters["b2b/test"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 8_000_001}
+		}, "counter key"},
+		{"counter key upper case", func(c *Config) {
+			c.Documents.Counters["B2B2"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 8_000_001}
+		}, "counter key"},
+		{"unknown kind", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: "invoices", Min: 8_000_000, Max: 8_000_001}
+		}, "kind"},
+		{"max past nine digits", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 1_000_000_000}
+		}, "range"},
+		{"min zero", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: DocumentKindOrders, Min: 0, Max: 5}
+		}, "range"},
+		{"min above max", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_002, Max: 8_000_001}
+		}, "range"},
+		{"overlap between test and production", func(c *Config) {
+			ctr := c.Documents.Counters["b2b_test"]
+			ctr.Min = 1_999_999
+			c.Documents.Counters["b2b_test"] = ctr
+		}, "overlap"},
+		{"overlap between an order and a receipt counter", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: DocumentKindReceipts, Min: 1_500_000, Max: 1_500_001}
+		}, "overlap"},
+		{"overlap with a retired counter", func(c *Config) {
+			c.Documents.Counters["old"] = CounterConfig{Kind: DocumentKindOrders, Min: 1, Max: 999_999, Retired: true}
+			c.Documents.Counters["new"] = CounterConfig{Kind: DocumentKindOrders, Min: 999_999, Max: 999_999}
+		}, "overlap"},
+		{"unknown store", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 8_000_001, Store: "other.json"}
+		}, "store"},
+		{"order store on a receipts counter", func(c *Config) {
+			ctr := c.Documents.Counters["b2b"]
+			ctr.Kind = DocumentKindReceipts
+			c.Documents.Counters["b2b"] = ctr
+		}, "store"},
+		{"store adopted twice", func(c *Config) {
+			c.Documents.Counters["x"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 8_000_001, Store: CounterStoreLastOrderNumber}
+		}, "both adopt"},
+		{"orders without the order counter adopted", func(c *Config) {
+			ctr := c.Documents.Counters["b2b"]
+			ctr.Store = ""
+			c.Documents.Counters["b2b"] = ctr
+		}, "adopts the order counter"},
+		{"default order counter is a test counter", func(c *Config) {
+			ctr := c.Documents.Counters["b2b"]
+			ctr.Test = true
+			c.Documents.Counters["b2b"] = ctr
+		}, "test counter"},
+		{"default order counter retired", func(c *Config) {
+			ctr := c.Documents.Counters["b2b"]
+			ctr.Retired = true
+			c.Documents.Counters["b2b"] = ctr
+		}, "retired"},
+		{"receipt counter retired", func(c *Config) {
+			ctr := c.Documents.Counters["receipts"]
+			ctr.Retired = true
+			c.Documents.Counters["receipts"] = ctr
+		}, "retired"},
+		{"test receipt counter into a production folder", func(c *Config) {
+			c.Documents.Receipts.Counter = "receipts_test"
+		}, "test folder"},
+		{"receipts bound to an orders folder", func(c *Config) { c.Documents.Receipts.Folder = "herp" }, "not receipts"},
+		{"receipts bound to an unknown folder", func(c *Config) { c.Documents.Receipts.Folder = "nope" }, "not a configured folder"},
+		{"receipts bound to an orders counter", func(c *Config) { c.Documents.Receipts.Counter = "b2b" }, "not receipts"},
+		{"receipts bound to an unknown counter", func(c *Config) { c.Documents.Receipts.Counter = "nope" }, "not a configured counter"},
+		{"test receipt folder with an importer", func(c *Config) {
+			c.Documents.Receipts = DocumentReceiptsConfig{Folder: "herp_receipts_test", Counter: "receipts_test"}
+			c.HasReceiptBatFile = filepath.Join(c.SendOrderDir, "kupain.bat")
+		}, "import test receipts"},
+		{"folder key with a slash", func(c *Config) {
+			f := c.Documents.Folders["herp_test"]
+			delete(c.Documents.Folders, "herp_test")
+			c.Documents.Folders["herp/test"] = f
+		}, "folder key"},
+		{"relative path", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.Path = "herp_test" }) }, "absolute"},
+		{"path with surrounding spaces", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.Path = " " + f.Path }) }, "absolute"},
+		{"pattern without {n}", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}IMOVEIN.doc" })
+		}, "name pattern"},
+		{"pattern with a separator", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = `{prefix}..\x\IMOVEIN_{n}.doc` })
+		}, "name pattern"},
+		{"pattern ending .bat", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}IMOVEIN_{n}.bat" })
+		}, "name pattern"},
+		{"pattern not ASCII", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}הזמנה_{n}.doc" })
+		}, "name pattern"},
+		{"pattern with text after {n}", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}IMOVEIN_{n}_x.doc" })
+		}, "name pattern"},
+		{"pattern with {prefix} not first", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "IMOVEIN_{prefix}{n}.doc" })
+		}, "name pattern"},
+		{"pattern with two {n}", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}A{n}{n}.doc" })
+		}, "name pattern"},
+		{"device name COM", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}COM{n}.doc" })
+		}, "device"},
+		{"device name lpt", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "lpt{n}.doc"; f.TempPrefix = "" })
+		}, "device"},
+		{"device name through the prefix", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "{prefix}M{n}.doc"; f.TempPrefix = "CO" })
+		}, "device"},
+		{"prefix without {prefix}", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.NamePattern = "IMOVEIN_{n}.doc" })
+		}, "temporary prefix"},
+		{"{prefix} without a prefix", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.TempPrefix = "" }) }, "temporary prefix"},
+		{"prefix with a dot", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.TempPrefix = "T.MP" }) }, "temporary prefix"},
+		{"orders folder without a layout", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.Layout = "" }) }, "layout"},
+		{"receipts folder with a prefix", func(c *Config) {
+			setFolder(c, "herp_receipts_test", func(f *FolderConfig) { f.NamePattern = "{prefix}KUPAIN_{n}.doc"; f.TempPrefix = "TMP_" })
+		}, "never temporary"},
+		{"receipts folder with a layout", func(c *Config) {
+			setFolder(c, "herp_receipts_test", func(f *FolderConfig) { f.Layout = OrderFormatLegacy })
+		}, "no layout"},
+		{"folder kind unknown", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.Kind = "files" }) }, "kind"},
+		{"folder is the sendOrderDir", func(c *Config) { setFolder(c, "herp_test", func(f *FolderConfig) { f.Path = c.SendOrderDir }) }, "sendOrderDir"},
+		{"folder holds the sendOrderDir", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.Path = filepath.Dir(c.SendOrderDir) })
+		}, "sendOrderDir"},
+		{"test folder is the pickup folder", func(c *Config) {
+			setFolder(c, "herp", func(f *FolderConfig) { f.Path += "_moved" })
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.Path = c.SendOrderPickupDir })
+		}, "sendOrderPickupDir"},
+		{"receipts folder is the pickup folder", func(c *Config) {
+			setFolder(c, "herp", func(f *FolderConfig) { f.Path += "_moved" })
+			setFolder(c, "herp_receipts_test", func(f *FolderConfig) { f.Path = c.SendOrderPickupDir; f.Test = false })
+		}, "sendOrderPickupDir"},
+		{"test folder is the receipt folder", func(c *Config) {
+			setFolder(c, "herp_receipts", func(f *FolderConfig) { f.Path += "_moved" })
+			setFolder(c, "herp_receipts_test", func(f *FolderConfig) { f.Path = c.SendReceiptDir })
+		}, "sendReceiptDir"},
+		{"two keys, one folder", func(c *Config) {
+			setFolder(c, "herp_test", func(f *FolderConfig) { f.Path = c.Documents.Folders["herp_receipts_test"].Path; f.Test = true })
+		}, "same folder"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := bflDocuments(t)
+			tc.mutate(&cfg)
+			err := cfg.ValidateOrders()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error with %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func setFolder(c *Config, key string, f func(*FolderConfig)) {
+	v := c.Documents.Folders[key]
+	f(&v)
+	c.Documents.Folders[key] = v
+}
+
+func TestValidateDocuments_ReceiptsOnlyBoxNeedsNoOrderCounter(t *testing.T) {
+	cfg := Config{ERP: ERPHasavshevet, SendReceiptDir: t.TempDir(), Documents: DocumentsConfig{
+		Counters: map[string]CounterConfig{"receipts": {Kind: DocumentKindReceipts, Min: 1, Max: 999, Store: CounterStoreReceiptNumber}},
+	}}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("a box without orders needs no order counter: %v", err)
+	}
+	cfg.Documents.Counters = map[string]CounterConfig{"r2": {Kind: DocumentKindReceipts, Min: 1, Max: 999}}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "no counter numbers them") {
+		t.Fatalf("receipts with counters but none bound: %v", err)
+	}
+	cfg.Documents.Receipts.Counter = "r2"
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("a receipt counter of its own, bound: %v", err)
+	}
+}
+
+func TestValidateDocuments_ReceiptFolderTurnsReceiptsOn(t *testing.T) {
+	cfg := bflDocuments(t)
+	cfg.SendReceiptDir = ""
+	if !cfg.ReceiptsConfigured() || cfg.ReceiptDir() != cfg.Documents.Folders["herp_receipts"].Path {
+		t.Fatal("a bound receipts folder is the receipt folder")
+	}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Documents.Receipts = DocumentReceiptsConfig{Folder: "herp_receipts_test", Counter: "receipts_test"}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("test counter into a test folder: %v", err)
+	}
+	if cfg.ReceiptNamePattern() != "KUPAIN_{n}.doc" {
+		t.Error(cfg.ReceiptNamePattern())
+	}
+}
+
+func TestDocumentFileName(t *testing.T) {
+	tests := []struct {
+		pattern, prefix string
+		temporary       bool
+		n               int64
+		want            string
+	}{
+		{"{prefix}IMOVEIN_{n}.doc", "TMP_", false, 1000123, "IMOVEIN_1000123.doc"},
+		{"{prefix}IMOVEIN_{n}.doc", "TMP_", true, 1000123, "TMP_IMOVEIN_1000123.doc"},
+		{"KUPAIN_{n}.doc", "", false, 7, "KUPAIN_7.doc"},
+	}
+	for _, tc := range tests {
+		if got := DocumentFileName(tc.pattern, tc.prefix, tc.temporary, tc.n); got != tc.want {
+			t.Errorf("%s %v %d = %q, want %q", tc.pattern, tc.temporary, tc.n, got, tc.want)
+		}
+	}
+}
+
+func TestDocumentsClone_DoesNotShareMaps(t *testing.T) {
+	cfg := bflDocuments(t)
+	c := cfg.Documents.Clone()
+	c.Counters["new"] = CounterConfig{}
+	c.Folders["new"] = FolderConfig{}
+	if _, ok := cfg.Documents.Counters["new"]; ok {
+		t.Error("counters shared")
+	}
+	if _, ok := cfg.Documents.Folders["new"]; ok {
+		t.Error("folders shared")
+	}
+}
+
+func TestDocuments_RoundTripsThroughYAML(t *testing.T) {
+	cfg := bflDocuments(t)
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Parse(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := Marshal(back)
+	if string(again) != string(out) {
+		t.Errorf("not stable:\n%s\n%s", out, again)
+	}
+	if back.Documents.Counters["b2b_test"].Test != true || back.Documents.Folders["herp"].TempPrefix != "TMP_" {
+		t.Errorf("lost fields: %+v", back.Documents)
+	}
+}
+
+// A box that writes orders and receipts adopts one store, then the other:
+// the kind without a configured counter keeps today's under its implicit key.
+func TestValidateDocuments_OneKindAtATime(t *testing.T) {
+	cfg := Config{ERP: ERPHasavshevet, SendOrderDir: t.TempDir(), SendReceiptDir: t.TempDir(), Documents: DocumentsConfig{
+		Counters: map[string]CounterConfig{"b2b": {Kind: DocumentKindOrders, Min: 1_000_000, Max: 1_999_999, Store: CounterStoreLastOrderNumber}},
+	}}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("orders adopted first: %v", err)
+	}
+	if cfg.ReceiptCounterKey() != ImplicitReceiptCounterKey || !cfg.ImplicitCounter(DocumentKindReceipts) || cfg.ImplicitCounter(DocumentKindOrders) {
+		t.Errorf("receipts keep today's store: %q", cfg.ReceiptCounterKey())
+	}
+	cfg.Documents.Counters = map[string]CounterConfig{"receipts": {Kind: DocumentKindReceipts, Min: 500_000, Max: 599_999, Store: CounterStoreReceiptNumber}}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("receipts adopted first: %v", err)
+	}
+	if cfg.DefaultOrderCounterKey() != ImplicitOrderCounterKey {
+		t.Errorf("orders keep today's counter: %q", cfg.DefaultOrderCounterKey())
+	}
+	// The implicit keys are not for a counter of the other kind.
+	cfg.Documents.Counters["orders"] = CounterConfig{Kind: DocumentKindReceipts, Min: 1, Max: 9}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "today's order counter") {
+		t.Errorf("a receipts counter named orders: %v", err)
+	}
+}
+
+// Review m2: a key that is a Windows device name is refused — a counter's own
+// store is DataDir\counters\<key>.json, and aux.json names a device on
+// Windows Server 2016-2022 (a read can block).
+func TestValidDocumentKey_RefusesWindowsDeviceNames(t *testing.T) {
+	for _, k := range []string{"con", "prn", "aux", "nul", "com0", "com1", "com9", "lpt0", "lpt1", "lpt9"} {
+		if ValidDocumentKey(k) {
+			t.Errorf("%q accepted", k)
+		}
+	}
+	for _, k := range []string{"aux1", "auxiliary", "console", "nuls", "com10", "comx", "lpt_1", "com_1", "b2b", "orders"} {
+		if !ValidDocumentKey(k) {
+			t.Errorf("%q refused", k)
+		}
+	}
+	for _, name := range []string{"AUX", "aux.json", "Com1.doc", "lpt9.tar.gz", "NUL ", "con .txt", "prn"} {
+		if !WindowsDeviceName(name) {
+			t.Errorf("WindowsDeviceName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"aux1.json", "com.json", "lpt", "x.aux", "kupain_1.doc"} {
+		if WindowsDeviceName(name) {
+			t.Errorf("WindowsDeviceName(%q) = true", name)
+		}
+	}
+	cfg := bflDocuments(t)
+	cfg.Documents.Counters["aux"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 8_000_001}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "device name") {
+		t.Errorf("counter aux: %v", err)
+	}
+	cfg = bflDocuments(t)
+	cfg.Documents.Folders["nul"] = FolderConfig{Kind: DocumentKindOrders, Path: t.TempDir(), NamePattern: "X_{n}.doc", Layout: OrderFormatLegacy}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "device name") {
+		t.Errorf("folder nul: %v", err)
+	}
+}
+
+// Review m10: receipts never go to a test folder from a production counter —
+// a receipt is a tax document, and a production number written where the
+// books never import it is a gap in the series. Today's store (the implicit
+// counter) is production too.
+func TestValidateDocuments_ProductionReceiptCounterNeverIntoATestFolder(t *testing.T) {
+	cfg := bflDocuments(t)
+	cfg.Documents.Receipts = DocumentReceiptsConfig{Folder: "herp_receipts_test", Counter: "receipts"}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "production counter receipts") {
+		t.Errorf("a production counter into a test folder: %v", err)
+	}
+	cfg.Documents.Receipts.Counter = "receipts_test"
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Errorf("the test pair: %v", err)
+	}
+	// No counter configured: today's receipt store numbers them, production.
+	legacy := Config{ERP: ERPHasavshevet, Documents: DocumentsConfig{
+		Folders:  map[string]FolderConfig{"kupain_test": {Kind: DocumentKindReceipts, Path: t.TempDir(), NamePattern: "KUPAIN_{n}.doc", Test: true}},
+		Receipts: DocumentReceiptsConfig{Folder: "kupain_test"},
+	}}
+	if err := legacy.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "production counter receipts") {
+		t.Errorf("today's store into a test folder: %v", err)
+	}
+}
+
+// Review m11: a test folder never nests in a production folder (typed, the
+// pickup or the receipt folder), nor the reverse — an importer reading
+// subfolders would take test documents into the books; a stem never ends in
+// a digit — IMOVEIN_1 with n = 23 is IMOVEIN_123, the pickup's name for order
+// 123. BFL's layout (production receipts in production herp, test receipts
+// in test herp_test) stays valid.
+func TestValidateDocuments_TestAndProductionNeverNest(t *testing.T) {
+	if err := bflDocuments(t).ValidateOrders(); err != nil {
+		t.Fatalf("BFL's nested folders of one kind of use: %v", err)
+	}
+	for name, mutate := range map[string]func(c *Config){
+		"a test folder inside a production one": func(c *Config) {
+			c.Documents.Folders["deep_test"] = FolderConfig{Kind: DocumentKindOrders, Path: filepath.Join(c.Documents.Folders["herp_test"].Path, "..", "herp", "t"),
+				NamePattern: "T_{n}.doc", Layout: OrderFormatLegacy, Test: true}
+		},
+		"a production folder inside a test one": func(c *Config) {
+			c.Documents.Folders["deep"] = FolderConfig{Kind: DocumentKindOrders, Path: filepath.Join(c.Documents.Folders["herp_test"].Path, "prod"),
+				NamePattern: "P_{n}.doc", Layout: OrderFormatLegacy}
+		},
+		"a test folder inside the receipt folder": func(c *Config) {
+			c.Documents.Receipts = DocumentReceiptsConfig{}
+			c.Documents.Folders["herp_receipts_test"] = FolderConfig{Kind: DocumentKindReceipts, Path: filepath.Join(c.SendReceiptDir, "test"),
+				NamePattern: "KUPAIN_{n}.doc", Test: true}
+		},
+		"the pickup folder inside a test folder": func(c *Config) {
+			c.SendOrderPickupDir = filepath.Join(c.Documents.Folders["herp_test"].Path, "pickup")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := bflDocuments(t)
+			mutate(&cfg)
+			if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "nested") {
+				t.Errorf("ValidateOrders = %v, want nested refused", err)
+			}
+		})
+	}
+	for pattern, ok := range map[string]bool{"IMOVEIN_1{n}.doc": false, "A1{n}.doc": false, "{prefix}X9{n}.doc": false,
+		"A{n}.doc": true, "A_{n}.doc": true, "{prefix}X9_{n}.doc": true, "IMOVEIN_{n}.doc": true} {
+		if _, _, err := ParseNamePattern(pattern, "TMP_"); (err == nil) != ok {
+			t.Errorf("ParseNamePattern(%q) = %v, want ok %v", pattern, err, ok)
+		}
+	}
+}
+
+// Review R1b: documents.trustedWriters holds at most 8 single accounts by SID
+// — never a well-known or built-in SID, which are groups of every user.
+func TestValidateDocuments_TrustedWriters(t *testing.T) {
+	ok := TrustedWriter{SID: "S-1-5-21-1004336348-1177238915-682003330-1105", Name: `BFL\wizsched`}
+	cfg := bflDocuments(t)
+	cfg.Documents.TrustedWriters = []TrustedWriter{ok}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("one user account: %v", err)
+	}
+	if !cfg.TrustedSIDs()[ok.SID] {
+		t.Error("TrustedSIDs misses it")
+	}
+	for name, sid := range map[string]string{
+		"Everyone": "S-1-1-0", "Users": "S-1-5-32-545", "Authenticated Users": "S-1-5-11", "INTERACTIVE": "S-1-5-4",
+		"NETWORK": "S-1-5-2", "ANONYMOUS": "S-1-5-7", "LOCAL SERVICE": "S-1-5-19", "NETWORK SERVICE": "S-1-5-20", "SYSTEM": "S-1-5-18",
+		"Domain Users": "S-1-5-21-1004336348-1177238915-682003330-513", "Domain Guests": "S-1-5-21-1004336348-1177238915-682003330-514",
+		"Domain Computers": "S-1-5-21-1004336348-1177238915-682003330-515", "Guest": "S-1-5-21-1004336348-1177238915-682003330-501",
+		"not a SID": "BFL\\wizsched",
+	} {
+		cfg := bflDocuments(t)
+		cfg.Documents.TrustedWriters = []TrustedWriter{{SID: sid, Name: name}}
+		if err := cfg.ValidateOrders(); err == nil {
+			t.Errorf("%s (%s) accepted as a trusted writer", name, sid)
+		}
+	}
+	cfg = bflDocuments(t)
+	cfg.Documents.TrustedWriters = []TrustedWriter{ok, ok}
+	if err := cfg.ValidateOrders(); err == nil {
+		t.Error("the same account twice accepted")
+	}
+	cfg.Documents.TrustedWriters = nil
+	for i := range MaxTrustedWriters + 1 {
+		cfg.Documents.TrustedWriters = append(cfg.Documents.TrustedWriters, TrustedWriter{SID: fmt.Sprintf("S-1-5-21-1-2-3-%d", 2000+i), Name: fmt.Sprintf("u%d", i)})
+	}
+	if err := cfg.ValidateOrders(); err == nil {
+		t.Errorf("%d trusted writers accepted", MaxTrustedWriters+1)
+	}
+}
+
+// Plan 087 review T1: the folders an importer runs in or from — trusted
+// writers count there.
+func TestImporterFolders(t *testing.T) {
+	root := t.TempDir()
+	at := func(p ...string) string { return filepath.Join(append([]string{root}, p...)...) }
+	c := Config{ERP: ERPHasavshevet, SendOrderDir: at("orders"), HasExePath: at("Hash7", "has.exe"), HasParamFile: "digi.prm",
+		Documents: DocumentsConfig{Folders: map[string]FolderConfig{"herp_receipts": {Kind: DocumentKindReceipts, Path: at("kupain")}},
+			Receipts: DocumentReceiptsConfig{Folder: "herp_receipts"}},
+		HasReceiptBatFile: at("bats", "kupain.bat")}
+	c.Documents.TrustedWriters = []TrustedWriter{{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}}
+	for _, d := range []string{at("orders"), at("Hash7"), at("kupain"), at("bats")} {
+		if !c.ExecutesIn(d) || len(c.TrustedSIDsFor(d)) != 0 {
+			t.Errorf("%s: an importer runs in or from it, trusted %v", d, c.TrustedSIDsFor(d))
+		}
+	}
+	if c.ExecutesIn(at("herp")) || len(c.TrustedSIDsFor(at("herp"))) != 1 {
+		t.Errorf("herp: no importer runs there")
+	}
+	if got := c.ImporterFiles(); !slices.Contains(got, at("orders", "digi.prm")) || !slices.Contains(got, at("bats", "kupain.bat")) {
+		t.Errorf("importer files %v", got)
+	}
+	// Model (a): the scheduler reads the pickup folder; no importer runs in sendOrderDir.
+	c.SendOrderPickupDir = at("pickup")
+	if c.ExecutesIn(at("orders")) || c.ExecutesIn(at("pickup")) {
+		t.Error("model (a): an importer folder")
+	}
+	// No receipt importer: the receipt folder is the scheduler's.
+	c.HasReceiptBatFile = ""
+	if c.ExecutesIn(at("kupain")) {
+		t.Error("no receipt importer: the receipt folder counted as one")
+	}
+}

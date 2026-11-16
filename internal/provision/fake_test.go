@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
+	"hash/fnv"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,8 +103,19 @@ type fakeSys struct {
 	instances  []SQLInstance
 	host       HostInfo
 	candidates []string
-	writers    map[string][]string // who besides the administrators can change a file
-	daemon     *fakeDaemon
+	writers    map[string][]string        // who besides the administrators can change a file (or a folder: FolderWriters)
+	accounts   map[string]dataacl.Account // LookupAccount, by lower-case name
+	// folder-acl: the folders' security (one SDDL each), plan errors, parent writers
+	folderSD      map[string]string
+	lockdownErr   map[string]error
+	parentWriters map[string][]dataacl.Writer
+	executables   map[string][]string // the plan's executable entries, by folder
+	finalPath     map[string]string   // the plan's final path, by folder (default \\?\<dir>)
+	lastExecExts  map[string]bool     // what the last plan was asked to flag
+	lastTrusted   []string            // and whom it trusted
+	folderRules   FolderRules         // FolderRules (review T3); none by default
+	reparse       map[string]string   // ReparsePointOn by path; otherwise only the path itself is looked at
+	daemon        *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
 	calls   []string
@@ -247,6 +261,75 @@ func (s *fakeSys) Writers(path string) ([]string, error) {
 		return w, nil
 	}
 	return []string{}, nil
+}
+
+// FolderWriters answers from the same map, keyed by the folder, each name
+// with its SID (accounts, else a fake one derived from the name).
+func (s *fakeSys) FolderWriters(dir string) ([]dataacl.Writer, error) {
+	out := []dataacl.Writer{}
+	for _, n := range s.writers[dir] {
+		out = append(out, dataacl.Writer{Name: n, SID: s.sidOf(n)})
+	}
+	return out, nil
+}
+
+func (s *fakeSys) sidOf(name string) string {
+	if a, ok := s.accounts[strings.ToLower(name)]; ok {
+		return a.SID
+	}
+	h := fnv.New32a()
+	h.Write([]byte(strings.ToLower(name)))
+	return fmt.Sprintf("S-1-5-21-0-0-0-%d", 1000+h.Sum32()%100000)
+}
+
+// The folder-acl fakes: a folder's security is one SDDL string; a lock-down
+// replaces it (and clears its writers), a restore puts the recorded one back.
+func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
+	s.call("plan-lockdown:" + filepath.Base(dir))
+	s.lastExecExts, s.lastTrusted = execExts, trusted
+	if err := s.lockdownErr[dir]; err != nil {
+		return dataacl.LockdownPlan{}, err
+	}
+	cur := s.folderSD[dir]
+	if cur == "" {
+		cur = "O:S-1-5-21-0-0-0-1001D:AI(A;OICIID;0x1301bf;;;BU)"
+	}
+	final := s.finalPath[dir]
+	if final == "" {
+		final = `\\?\` + dir
+	}
+	plan := dataacl.LockdownPlan{Entries: []dataacl.FolderEntry{{Rel: "", FileID: "id-" + dir, SDDL: cur}, {Rel: "history", FileID: "id-h", SDDL: cur}},
+		Principals:     []dataacl.PrincipalRights{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`, Before: "modify", After: "read", Entries: 2}},
+		Owners:         []dataacl.OwnerChange{{SID: "S-1-5-21-0-0-0-1001", Name: `BFL\olduser`, Entries: 1}},
+		EntriesChanged: 2, Executables: s.executables[dir], FinalPath: final, ParentWriters: s.parentWriters[dir]}
+	return plan, nil
+}
+
+func (s *fakeSys) ApplyFolderLockdown(dir string, _ []string, plan dataacl.LockdownPlan) (int, error) {
+	s.call("lockdown:" + filepath.Base(dir))
+	if s.folderSD == nil {
+		s.folderSD = map[string]string{}
+	}
+	s.folderSD[dir] = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	delete(s.writers, dir)
+	return len(plan.Entries), nil
+}
+
+func (s *fakeSys) RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (int, int, error) {
+	s.call("restore-acl:" + filepath.Base(dir))
+	if s.folderSD == nil {
+		s.folderSD = map[string]string{}
+	}
+	s.folderSD[dir] = entries[0].SDDL
+	return len(entries), 0, nil
+}
+
+// LookupAccount answers from accounts (keyed by the lower-case name).
+func (s *fakeSys) LookupAccount(name string) (dataacl.Account, error) {
+	if a, ok := s.accounts[strings.ToLower(name)]; ok {
+		return a, nil
+	}
+	return dataacl.Account{}, fmt.Errorf("%w: %s", dataacl.ErrAccountUnknown, name)
 }
 
 func (s *fakeSys) ImporterCandidates() ([]string, error) {
@@ -449,4 +532,19 @@ func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 	sys.calls = nil
 	d.set(func(d *fakeDaemon) { d.user, d.pass = cfg.Auth.Username, cfg.Auth.Password })
 	return sys, &fakeDB{saPass: testSaPass}, orders
+}
+
+func (s *fakeSys) FolderRules() FolderRules { return s.folderRules }
+
+// ReparsePointOn is the test's answer for path, else whether path itself is
+// a link: the test's temp folder above it is the machine's (on macOS /var is
+// a symbolic link).
+func (s *fakeSys) ReparsePointOn(path string) (string, error) {
+	if at, ok := s.reparse[path]; ok {
+		return at, nil
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return path, nil
+	}
+	return "", nil
 }

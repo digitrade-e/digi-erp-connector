@@ -91,10 +91,19 @@ func loopbackAddr(addr string) bool {
 // linkPathRefusal is why p is not a path link mode takes, or "": an absolute path on a local drive (X:\…, never
 // UNC or \\?\), with no ".", ".." or empty part — os.Stat and the ACL check resolve ".." by text, so a path that
 // climbs is approved for the file it ends in — and none of the characters cmd.exe reads (the importer's BAT runs as
-// cmd.exe /C <path>, and Go does not escape &) (review 2026-11-15).
+// cmd.exe /C <path>, and Go does not escape &) (review 2026-11-15). The system-folder rules compare text, so no
+// spelling Windows resolves to another folder either (plan 087 review m6): no "~" (an 8.3 short name, C:\PROGRA~1),
+// no ":" after the drive letter (a stream, C:\Windows::$INDEX_ALLOCATION), no part ending in "." or " " (Windows
+// drops it: C:\Windows.\System32 is C:\Windows\System32).
 func linkPathRefusal(p string) string {
 	if strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f || strings.ContainsRune(`&|<>^%!()"*?;,`, r) }) {
 		return "it has a character cmd.exe reads"
+	}
+	if strings.Contains(p, "~") {
+		return "it has a ~ (an 8.3 short name names a folder by another spelling): use the long name"
+	}
+	if winDrivePath.MatchString(p) && strings.Contains(p[2:], ":") {
+		return "it has a : after the drive letter (a file stream)"
 	}
 	var parts []string
 	switch {
@@ -112,6 +121,9 @@ func linkPathRefusal(p string) string {
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." || strings.Contains(part, "/") {
 			return "it has an empty, . or .. part"
+		}
+		if strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+			return "a part of it ends in a dot or a space (Windows drops them, so it names another folder)"
 		}
 	}
 	return ""

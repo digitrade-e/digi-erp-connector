@@ -66,6 +66,36 @@ const (
 	CodeReceiptStoreExists   = "receipt_store_exists" // receipt-seed: the store exists (a seed is written once)
 	CodeReceiptSeedLow       = "receipt_seed_low"     // receipt-seed: at or below a receipt already written
 	CodeReceiptDirMissing    = "receipt_dir_missing"  // receipts: sendReceiptDir is not a folder here
+
+	// plan 087: the counters and documents commands
+	CodeCounterUnknown   = "counter_unknown"    // counters: no counter of that key
+	CodeCounterExists    = "counter_exists"     // counters create: the key is taken
+	CodeCounterRetired   = "counter_retired"    // counters: the counter is retired
+	CodeCounterMoved     = "counter_moved"      // counters start-from: last is not expectLast (someone issued a number)
+	CodeCounterLower     = "counter_lower"      // counters: a number at or below one issued (a counter never moves back)
+	CodeCounterRange     = "counter_range"      // counters: the range would exclude the last or an issued number
+	CodeCounterInFlight  = "counter_in_flight"  // counters retire / range: orders or receipts of its range not finished (range: left out)
+	CodeCounterStore     = "counter_store"      // counters: its store cannot be read (or is missing)
+	CodeIndexUnreadable  = "index_unreadable"   // counters: index entries of the kind cannot be read (acceptUnreadable: the count)
+	CodeFolderUnknown    = "folder_unknown"     // documents: no folder of that key to remove
+	CodeFolderMissing    = "folder_missing"     // documents: the path is not a folder on this machine
+	CodeFolderForbidden  = "folder_forbidden"   // documents: a link, inside the data directory, or not a path link mode takes
+	CodeFolderInFlight   = "folder_in_flight"   // documents: orders frozen for that folder are not finished
+	CodeReceiptsInFlight = "receipts_in_flight" // documents: a receipt is reserved, and the receipt folder or counter would change
+	// CodeFolderWritable: documents, receipts, orders — accounts besides the administrators can write to a folder the
+	// connector writes documents into (plan 087 review M1); allowWritable accepts it over WinRM only.
+	CodeFolderWritable = "folder_writable"
+	// CodeWriterUnknown / CodeWriterTooBroad: documents' trustedWriters (review R1b) — a name the box cannot
+	// resolve to an account / one that is not a single user account (a group, an alias, a well-known SID).
+	CodeWriterUnknown  = "writer_unknown"
+	CodeWriterTooBroad = "writer_too_broad"
+	// CodeFolderReparse / CodeFolderTooLarge: folder-acl (review R1c) — a reparse point, hard link or replaced
+	// entry in the folder (never followed or rewritten through) / more entries than a lock-down walks.
+	CodeFolderReparse  = "folder_reparse"
+	CodeFolderTooLarge = "folder_too_large"
+	// CodeFolderHasExecutables: folder-acl (review T1) — the folder holds the importer's files, or files Windows runs
+	// (PATHEXT's extensions, .dll, .ps1): a lock-down never tightens a folder code is run from.
+	CodeFolderHasExecutables = "folder_has_executables"
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

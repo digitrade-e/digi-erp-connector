@@ -127,7 +127,79 @@ connector, or restart it yourself.
 | `500 ORDER_INDEX_UNREADABLE`, or log `ORDER INDEX ENTRY SKIPPED` | One key's entry in `DataDir/orders/index/` is damaged; only that key is refused. See [A damaged order index entry](#a-damaged-order-index-entry). |
 | A repeat of an order answers `"status":"unknown"` / log `ORDER OUTCOME UNKNOWN` | The connector stopped between accepting the order and recording its outcome. See [An order whose outcome is unknown](#an-order-whose-outcome-is-unknown). |
 | A repeat answers `"status":"queued","replay":true` for an order that had failed | Expected: it failed before any file was written (`retryable` — e.g. `IMOVEIN.doc` held by the importer, the account lookup failed), so the repeat queued it again under its first number. |
+| `503 COUNTER_EXHAUSTED` (plan 087) | The counter's next number is outside its range — `GET /api/counters` shows `remaining: 0`. Nothing was reserved. Widen the range (`counters range`, digi-mcp) or move the rule to another counter; resend with the same `historyId`. Also the order counter past 999 999 999. |
+| `503 COUNTER_MISSING` (plan 087) | A counter's store does not exist where it fails closed: `DataDir\counters\<key>.json`, or `lastOrderNumber.json` once counters are configured. It is never restarted at 1. Restore the file from a backup, or set it (`counters start-from`, `expectLast: -1`, `from` above every number issued — the command scans the index and history). |
+| `409 DOCUMENT_RULE_CONFLICT` (plan 087) | The `historyId` was accepted with another `documentRule` (or none). The rule is fixed at reservation; a re-release under the new rule is a new key from the B2B. |
+| `503 FOLDER_TEST_CHANGED` (plan 087 review R2) | A retryable order's folder changed its test flag since the order was reserved (only a hand edit gets past `documents` and `restore`): a test order would land in production, or the reverse. Nothing is written; `state`'s `orders.folderTestChanged` lists them. Put the flag back (or resolve the order by hand, § The order index). |
+| `503 FOLDER_WRITABLE` (orders or receipts), provision `folder_writable`, log `FOLDER REFUSED` / `FOLDER WRITABLE` | Accounts besides the administrators can write to a folder the connector writes documents into. See [A folder others can write to](#a-folder-others-can-write-to). |
+| `503 IMPORTER_WRITABLE` (orders or receipts), log `IMPORTER REFUSED` / `IMPORTER WRITABLE` | Review T1: accounts besides the administrators — `trustedWriters` too — can change the importer the connector runs as LocalSystem (has.exe or the BAT, its folder or one above). Behind the link it is not run and nothing is reserved; a queued order stays retryable. Let only SYSTEM and Administrators write the importer and its folders (`icacls`, as an administrator); the daemon reads it again at most once a minute when an order or receipt needs it. Off the link it runs, with the warning. |
+| provision `folder_has_executables` | Review T1: `folder-acl` never locks down a folder that holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`). Move the programs out of the document folder, or leave that folder alone. |
 | Two orders interfered with each other | Should be impossible — the queue is single-worker. If the customer has *another* process importing IMOVEIN files from the same directory, that is the collision. Give the connector its own directory. |
+
+## A folder others can write to
+
+The connector writes orders and receipts, as LocalSystem, into folders an ERP importer reads: `sendOrderDir` (the
+order counter, the history copies, model (b)'s `IMOVEIN.doc` — and `has.exe` runs there), the pickup folder, the
+typed folders of plan 087 and the receipt folder. Whoever else can add a file to one can pre-create the next
+document's name (every order into it then fails for good, each burning a number), drop a document the importer takes
+into the books, or plant a program or DLL that an importer running in that folder loads as LocalSystem. On a default
+Windows Server every folder an administrator creates under `C:\` lets every local user (`BUILTIN\Users`) create files
+in it, so a folder is writable until someone locks it down (plan 087 review M1).
+
+Who can write is read on the folder itself (add a file or a folder, delete an entry, rename it, change its ACL or
+owner, and its owner) and on every folder above it (rename one away: delete on it, or delete-child on its parent).
+Creating files in a folder *above* is harmless and not counted. `state`'s `writableFolders` lists every such folder
+with the accounts, and:
+
+- **Behind the link** the daemon writes nothing into a typed folder others can write to (orders with a rule naming it,
+  receipts when it is the bound receipt folder: `503 FOLDER_WRITABLE`, nothing reserved; server.log `FOLDER REFUSED`);
+  the `documents`, `receipts` and `orders` commands refuse such a folder when they add or move it (`folder_writable`),
+  `allowWritable` with it — one they leave as it is is a warning in their result's `writableFolders` (review R1a).
+  `sendOrderDir`, the pickup folder and `sendReceiptDir` predate plan 087: the daemon only warns about them (server.log
+  `FOLDER WRITABLE`), so a box upgraded from v1.0.29 keeps taking orders until they are locked down.
+- **Over WinRM** the commands refuse it unless `allowWritable` (a human accepted the risk: a `folder_writable:` warning),
+  and the daemon warns.
+
+**Lock a folder down — the command** (plan 087 review R1c): digi-mcp sends `folder-acl` with `op: lockdown` and the
+folder's name (a typed folder's key, or `sendOrderDir` / `pickup` / `sendReceiptDir`); `folder-acl-check` first shows
+every principal's strongest rights anywhere in the folder before and after. It records the previous ACLs on the box
+(`preimage`, for `op: restore`), masks the folder's and every entry's DACL by handle — it **never grants**: SYSTEM,
+Administrators and TrustedInstaller keep theirs, a trusted writer keeps at most Modify of what it had, everyone else at
+most read & execute (review T2) — and restarts the service. Name the ERP's scheduler account in `documents`'
+`trustedWriters` **before** the lock-down, or it too drops to read & execute — and since nothing is ever granted, it
+keeps only what **its own** entries give it: write it had only through a group (`Users`, `Authenticated Users`) is
+capped with the group. `folder-acl-check` warns `trusted_writer_no_write:` for such an account; give it its own entry
+first (as an administrator: `icacls "<folder>" /grant "<DOMAINccount>:(OI)(CI)M"`), then lock down. Folders above it
+are never changed — `parentWritable` says who could still rename the folder away through one.
+
+**Lock a folder down by hand** (background, for a box without the link: a stricter, simpler recipe than the command's
+masking — it replaces the folder's DACL instead of lowering it; an elevated prompt; the path is an example):
+
+```bat
+icacls "C:\xampp\htdocs\herp" /setowner "*S-1-5-32-544"
+icacls "C:\xampp\htdocs\herp" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"
+```
+
+That makes Administrators the owner, drops the inherited entries (Users' create-files right comes from `C:\`), and
+leaves SYSTEM and Administrators full control and Users read. Then:
+
+1. **The importer's account.** The ERP's scheduler renames what it imported (`*.MASOFON2.BAK`), so the account it runs
+   as needs Modify there. An administrator or SYSTEM is covered above. Any other account must be added
+   (`icacls … /grant "DOMAIN\account:(OI)(CI)M"`) and named in `documents`' `trustedWriters` (review R1b): a trusted
+   account is never counted as a writer, over WinRM and behind the link.
+2. **The folders above.** Nobody but the administrators may delete or rename them: `icacls "C:\xampp\htdocs"` (and each
+   folder up to the drive) must not give `Users`, `Authenticated Users`, `Everyone` or `Domain Users` `(D)`, `(DC)`,
+   `(F)`, `(M)`, `(WDAC)` or `(WO)`.
+3. **What is already there.** A file someone created before the lock-down is still theirs. `dir /q` shows each file's
+   owner: move aside every `*.doc`, `*.prm`, `*.dll`, `*.exe`, `*.bat` or `*.cmd` neither the connector nor the ERP
+   wrote — before the next order.
+4. **Check.** `state`'s `writableFolders` no longer lists it (a trusted writer shows under `trusted`). The daemon reads the folders' ACLs in the background
+   (review R3): right after its start (until then, behind the link, a typed folder counts as refused), a refused folder
+   again at most once a minute when an order or a receipt needs it, an allowed one every ten minutes — no restart
+   needed (`folder-acl` and `documents` restart it anyway). server.log says `FOLDER ALLOWED` when a refused folder is
+   the administrators' only again. The folders are read in parallel, each waited on at most 10 s (review m1): a read
+   hung on an unresponsive domain controller logs `FOLDER CHECK: … did not finish in 10s` and leaves only that folder
+   unknown (refused behind the link) until it ends; a request for a folder not read yet starts its read.
 
 ## File endpoint returns INVALID_FILE_PATH
 
@@ -238,3 +310,45 @@ when `history\<n>\IMOVEIN_<n>.doc` already exists or another entry holds `n`.
 It logs `ORDER NOT QUEUED AGAIN: order <n> (historyId=…) is retryable, but …`
 with the reason, answers the repeat as `failed` and leaves the entry as it is —
 fix the entry by the steps above.
+
+## A downgrade below v1.0.30 (plan 087)
+
+**Never put a build older than v1.0.30 back on a box with `documents` (counters or typed folders) in `config.yaml`,
+or that took an order with a documentRule.** It is worse than an ignored setting (review m12):
+
+- **v1.0.29 ignores `documents`** (its YAML reading is lenient): it numbers every order from `lastOrderNumber.json`
+  and every receipt from `receiptNumber.json`, writes them where `sendOrderPickupDir` / `sendReceiptDir` say (a bound
+  receipt folder is forgotten), and answers `/api/v2/sendOrder` 404.
+- **Its recovery is global**, not per range: it moves `lastOrderNumber.json` past the highest
+  `sendOrderDir\history\<n>` of *every* range — test counters' and other counters' included — so its next production
+  order takes a number in a test range (9 000 000+ at BFL), written to the production destination. The receipt store
+  jumps the same way past the highest receipt in `history\receipts`. Index entries holding a `rule` are refused by its
+  strict decoder (`ORDER INDEX ENTRY SKIPPED`; a repeat of such a key answers 500 `ORDER_INDEX_UNREADABLE` — nothing is
+  written twice).
+- **A save from v1.0.29's GUI drops the whole `documents` block** (its config has no such field).
+
+Upgraded back, the adopted production counter (e.g. `b2b`, 1 000 000–1 999 999) holds a number above its `max`:
+every order without a rule answers `503 COUNTER_EXHAUSTED`, and no command can lower it — `start-from` only moves
+forward, and a `range` holding the number would overlap the test counter's. The per-range recovery of the test
+counter moves it past the numbers v1.0.29 issued there, so none is issued twice; only the production counter needs a
+hand.
+
+**The hand repair** — with the service stopped (`GET /api/sendOrder` `{"queued":0,"running":0}` first), as an
+administrator, on the box:
+
+1. **Put `documents` back** if a v1.0.29 GUI save dropped it: copy `config.yaml` from a backup made before the
+   downgrade, or from the pre-image of a change set made after the last `counters` / `documents` command
+   (`DataDir\provision\<changeSet>\`); otherwise digi-mcp sends the `documents` and `counters` commands again once
+   step 3 is done (a `create` of today's store refuses a store above its `max`).
+2. **Note what v1.0.29 wrote outside its range.** Each `sendOrderDir\history\<n>` folder dated after the downgrade
+   with `n` in a test (or another counter's) range is a real order written to production under that number: it is in
+   Hashavshevet (Asmahta `n`) — nothing to undo, but the books should know. The same for `history\receipts\<n>`.
+3. **Set each production store back to the highest number its own range issued.** `state`'s `counters` (it reads
+   the files; the service may stay stopped) give `highestIssued` per range — the highest index entry or history folder
+   *inside the range*. Write `{"lastOrderNumber": <b2b's highestIssued>}` into
+   `sendOrderDir\lastOrderNumber.json`, and `{"nextReceiptNumber": <receipts' highestIssued + 1>}` (keep `seededAt`)
+   into `DataDir\receipts\receiptNumber.json`. This is the one time a store goes back by hand, and it is safe only
+   because every number above it that v1.0.29 issued lies in another counter's range: check that no index entry and
+   no history folder inside the counter's range is above the value you write.
+4. **Start the service** and read `GET /api/counters`: each counter's `remaining` above 0, no `error`, `last` = the
+   value written; `state`'s `counters` agree.

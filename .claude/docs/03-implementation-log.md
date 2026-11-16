@@ -261,3 +261,65 @@ Digitrade plan 086 (every connector operation through digi-mcp), builder B2, bra
 - `upgrade` / `upgrade-result` (C8, decision D2): official newer releases only, setup digest = envelope = SHA256SUMS,
   a detached runner (copy of the link in DataDir\upgrade\<ticket>\) writes DataDir\results\upgrade-<ticket>.json;
   the release workflow now lists the setup in SHA256SUMS.
+
+## 2026-11-16 — plan 087 C1: document rules and named counters (for v1.0.30)
+
+Digitrade plan 087 (DIG-1563, the answer to July's proposal — Jira comment 17522), builder C1, branch
+`feat/087-document-rules`:
+
+- **Named counters** (`config.documents.counters`, `hasavshevet/counters.go`): today's `lastOrderNumber.json` and
+  `receiptNumber.json` adopted in place (`store:`), others in `DataDir\counters\<key>.json` `{"last":N}` failing
+  closed; one meaning, last issued. Implicit keys `orders` / `receipts` while none is configured.
+- **Blockers fixed:** recovery and the "never at or below the highest" guard per counter over its range (queue and
+  receipt writer) — the research's "second counter in another range" test fails with a global highest (mutation
+  checked); the order counter stops at 999 999 999; with counters configured a missing `lastOrderNumber.json` is
+  `ErrCounterMissing`, never 1.
+- **Disjoint ranges per box** (all counters) instead of re-keying the job id / status / history / re-queue check by
+  counter+number: one check in `ValidateDocuments` and in the commands, against a wire change of `jobId` and of the
+  history layout troubleshooting relies on.
+- **Typed folders** (`config.documents.folders`): closed name grammar, layout per folder, validated in
+  `ValidateOrders` (daemon, `CheckConfig`, GUI save); provision adds the box checks (exists, not a link/junction,
+  outside the data directory, link-mode path rules).
+- **`POST /api/v2/sendOrder`** with `documentRule {v:1, temporary, folder, counter}` (strict), frozen in the order
+  index entry at reservation (409 on another rule), 503 `COUNTER_EXHAUSTED`, 202 echo `{counter, number, fileName,
+  folder}`; ruled orders are written model (a) into their folder (pattern-aware "taken" scan, history keeps
+  `IMOVEIN_<n>.doc`). `/api/sendOrder` unchanged.
+- **Read routes** `GET /api/counters`, `GET /api/documents/capabilities`; no write route (pinned).
+- **Signed commands** `counters` / `documents` (+ `-check`), link entries in `commands_087.go`, not sealed.
+  `start-from` stops the service, re-reads, sets (receipt counters under `writer.lock`), restarts, proves — chosen
+  over a handoff to the running daemon because its only channel is the API, which the data path reaches from loopback
+  with a credential the B2B shop holds. A counter store is never in a pre-image.
+- **Receipts:** no documentRule (frozen body, strict decoder); `documents.receipts {folder, counter}` binds them; the
+  bound folder's path replaces `sendReceiptDir`.
+- `state` reports `counters` and `folders`.
+- Downgrade below v1.0.30 is forbidden once `documents` is set or a ruled order was taken (lenient YAML ignores the
+  block; the strict index decode refuses the `rule` field).
+
+## 2026-11-16 — plan 087 security reviews: two rounds of fixes on PR #16
+
+First review (M1, m1–m13): only administrators may write to a document folder (`dataacl.FolderWriters`; commands
+refuse, the daemon refuses typed folders behind the link); no relative counter store path; no device-name keys; a
+repeat is answered by its frozen rule before the box's keys are checked; `counters range` keeps in-flight entries;
+any folder change waits for in-flight work; `GET /api/counters` error codes; no production counter into a test
+folder; no test/production nesting, no stem ending in a digit; unreadable entries refuse the counters command; the
+downgrade danger documented; the counters route cached; restore runs the guards; link-mode path spellings.
+
+Second review (R1–R5, R7, R8; R6 is a follow-up): `folder_writable` only for a folder a command adds or moves (R1a);
+`documents.trustedWriters` — the ERP's own accounts, resolved on the box, never counted (R1b); the `folder-acl` command
+— a lock-down by handle with a sha256-addressed pre-image and a restore that takes only that (R1c); the test flags
+frozen in the rule (R2); the daemon's folder guard reads ACLs in the background and again (R3); object, callback and
+conditional allow entries count as writers (R4); the cache generation moves after the store (R5); the in-flight guards
+refuse unreadable entries (R7); `documentRule.temporary` also as text (R8).
+
+Third review (T1–T5, m1–m3), round 4: **a lock-down never grants** — `dataacl.MaskDACL` lowers each entry's own DACL
+in place (SYSTEM/Administrators/TrustedInstaller unchanged, a trusted writer ∩ Modify, anyone else ∩ read & execute,
+generic rights mapped, emptied entries dropped, deny/conditional/object entries kept, no entry ever added; the folder
+cut from its parent with its inherited entries made explicit; an untrusted owner handed to Administrators), proved by
+a property test over generated DACLs, with the check output per principal across the whole tree (T2, T4); trusted
+writers count where code runs (sendOrderDir with an order importer, the receipt folder with a receipt importer, the
+importers' folders), `folder-acl` refuses folders holding importer files or executables, and the daemon reads the
+importer before each run — behind the link a writable one is `503 IMPORTER_WRITABLE` (T1); document folders are judged
+where Windows resolves them — no reparse point on the path, never in or holding the system, profile, ProgramData,
+install or data folders, never in an AppData — and `folder-acl` judges the handle's final path too (T3); `state` lists
+the recorded pre-images (T5); the guard reads in parallel with a 10 s bound per read (m1); a refused receipt folder
+skips the recovery scan (m2); `acceptUnreadable` is one total per command (m3).

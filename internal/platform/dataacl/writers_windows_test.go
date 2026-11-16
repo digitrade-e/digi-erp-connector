@@ -3,6 +3,7 @@
 package dataacl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -87,5 +88,137 @@ func TestWritersLooksAtEveryFolderAbove(t *testing.T) {
 	setDACL(t, dir, adminsOnly+"(A;;0x10000;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	if who, err := Writers(cert); err != nil || !slices.Contains(who, users) {
 		t.Fatalf("delete on the folder: %v, %v", who, err)
+	}
+}
+
+// Plan 087 review M1: a folder the connector writes documents into. Adding a file to it or deleting one, renaming it
+// away (DELETE on it, delete-child on its parent) name the account; adding entries to the parent — which Users may do
+// in most folders an administrator makes under C:\ — does not, though Writers' file case judges the parent by that.
+func TestFolderWriters(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	top := filepath.Join(t.TempDir(), "xampp")
+	dir := filepath.Join(top, "herp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	users := wellKnownName(t, windows.WinBuiltinUsersSid)
+	setDACL(t, top, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, dir, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if who, err := FolderWriters(dir); err != nil || len(who) != 0 {
+		t.Fatalf("an administrators-only folder: %v, %v", who, err)
+	}
+	for _, tc := range []struct {
+		name           string
+		topACE, dirACE string
+		named          bool
+	}{
+		{"Users create files in it", "", "(A;;0x1200a9;;;BU)(A;;0x2;;;BU)", true},
+		{"Users create folders in it", "", "(A;;0x1200a9;;;BU)(A;;0x4;;;BU)", true},
+		{"Users delete entries in it", "", "(A;;0x1200a9;;;BU)(A;;0x40;;;BU)", true},
+		{"Users rename it away", "", "(A;;0x10000;;;BU)", true},
+		{"Users read it", "", "(A;;0x1200a9;;;BU)", false},
+		{"Users create files and folders in the parent", "(A;;0x1200a9;;;BU)(A;;0x6;;;BU)", "", false},
+		{"Users delete entries in the parent", "(A;;0x1200a9;;;BU)(A;;0x40;;;BU)", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setDACL(t, top, adminsOnly+tc.topACE, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+			setDACL(t, dir, adminsOnly+tc.dirACE, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+			who, err := FolderWriters(dir)
+			if err != nil || slices.Contains(names(who), users) != tc.named {
+				t.Fatalf("FolderWriters = %v, %v; Users named: want %v", who, err, tc.named)
+			}
+		})
+	}
+}
+
+// Review R4: an object, callback or conditional (callback) allow ACE that
+// grants a write right names its account as a writer, as a plain one does;
+// deny, inherit-only and read-only entries do not.
+func TestDaclGrants_EveryAllowType(t *testing.T) {
+	const users = "S-1-5-32-545"
+	for _, tc := range []struct {
+		name, ace string
+		named     bool
+	}{
+		{"plain", "(A;;0x2;;;BU)", true},
+		{"object, no GUID", "(OA;;0x2;;;BU)", true},
+		{"object, with a GUID", "(OA;;0x2;bf967aba-0de6-11d0-a285-00aa003049e2;;BU)", true},
+		{"object, both GUIDs", "(OA;;0x2;bf967aba-0de6-11d0-a285-00aa003049e2;bf967a86-0de6-11d0-a285-00aa003049e2;BU)", true},
+		{"conditional (callback)", "(XA;;0x2;;;BU;(Member_of {SID(BA)}))", true},
+		{"callback object", "(ZA;;0x2;;;BU;(Member_of {SID(BA)}))", true},
+		{"deny", "(D;;0x2;;;BU)", false},
+		{"inherit-only", "(A;OICIIO;0x2;;;BU)", false},
+		{"read only", "(A;;0x1200a9;;;BU)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sd, err := windows.SecurityDescriptorFromString("D:" + tc.ace + "(A;;FA;;;SY)")
+			if err != nil {
+				t.Fatalf("parse %s: %v", tc.ace, err)
+			}
+			dacl, _, err := sd.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			sids, err := daclGrants(dacl, folderWrite)
+			if err != nil {
+				t.Fatalf("daclGrants: %v", err)
+			}
+			named := slices.ContainsFunc(sids, func(s *windows.SID) bool { return s.String() == users })
+			if named != tc.named {
+				t.Errorf("%s: Users named %v, want %v (%v)", tc.ace, named, tc.named, sids)
+			}
+		})
+	}
+}
+
+// A conditional ACE on a real folder counts (FolderWriters reads it through
+// GetNamedSecurityInfo).
+func TestFolderWriters_ConditionalACE(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	dir := filepath.Join(t.TempDir(), "herp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, dir, adminsOnly+"(XA;;0x2;;;BU;(Member_of {SID(BA)}))", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	who, err := FolderWriters(dir)
+	if err != nil || !slices.Contains(names(who), wellKnownName(t, windows.WinBuiltinUsersSid)) {
+		t.Fatalf("a conditional write ACE for Users: %v, %v", who, err)
+	}
+}
+
+// Review R1b: FolderWriters gives each writer's SID (Users: S-1-5-32-545), and
+// LookupAccount resolves a name to its SID and type — a user account is
+// "user", Users is an alias, Everyone a well-known group; an unknown name is
+// ErrAccountUnknown.
+func TestFolderWritersSIDsAndLookupAccount(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	dir := filepath.Join(t.TempDir(), "herp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, dir, adminsOnly+"(A;;0x2;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	who, err := FolderWriters(dir)
+	if err != nil || !slices.ContainsFunc(who, func(w Writer) bool { return w.SID == "S-1-5-32-545" }) {
+		t.Fatalf("FolderWriters = %+v, %v; want Users by SID", who, err)
+	}
+	users := wellKnownName(t, windows.WinBuiltinUsersSid)
+	if a, err := LookupAccount(users); err != nil || a.SID != "S-1-5-32-545" || a.Type != "alias" {
+		t.Errorf("LookupAccount(%s) = %+v, %v", users, a, err)
+	}
+	everyone := wellKnownName(t, windows.WinWorldSid)
+	if a, err := LookupAccount(everyone); err != nil || a.SID != "S-1-1-0" || a.Type == AccountUser {
+		t.Errorf("LookupAccount(%s) = %+v, %v", everyone, a, err)
+	}
+	if _, err := LookupAccount("nobody-at-all-087"); !errors.Is(err, ErrAccountUnknown) {
+		t.Errorf("an unknown name: %v, want ErrAccountUnknown", err)
+	}
+	tok := windows.GetCurrentProcessToken()
+	u, err := tok.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := accountName(u.User.Sid)
+	if a, err := LookupAccount(me); err != nil || a.SID != u.User.Sid.String() || a.Type != AccountUser {
+		t.Errorf("LookupAccount(%s) = %+v, %v; want this process's own user account", me, a, err)
 	}
 }

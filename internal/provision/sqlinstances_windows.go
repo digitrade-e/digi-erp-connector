@@ -97,3 +97,21 @@ func regInt(view uint32, path, value string) uint64 {
 	}
 	return n
 }
+
+// profilesDirectory is the registry's ProfilesDirectory (where the profiles
+// live: %SystemDrive%\Users unless moved), expanded; "" when unread.
+func profilesDirectory() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer k.Close()
+	v, _, err := k.GetStringValue("ProfilesDirectory")
+	if err != nil {
+		return ""
+	}
+	if x, err := registry.ExpandString(v); err == nil {
+		v = x
+	}
+	return v
+}

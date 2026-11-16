@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,6 +17,13 @@ func mkdir(t *testing.T, parts ...string) string {
 	d := filepath.Join(append([]string{t.TempDir()}, parts...)...)
 	if err := os.MkdirAll(d, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	// A folder a human names is its long name: the CI runner's TempDir is
+	// C:\Users\RUNNER~1\…, an 8.3 short name link mode refuses (review m6).
+	if runtime.GOOS == "windows" {
+		if long, err := filepath.EvalSymlinks(d); err == nil {
+			d = long
+		}
 	}
 	return d
 }

@@ -134,6 +134,20 @@ change it or rename a folder above it (the same check as the importer's, every f
 data stream is served, and `link-status` says why. The link also starts on a server with no `config.yaml` yet:
 commands work, data waits for one.
 
+## Plan 087 commands (v1.0.30): named counters and typed folders
+
+| command | stdin | answer |
+|---|---|---|
+| `counters-check` / `counters` | `provision counters`: `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | the apply-style result; `--check` adds `check.counter` `{key,last,highestIssued,setLast?,inFlight}` |
+| `documents-check` / `documents` | `provision documents`: `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?}}` | the apply-style result |
+
+Both are provision subcommands with fixed argv (`internal/link/commands_087.go`), signed, **not sealed** — neither
+input carries a secret. They are the only way a counter or a folder changes: the data path (`GET /api/counters`,
+`GET /api/documents/capabilities`) only reads them, because the B2B shop holds the data-path credential too. The
+rules are in [provisioning.md § counters](provisioning.md#counters-named-counters-plan-087-dig-1563) and
+[§ documents](provisioning.md#documents-typed-folders-and-the-receipts-binding-plan-087). `state` reports every
+counter and typed folder since v1.0.30.
+
 ### Upgrade over the link
 
 `upgrade` installs **only an official release of this repository**, and only a newer one (plan 086 D2): the link

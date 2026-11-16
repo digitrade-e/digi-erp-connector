@@ -234,6 +234,35 @@ store was moved back (a partial restore, a hand edit): the route answers 503 and
 writes nothing. Move the store past the highest number in `history/receipts/`
 by hand (`{"nextReceiptNumber": <highest+1>}`), then retry.
 
+### Named counters and the receipt folder (plan 087, v1.0.30)
+
+Receipts carry **no documentRule**: the body is the backend's frozen `Receipt::jsonSerialize()` and the strict
+decoder would answer a new key 400 (a stopped receipt). The receipt folder and counter are box settings instead,
+set by digi-mcp's signed `documents` / `counters` commands ([provisioning.md](provisioning.md)):
+
+- The receipt store becomes a named counter in place: `counters create` with `store: receiptNumber` (it stays
+  `receiptNumber.json` with its "next"; every report speaks **last issued** = next − 1). With no counter configured
+  the box lists it as the implicit key `receipts`, range 1–999 999 999.
+- `documents.receipts {folder, counter}` binds receipts to a typed receipts folder (its path replaces
+  `sendReceiptDir`, its name pattern `KUPAIN_{n}.doc` the receipt file's name; `KUPAIN.prm` keeps its name, the
+  history copies keep `KUPAIN_<n>.doc`) and to a counter (default: the one adopting `receiptNumber`). A test counter
+  only into a test folder, and a test folder only from a test counter (review m10: a production receipt number where
+  the books never import it is a gap in the tax-document series); a test folder never with a model (b) receipt
+  importer.
+- The counter's range applies: its next number outside it is `503 COUNTER_EXHAUSTED`, nothing written. Recovery is
+  over the counter's range only: a receipt of another counter neither moves it nor is finished into this folder (a
+  repeat of such a key answers 503 until its counter is bound again). The binding does not change while a receipt is
+  reserved (`receipts_in_flight`).
+- The receipt folder must be one only the administrators can write to (plan 087 review M1): the `receipts` and
+  `documents` commands refuse it otherwise (`folder_writable`; `allowWritable` over WinRM only), and behind the link a
+  bound typed folder others can write to gets nothing written (`503 FOLDER_WRITABLE`, nothing reserved; Recover
+  finishes no reserved receipt there) until it is locked down and the service restarted
+  ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). While it is refused a request is refused
+  before the recovery's full index scan — never a re-read of every entry per request — and a repeat of a `written`
+  key is still answered from its own entry (review m2); the first request after the folder is allowed again recovers.
+  Behind the link a receipt that would run the model (b) importer is refused the same way while the importer can be
+  changed by others (`503 IMPORTER_WRITABLE`, review T1).
+
 ## Idempotency and recovery
 
 One Write, under the import lock:

@@ -177,6 +177,25 @@ func hostAddresses() []string {
 }
 
 func (winSystem) Writers(path string) ([]string, error) { return dataacl.Writers(path) }
+func (winSystem) FolderWriters(dir string) ([]dataacl.Writer, error) {
+	return dataacl.FolderWriters(dir)
+}
+func (winSystem) LookupAccount(name string) (dataacl.Account, error) {
+	return dataacl.LookupAccount(name)
+}
+func (winSystem) FolderRules() FolderRules { return machineFolderRules(profilesDirectory()) }
+
+func (winSystem) ReparsePointOn(path string) (string, error) { return reparseAlong(path) }
+
+func (winSystem) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
+	return dataacl.PlanLockdown(dir, trusted, execExts)
+}
+func (winSystem) ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error) {
+	return dataacl.ApplyLockdown(dir, trusted, plan)
+}
+func (winSystem) RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (int, int, error) {
+	return dataacl.RestoreFolder(dir, entries)
+}
 
 func (winSystem) ImporterCandidates() ([]string, error) {
 	const max = 20

@@ -3,6 +3,7 @@
 package dataacl
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -19,6 +20,28 @@ func FileTrusted(string) (bool, error) { return true, nil }
 
 // Writers has nobody to name off Windows.
 func Writers(string) ([]string, error) { return []string{}, nil }
+
+// FolderWriters has nobody to name off Windows.
+func FolderWriters(string) ([]Writer, error) { return []Writer{}, nil }
+
+// PlanLockdown, ApplyLockdown and RestoreFolder are Windows' (plan 087 review
+// R1c): off Windows there is no DACL to lock down.
+func PlanLockdown(string, []string, map[string]bool) (LockdownPlan, error) {
+	return LockdownPlan{}, errors.New("dataacl: a lock-down is Windows-only")
+}
+
+func ApplyLockdown(string, []string, LockdownPlan) (int, error) {
+	return 0, errors.New("dataacl: a lock-down is Windows-only")
+}
+
+func RestoreFolder(string, []FolderEntry) (int, int, error) {
+	return 0, 0, errors.New("dataacl: a lock-down is Windows-only")
+}
+
+// LookupAccount resolves no account off Windows.
+func LookupAccount(name string) (Account, error) {
+	return Account{}, fmt.Errorf("%w: %s (accounts are resolved on Windows only)", ErrAccountUnknown, name)
+}
 
 // OpenLog opens path for appending, creating it 0600.
 func OpenLog(path string) (*os.File, error) {

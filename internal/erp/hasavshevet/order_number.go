@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 )
 
@@ -30,9 +31,17 @@ var ErrOrderCounterUnreadable = errors.New("order counter unreadable")
 // index entry that owns the number, then advancePast. A crash between the two
 // leaves the entry ahead of the counter; OrderQueue.Recover moves the counter
 // past it. Next does both at once, for callers without an index.
+//
+// Plan 087: with named counters configured the store is a counter's
+// (store: lastOrderNumber) and refuses a missing file (refuseMissing,
+// ErrCounterMissing) instead of starting at 1; and it never persists a number
+// past 999 999 999 (MyID's nine digits: a tenth was cut silently).
 type OrderNumberStore struct {
 	mu   sync.Mutex
 	path string
+	// refuseMissing: a missing file is ErrCounterMissing, not a fresh
+	// install (NewCounterSet sets it when counters are configured).
+	refuseMissing bool
 }
 
 type orderNumberFile struct {
@@ -54,6 +63,9 @@ func (s *OrderNumberStore) Next() (int64, error) {
 	last, err := s.read()
 	if err != nil {
 		return 0, err
+	}
+	if last+1 > config.MaxDocumentNumber {
+		return 0, fmt.Errorf("%w: %s is at %d, the last nine-digit order number", ErrCounterExhausted, s.path, last)
 	}
 	if err := s.write(last + 1); err != nil {
 		return 0, err
@@ -88,11 +100,36 @@ func (s *OrderNumberStore) advancePast(n int64) error {
 	return s.write(n)
 }
 
-// read returns the last number issued: 0 when the file does not exist.
+// raiseTo makes last the last number issued (the counters command, with the
+// service stopped): a missing file is created, one already at last is left
+// alone, one above it is ErrCounterLower.
+func (s *OrderNumberStore) raiseTo(last int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := os.Lstat(s.path); errors.Is(err, os.ErrNotExist) {
+		return s.write(last)
+	}
+	cur, err := s.read()
+	switch {
+	case err != nil:
+		return err
+	case cur == last:
+		return nil
+	case cur > last:
+		return fmt.Errorf("%w: %s holds %d, asked %d", ErrCounterLower, s.path, cur, last)
+	}
+	return s.write(last)
+}
+
+// read returns the last number issued: 0 when the file does not exist —
+// ErrCounterMissing instead when refuseMissing is set.
 func (s *OrderNumberStore) read() (int64, error) {
 	b, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if s.refuseMissing {
+				return 0, fmt.Errorf("%w: %s does not exist; with named counters configured the order counter never starts again at 1 (restore it, or set it with the counters command)", ErrCounterMissing, s.path)
+			}
 			return 0, nil
 		}
 		return 0, fmt.Errorf("%w: read %s: %v", ErrOrderCounterUnreadable, s.path, err)
@@ -116,6 +153,9 @@ func (s *OrderNumberStore) read() (int64, error) {
 // write persists last by atomic rename: a crash mid-write leaves the old
 // counter or the new one, never a truncated file (which read would refuse).
 func (s *OrderNumberStore) write(last int64) error {
+	if last < 0 || last > config.MaxDocumentNumber {
+		return fmt.Errorf("%w: refusing to store order number %d in %s (outside 0-%d)", ErrCounterExhausted, last, s.path, config.MaxDocumentNumber)
+	}
 	b, err := json.MarshalIndent(orderNumberFile{LastOrderNumber: last}, "", "  ")
 	if err != nil {
 		return err
