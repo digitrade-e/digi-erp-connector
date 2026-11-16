@@ -55,11 +55,11 @@ type StateResult struct {
 	Counters []hasavshevet.CounterStatus `json:"counters"`
 	// Folders (plan 087) are the typed folders of config.yaml's documents
 	// block, each read like the pickup folder.
-	Folders  []StateFolder `json:"folders"`
-	TLS      *StateTLS     `json:"tls,omitempty"`
-	Link     StateLink     `json:"link"`
-	Disk     StateDisk     `json:"disk"`
-	Errors   []string      `json:"errors,omitempty"`
+	Folders []StateFolder `json:"folders"`
+	TLS     *StateTLS     `json:"tls,omitempty"`
+	Link    StateLink     `json:"link"`
+	Disk    StateDisk     `json:"disk"`
+	Errors  []string      `json:"errors,omitempty"`
 }
 
 // StateServices are both Windows services.
