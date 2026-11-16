@@ -81,8 +81,9 @@ func TestFolderPaths_Commands(t *testing.T) {
 	sys.writers = nil
 	sys.parentWriters = nil
 	programData := mkdir(t, "ProgramData", "Vendor")
-	sys.folderRules = FolderRules{Dirs: []string{filepath.Dir(programData)}, Parts: []string{"AppData"}}
-	appData := mkdir(t, "Users", "admin", "AppData", "Roaming")
+	// A part rule other than AppData: the Windows CI's temp folder is under one.
+	sys.folderRules = FolderRules{Dirs: []string{filepath.Dir(programData)}, Parts: []string{"$Recycle.Bin"}}
+	recycle := mkdir(t, "d", "$Recycle.Bin", "S-1-5-21-1")
 	receipts := mkdir(t, "herp", "receipts")
 
 	typed := func(p string) DocumentsInput {
@@ -90,7 +91,7 @@ func TestFolderPaths_Commands(t *testing.T) {
 			in.Folders = map[string]*FolderInput{"herp2": {Kind: "orders", Path: p, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
 		})
 	}
-	for _, p := range []string{programData, appData} {
+	for _, p := range []string{programData, recycle} {
 		_, err := ApplyDocuments(context.Background(), env, typed(p), true)
 		wantRefusal(t, err, CodeFolderForbidden)
 	}
@@ -110,8 +111,8 @@ func TestFolderPaths_Commands(t *testing.T) {
 	_, err = ApplyOrders(context.Background(), env, ordersInput(func(in *OrdersInput) { in.SendOrderDir = &moved }), true)
 	wantRefusal(t, err, CodeFolderReparse)
 	sys.reparse = nil
-	// receipts behind the link: sendReceiptDir in an AppData.
-	_, err = ApplyReceipts(context.Background(), env, receiptsInput(func(in *ReceiptsInput) { in.SendReceiptDir = &appData }), true)
+	// receipts behind the link: sendReceiptDir in a $Recycle.Bin.
+	_, err = ApplyReceipts(context.Background(), env, receiptsInput(func(in *ReceiptsInput) { in.SendReceiptDir = &recycle }), true)
 	wantRefusal(t, err, CodeFolderForbidden)
 
 	// folder-acl: the configured path through a junction; a handle that
