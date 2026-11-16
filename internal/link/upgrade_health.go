@@ -181,18 +181,20 @@ func (r UpgradeRunner) healthRound(job UpgradeJob, accept []string, since time.T
 // noRollback says why an unhealthy upgrade keeps the new build, in plan 088 §2b's words: the outcome and the reason,
 // or "" when the rollback may run.
 func (r UpgradeRunner) noRollback(job UpgradeJob, h *linkproto.UpgradeHealth) (outcome, why string) {
-	// D12: when only the new link failed, the build is to blame only if the relay answers from this box; a relay that
-	// is down (an outage, GKE maintenance) or a way out that is cut must not roll back every box upgrading in its window.
+	// D12: when only the new link failed, the build is to blame only if the relay is ready from this box — its registry
+	// answering (review N5: /healthz says nothing about whether the relay can admit a box); a relay that is down or not
+	// ready (an outage, GKE maintenance, its registry gone) or a way out that is cut must not roll back every box
+	// upgrading in its window.
 	if linkOnly(h) {
-		check := r.RelayHealth
+		check := r.RelayReady
 		if check == nil {
-			check = func() error { return relayHealthz(r.DataDir, r.HTTPClient) }
+			check = func() error { return relayReady(r.DataDir, r.HTTPClient) }
 		}
 		if err := check(); err != nil {
-			return linkproto.OutcomeLinkInconclusive, fmt.Sprintf("only the new link failed, and the relay's /healthz did not answer from this box "+
-				"either (%v): the relay or the way to it is down, not proven the new build (D12); the new build stays", withoutCredentials(err.Error()))
+			return linkproto.OutcomeLinkInconclusive, fmt.Sprintf("only the new link failed, and the relay's /readyz did not answer 200 from this box "+
+				"(%v): the relay, its registry or the way to it is down — not proven the new build (D12); the new build stays", withoutCredentials(err.Error()))
 		}
-		r.Log.Info(fmt.Sprintf("link upgrade %s: only the new link failed, and the relay answers: the new build is to blame", r.Ticket))
+		r.Log.Info(fmt.Sprintf("link upgrade %s: only the new link failed, and the relay is ready: the new build is to blame", r.Ticket))
 	}
 	pin := job.Rollback
 	switch {
@@ -233,11 +235,12 @@ func linkOnly(h *linkproto.UpgradeHealth) bool {
 	return failed > 0
 }
 
-// relayHealthTimeout bounds the runner's question to the relay (D12).
-const relayHealthTimeout = 30 * time.Second
+// relayReadyTimeout bounds the runner's question to the relay (D12).
+const relayReadyTimeout = 30 * time.Second
 
-// relayHealthURL is the relay's /healthz for its /link URL: wss → https, ws → http, the same host, no user or query.
-func relayHealthURL(relay string) (string, error) {
+// relayReadyURL is the relay's /readyz for its /link URL: wss → https, ws → http, the same host, no user or query. The
+// relay answers it 200 only when its registry answers (review N5); it is never its liveness probe.
+func relayReadyURL(relay string) (string, error) {
 	u, err := url.Parse(relay)
 	if err != nil {
 		return "", fmt.Errorf("the relay URL does not parse: %w", errors.New(withoutCredentials(err.Error())))
@@ -253,23 +256,25 @@ func relayHealthURL(relay string) (string, error) {
 	if u.Host == "" {
 		return "", errors.New("the relay URL names no host")
 	}
-	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/healthz"}).String(), nil
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/readyz"}).String(), nil
 }
 
-// relayHealthz asks link.yaml's relay for /healthz through client (the link's proxy): nil when it answers 200.
-func relayHealthz(dataDir string, client *http.Client) error {
+// relayReady asks link.yaml's relay for /readyz through client (the link's proxy): nil only when it answers 200.
+// Anything else — another status (a relay before /readyz answers 404), no answer — is "not ready": D12 then keeps the
+// new build.
+func relayReady(dataDir string, client *http.Client) error {
 	st, err := (&Store{Dir: dataDir}).LoadState()
 	if err != nil {
 		return fmt.Errorf("link.yaml: %w", err)
 	}
-	target, err := relayHealthURL(st.RelayURL())
+	target, err := relayReadyURL(st.RelayURL())
 	if err != nil {
 		return err
 	}
 	if client == nil {
 		client = http.DefaultClient
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), relayHealthTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), relayReadyTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {

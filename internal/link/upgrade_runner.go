@@ -82,9 +82,9 @@ type UpgradeRunner struct {
 	// FormatFloor reads DataDir\format-floor (plan 088 D11): "" when none is recorded. Nil = formatfloor.Read. The
 	// runner never rolls back below it, nor below its own compiled formatfloor.RollbackFloor.
 	FormatFloor func() (string, error)
-	// RelayHealth asks the relay's /healthz from this box, through its proxy (plan 088 D12): nil when it answers. Nil =
-	// relayHealthz on link.yaml's relay.
-	RelayHealth func() error
+	// RelayReady asks the relay's /readyz from this box, through its proxy (plan 088 D12, review N5): nil only when it
+	// answers 200 (its registry answering). Nil = relayReady on link.yaml's relay.
+	RelayReady func() error
 }
 
 // NewUpgradeRunner is the runner on this machine.
@@ -114,7 +114,7 @@ func NewUpgradeRunner(dataDir, ticket string, log Logger) UpgradeRunner {
 		KillProcess:   killProcess,
 	}
 	ur.Fetch = ur.fetchRelease
-	ur.RelayHealth = func() error { return relayHealthz(dataDir, ur.HTTPClient) }
+	ur.RelayReady = func() error { return relayReady(dataDir, ur.HTTPClient) }
 	return ur
 }
 

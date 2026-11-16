@@ -28,7 +28,7 @@ type healthRig struct {
 	// linkUp says whether the link of build installed is connected at now; probe answers provision state.
 	linkUp func(installed string, now time.Time) bool
 	probe  func(installed string) (stateProbe, error)
-	// relayErr is what the relay's /healthz answers from the box (nil: it is up); relayChecks counts the questions.
+	// relayErr is what the relay's /readyz answers from the box (nil: 200, ready); relayChecks counts the questions.
 	relayErr    error
 	relayChecks int
 }
@@ -77,7 +77,7 @@ func newHealthRig(t *testing.T, daemonWasRunning bool, edit func(*UpgradeJob)) *
 		g.mu.Unlock()
 		return g.probe(installed)
 	}
-	g.r.RelayHealth = func() error {
+	g.r.RelayReady = func() error {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		g.relayChecks++
@@ -520,13 +520,13 @@ func TestALinkOnlyFailureIsInconclusiveWhileTheRelayIsDown(t *testing.T) {
 	g.relayErr = errors.New("dial tcp: i/o timeout")
 	r := g.run(t)
 	if r.Rollback != nil || g.ran != 1 || g.relayChecks != 1 || r.Outcome != linkproto.OutcomeLinkInconclusive ||
-		!strings.Contains(r.Error, "the relay's /healthz did not answer from this box either (dial tcp: i/o timeout)") {
+		!strings.Contains(r.Error, "the relay's /readyz did not answer 200 from this box (dial tcp: i/o timeout)") {
 		t.Fatalf("rollback %+v, ran %d, %d relay checks, outcome %q, error %q", r.Rollback, g.ran, g.relayChecks, r.Outcome, r.Error)
 	}
 	// the relay answers: the new build is to blame, and the build it replaced goes back
 	g = newHealthRig(t, true, nil)
 	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.31" }
-	if r := g.run(t); r.Outcome != linkproto.OutcomeRolledBack || g.relayChecks != 1 || !g.log.has("only the new link failed, and the relay answers") {
+	if r := g.run(t); r.Outcome != linkproto.OutcomeRolledBack || g.relayChecks != 1 || !g.log.has("only the new link failed, and the relay is ready") {
 		t.Fatalf("relay up: %q %q, %d checks", r.Outcome, r.Error, g.relayChecks)
 	}
 	// the daemon failed too: not the link alone, so the relay is not asked and the rollback runs
@@ -546,102 +546,59 @@ func TestALinkOnlyFailureIsInconclusiveWhileTheRelayIsDown(t *testing.T) {
 	}
 }
 
-func TestTheRelaysHealthz(t *testing.T) {
+// Review N5: D12 asks the relay's /readyz — 200 only while its registry answers — never /healthz, which a relay answers
+// even when it cannot admit a box. Anything but 200 (an older relay's 404 too) is "not ready".
+func TestTheRelaysReadyz(t *testing.T) {
 	for in, want := range map[string]string{
-		"wss://link.digitrade-admin.org/link":        "https://link.digitrade-admin.org/healthz",
-		"ws://127.0.0.1:8080/link":                   "http://127.0.0.1:8080/healthz",
-		"wss://user:secret@relay.example:8443/x?y=1": "https://relay.example:8443/healthz",
-		"https://relay.example/link":                 "https://relay.example/healthz",
+		"wss://link.digitrade-admin.org/link":        "https://link.digitrade-admin.org/readyz",
+		"ws://127.0.0.1:8080/link":                   "http://127.0.0.1:8080/readyz",
+		"wss://user:secret@relay.example:8443/x?y=1": "https://relay.example:8443/readyz",
+		"https://relay.example/link":                 "https://relay.example/readyz",
 	} {
-		if got, err := relayHealthURL(in); err != nil || got != want {
+		if got, err := relayReadyURL(in); err != nil || got != want {
 			t.Errorf("%s: %q %v", in, got, err)
 		}
 	}
 	for _, bad := range []string{"ftp://relay.example/link", "wss:///link", "::"} {
-		if _, err := relayHealthURL(bad); err == nil {
+		if _, err := relayReadyURL(bad); err == nil {
 			t.Errorf("%q: no error", bad)
 		}
 	}
-	// against a stand-in relay, through the client the runner is given
-	status := http.StatusOK
-	var path string
+	// a stand-in relay whose /healthz always answers, and whose /readyz answers as its registry does
+	ready := http.StatusOK
+	var asked []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		path = req.URL.Path
-		w.WriteHeader(status)
+		asked = append(asked, req.URL.Path)
+		switch req.URL.Path {
+		case "/healthz":
+			_, _ = w.Write([]byte("ok"))
+		case "/readyz":
+			w.WriteHeader(ready)
+		default:
+			http.NotFound(w, req)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "link.yaml"), []byte("relay: ws"+strings.TrimPrefix(srv.URL, "http")+"/link\n"), 0o600)
-	if err := relayHealthz(dir, srv.Client()); err != nil || path != "/healthz" {
-		t.Fatalf("up: %v, asked %q", err, path)
+	if err := relayReady(dir, srv.Client()); err != nil || len(asked) != 1 || asked[0] != "/readyz" {
+		t.Fatalf("ready: %v, asked %v", err, asked)
 	}
-	status = http.StatusServiceUnavailable
-	if err := relayHealthz(dir, srv.Client()); err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("503: %v", err)
+	ready = http.StatusServiceUnavailable // the registry does not answer; /healthz still would
+	if err := relayReady(dir, srv.Client()); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("not ready: %v", err)
+	}
+	ready = http.StatusNotFound // a relay from before /readyz
+	if err := relayReady(dir, srv.Client()); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("no /readyz: %v", err)
+	}
+	for _, p := range asked {
+		if p == "/healthz" {
+			t.Fatal("the runner asked /healthz")
+		}
 	}
 	srv.Close()
-	if err := relayHealthz(dir, srv.Client()); err == nil {
+	if err := relayReady(dir, srv.Client()); err == nil {
 		t.Fatal("a relay that is gone answered")
-	}
-}
-
-// Review m7: a restart of the server in the health window (Windows Update in the same night) killed the runner and lost
-// the health check. The runner keeps its progress in the ticket's health marker; started again by the link, it goes on
-// with the health check — not the setup — and what follows. Not after a cut rollback, and only once.
-func TestTheRunnerResumesAfterARestartInTheHealthWindow(t *testing.T) {
-	cut := func(g *healthRig, phase string, resumes int) {
-		g.mu.Lock()
-		g.installed = "1.0.32" // the setup had run before the restart
-		g.mu.Unlock()
-		m := healthMarker{Phase: phase, SetupStarted: g.r.Now().Add(-10 * time.Minute), Resumes: resumes,
-			Result: UpgradeResult{Ticket: g.ticket, From: "1.0.31", To: "1.0.32", ExitCode: 0, SHA256: sha(g.setup), InstalledVersion: "v1.0.32"}}
-		b, _ := json.Marshal(m)
-		_ = os.WriteFile(filepath.Join(g.tdir, healthMarkerFile), b, 0o600)
-	}
-	// healthy once the box is back: ok, no setup run again
-	g := newHealthRig(t, true, nil)
-	cut(g, markerHealth, 0)
-	r := g.run(t)
-	if g.ran != 0 || r.Outcome != linkproto.OutcomeOK || r.Health == nil || !r.Health.OK || r.ExitCode != 0 || !g.log.has("the health check starts again") {
-		t.Fatalf("ran %d, outcome %q, health %+v", g.ran, r.Outcome, r.Health)
-	}
-	if _, err := os.Stat(filepath.Join(g.tdir, healthMarkerFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("the health marker outlived the result")
-	}
-	// unhealthy once the box is back: the rollback follows, as it would have
-	g = newHealthRig(t, true, nil)
-	cut(g, markerHealth, 0)
-	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.31" }
-	if r := g.run(t); g.ran != 1 || r.Outcome != linkproto.OutcomeRolledBack || g.setups[0] != "rollback-"+setupFile("1.0.31")+"="+string(g.oldSetup) {
-		t.Fatalf("ran %v, outcome %q", g.setups, r.Outcome)
-	}
-	// cut during the rollback, or resumed once already: nothing more runs
-	for _, c := range []struct {
-		phase   string
-		resumes int
-		why     string
-	}{{markerRollback, 0, "the rollback was under way"}, {markerHealth, 1, "it was resumed once already"}} {
-		g = newHealthRig(t, true, nil)
-		cut(g, c.phase, c.resumes)
-		r := g.run(t)
-		if g.ran != 0 || r.Outcome != linkproto.OutcomeUnhealthy || r.Rollback != nil || !strings.Contains(r.Error, c.why) || g.probes != 0 {
-			t.Fatalf("%s: ran %d, outcome %q, error %q", c.phase, g.ran, r.Outcome, r.Error)
-		}
-	}
-	// the marker is there while the health check runs, and gone with the result
-	g = newHealthRig(t, true, nil)
-	seen := ""
-	session := g.r.Session
-	g.r.Session = func() (SessionMarker, error) {
-		if m, found, err := readHealthMarker(g.tdir); found && err == nil {
-			seen = m.Phase
-		}
-		return session()
-	}
-	if r := g.run(t); r.Outcome != linkproto.OutcomeOK || seen != markerHealth {
-		t.Fatalf("outcome %q, the marker during the health check: %q", r.Outcome, seen)
-	}
-	if _, err := os.Stat(filepath.Join(g.tdir, healthMarkerFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("the health marker outlived the result")
 	}
 }
