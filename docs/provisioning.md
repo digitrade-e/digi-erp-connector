@@ -442,8 +442,8 @@ kind, name pattern, temporary prefix, layout or test (`folder_in_flight`, review
 taken" scan, the layout the record, the test flag whether production may write there). The receipt binding — the
 receipt folder, its name pattern or test flag, the receipt counter — does not change while a receipt is reserved
 (`receipts_in_flight`: Recover finishes it into the folder in use, under its pattern; a file already written under
-the old name would be written again under the new one). The `receipts` command makes the same check when it moves
-`sendReceiptDir`. Config-command flow; `restore` puts
+the old name would be written again under the new one). The `receipts` command makes the same check when it moves or
+clears `sendReceiptDir`. Config-command flow; `restore` puts
 `config.yaml` back, after the same in-flight guards (`folder_in_flight`, `receipts_in_flight`; review m9). Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
 `documents` (and refuses index entries holding a frozen rule), its recovery pushes the production counters into the
 test ranges, and its GUI save drops the block —
