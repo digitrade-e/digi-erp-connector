@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -413,7 +412,8 @@ func effectiveFor(t *testing.T, ctx *authzCtx, path string) uint32 {
 // with the rest, exactly. Without carryOver it keeps read & execute.
 func TestLockdown_CarryOver(t *testing.T) {
 	name := fmt.Sprintf("dgcarry%05d", time.Now().UnixNano()%100000)
-	pass := "Dg#" + strconv.FormatInt(time.Now().UnixNano(), 36) + "Zq9!"
+	// 14 characters at most: net user asks (Y/N) about a longer one.
+	pass := fmt.Sprintf("Dg#%08xZ9!", uint32(time.Now().UnixNano()))
 	if out, err := exec.Command("net", "user", name, pass, "/add").CombinedOutput(); err != nil {
 		t.Fatalf("net user %s /add: %v %s", name, err, out)
 	}
