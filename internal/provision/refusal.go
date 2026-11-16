@@ -76,6 +76,7 @@ const (
 	CodeCounterRange     = "counter_range"      // counters: the range would exclude the last or an issued number
 	CodeCounterInFlight  = "counter_in_flight"  // counters retire / range: orders or receipts of its range not finished (range: left out)
 	CodeCounterStore     = "counter_store"      // counters: its store cannot be read (or is missing)
+	CodeIndexUnreadable  = "index_unreadable"   // counters: index entries of the kind cannot be read (acceptUnreadable: the count)
 	CodeFolderUnknown    = "folder_unknown"     // documents: no folder of that key to remove
 	CodeFolderMissing    = "folder_missing"     // documents: the path is not a folder on this machine
 	CodeFolderForbidden  = "folder_forbidden"   // documents: a link, inside the data directory, or not a path link mode takes

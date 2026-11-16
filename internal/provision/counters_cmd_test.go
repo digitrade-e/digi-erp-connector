@@ -518,3 +518,43 @@ func TestCounters_RangeKeepsWhatIsInFlight(t *testing.T) {
 		t.Fatalf("nothing in flight: %v", err)
 	}
 }
+
+// Review m8: an index entry the box cannot read refuses the counters command
+// — its number is not counted in create's floor, range's checks or retire's
+// in-flight count — unless acceptUnreadable names exactly how many a human
+// checked.
+func TestCounters_UnreadableIndexEntriesRefuse(t *testing.T) {
+	sys, env, _ := countersBox(t)
+	ix := hasavshevet.OrderIndexDir(sys.dir)
+	if err := os.MkdirAll(ix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ix, "damaged.json"), []byte("{not an entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	create := func(accept *int) CountersInput {
+		return countersIn("create", "shop", func(in *CountersInput) {
+			in.Kind, in.Min, in.Max, in.AcceptUnreadable = "orders", i64(5_000_000), i64(5_999_999), accept
+		})
+	}
+	n := func(v int) *int { return &v }
+	_, err := ApplyCounters(context.Background(), env, create(nil), false)
+	if r := wantRefusal(t, err, CodeIndexUnreadable); !strings.Contains(r.Fix, "acceptUnreadable: 1") {
+		t.Errorf("refusal %+v", r)
+	}
+	_, err = ApplyCounters(context.Background(), env, create(n(2)), false)
+	wantRefusal(t, err, CodeIndexUnreadable)
+	_, err = ApplyCounters(context.Background(), env, create(n(0)), false)
+	wantRefusal(t, err, CodeSpecInvalid)
+	res, err := ApplyCounters(context.Background(), env, create(n(1)), false)
+	if err != nil || !warned(res, "index_unreadable:") {
+		t.Fatalf("accepted by count: %v %v", res.Warnings, err)
+	}
+	// retire and start-from scan too.
+	_, err = ApplyCounters(context.Background(), env, countersIn("retire", "b2b_test", nil), false)
+	wantRefusal(t, err, CodeIndexUnreadable)
+	_, err = ApplyCounters(context.Background(), env, countersIn("start-from", "b2b", func(in *CountersInput) {
+		in.From, in.ExpectLast = i64(1_000_400), i64(1_000_295)
+	}), false)
+	wantRefusal(t, err, CodeIndexUnreadable)
+}

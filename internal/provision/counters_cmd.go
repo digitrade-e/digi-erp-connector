@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -61,9 +62,16 @@ type CountersInput struct {
 	// ExpectLast is start-from's compare-and-set: the last number issued as
 	// the plan read it (-1: the store is missing). Another value on the box
 	// refuses (counter_moved): a number was issued in between.
-	ExpectLast *int64  `json:"expectLast,omitempty"`
-	AssumeIdle bool    `json:"assumeIdle,omitempty"`
-	Expect     *Expect `json:"expect,omitempty"`
+	ExpectLast *int64 `json:"expectLast,omitempty"`
+	// AcceptUnreadable (review m8) is how many index entries of the kind the
+	// box cannot read a human checked and accepts: their numbers are not
+	// counted in the floor, the range checks or in-flight work, so an
+	// unreadable one could hold a number issued again. Without it — or with
+	// another count than the box's — any unreadable entry refuses
+	// (index_unreadable).
+	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
+	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
+	Expect           *Expect `json:"expect,omitempty"`
 }
 
 // CounterCheck is a counter as the command would leave it (--check), or as it
@@ -94,12 +102,13 @@ func (in CountersInput) Validate() *Refusal {
 		return refuse(CodeSpecInvalid, config.DocumentKeyGrammar, "key %q is not a counter key", in.Key)
 	}
 	only := func(allowed ...string) *Refusal {
+		allowed = append(allowed, "acceptUnreadable") // every op scans the index
 		set := map[string]bool{}
 		for _, a := range allowed {
 			set[a] = true
 		}
 		for name, given := range map[string]bool{"kind": in.Kind != "", "test": in.Test, "store": in.Store != "", "min": in.Min != nil,
-			"max": in.Max != nil, "from": in.From != nil, "expectLast": in.ExpectLast != nil} {
+			"max": in.Max != nil, "from": in.From != nil, "expectLast": in.ExpectLast != nil, "acceptUnreadable": in.AcceptUnreadable != nil} {
 			if given && !set[name] {
 				return refuse(CodeSpecInvalid, "leave "+name+" out of "+in.Op, "%s is not a field of %s", name, in.Op)
 			}
@@ -155,6 +164,10 @@ func (in CountersInput) Validate() *Refusal {
 	if in.Min != nil && in.Max != nil && *in.Min > *in.Max {
 		return refuse(CodeSpecInvalid, "min ≤ max", "min %d is above max %d", *in.Min, *in.Max)
 	}
+	if in.AcceptUnreadable != nil && *in.AcceptUnreadable < 1 {
+		return refuse(CodeSpecInvalid, "give the number of unreadable index entries a human checked (1 or more), or leave it out",
+			"acceptUnreadable %d is not a count", *in.AcceptUnreadable)
+	}
 	return nil
 }
 
@@ -190,14 +203,31 @@ func (a *applier) counterOf(cfg config.Config, key string) (*hasavshevet.Counter
 	return c, nil
 }
 
-// scanCounter reads what the index and history say about a range.
-func (a *applier) scanCounter(kind string, cfg config.Config, min, max int64) (hasavshevet.IssuedScan, *Refusal) {
+// scanCounter reads what the index and history say about a range. Index
+// entries it cannot read refuse (review m8: their numbers are not counted —
+// in create's and start-from's floor, in range's checks, in retire's
+// in-flight count — so a new counter over that range could issue one of them
+// again), unless accept names exactly how many a human checked.
+func (a *applier) scanCounter(kind string, cfg config.Config, min, max int64, accept *int) (hasavshevet.IssuedScan, *Refusal) {
 	scan, err := hasavshevet.ScanIssued(kind, a.dir, strings.TrimSpace(cfg.SendOrderDir), min, max)
 	if err != nil {
 		return scan, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", kind, err)
 	}
-	if scan.Unreadable > 0 {
-		a.warn("%d %s index entries could not be read; their numbers are not counted (state lists them)", scan.Unreadable, kind)
+	if scan.Unreadable == 0 {
+		return scan, nil
+	}
+	fix := fmt.Sprintf("repair or move them (docs/troubleshooting.md § The order index; the logs name them), or — once a human checked them — send acceptUnreadable: %d", scan.Unreadable)
+	switch {
+	case accept == nil:
+		return scan, refuse(CodeIndexUnreadable, fix,
+			"%d %s index entries cannot be read: their numbers are not counted, so one of them could be issued again", scan.Unreadable, kind)
+	case *accept != scan.Unreadable:
+		return scan, refuse(CodeIndexUnreadable, fix,
+			"acceptUnreadable is %d, and %d %s index entries cannot be read now: read the box again", *accept, scan.Unreadable, kind)
+	}
+	if w := fmt.Sprintf("index_unreadable: %d %s index entries could not be read and were accepted (acceptUnreadable); their numbers are not counted",
+		scan.Unreadable, kind); !slices.Contains(a.res.Warnings, w) {
+		a.res.Warnings = append(a.res.Warnings, w)
 	}
 	return scan, nil
 }
@@ -258,7 +288,7 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 			return r
 		}
 		tc := a.tgt.Documents.Counters[in.Key]
-		scan, r := a.scanCounter(tc.Kind, a.tgt, tc.Min, tc.Max)
+		scan, r := a.scanCounter(tc.Kind, a.tgt, tc.Min, tc.Max, in.AcceptUnreadable)
 		if r != nil {
 			return r
 		}
@@ -290,7 +320,7 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 			}
 		case CounterOpRange:
 			old, _ := a.counterOf(a.cur, in.Key)
-			oldScan, r := a.scanCounter(tc.Kind, a.cur, old.Min, old.Max)
+			oldScan, r := a.scanCounter(tc.Kind, a.cur, old.Min, old.Max, in.AcceptUnreadable)
 			if r != nil {
 				return r
 			}
@@ -398,7 +428,7 @@ func (a *applier) counterStartFrom(ctx context.Context, in CountersInput) error 
 	if r != nil {
 		return r
 	}
-	scan, r := a.scanCounter(c.Kind, a.cur, c.Min, c.Max)
+	scan, r := a.scanCounter(c.Kind, a.cur, c.Min, c.Max, in.AcceptUnreadable)
 	if r != nil {
 		return r
 	}

@@ -362,7 +362,10 @@ credential, and one bad "start from max" would block every order for good. Not s
 ```
 
 Each op takes exactly its fields (another one is `spec_invalid`): `create` kind, min, max, test?, store?, from?;
-`range` min, max; `start-from` from, expectLast; `retire` nothing. Keys `[a-z][a-z0-9_]{0,31}` and never a Windows
+`range` min, max; `start-from` from, expectLast; `retire` nothing — and every op `acceptUnreadable?`. Every op scans
+the kind's index; an entry it cannot read refuses (`index_unreadable`, review m8: its number would not be counted in
+the floor, the range checks or the in-flight count, so it could be issued again) unless `acceptUnreadable` is exactly
+the number of such entries a human checked (another number refuses too; then a warning). Keys `[a-z][a-z0-9_]{0,31}` and never a Windows
 device name (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`: a store `aux.json` names a device; folder keys
 too); `1 ≤ min ≤ max ≤ 999 999 999`.
 
@@ -487,7 +490,8 @@ actually changed.
 | `counter_lower` | `counters`: a number at or below one already issued, or below the range — a counter never moves back |
 | `counter_range` | `counters`: the range would exclude the counter's last or an issued number, or `from` is outside it |
 | `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished; `counters range`: the new range would leave one of them out |
-| `counter_store` | `counters`: the counter's store cannot be read |
+| `counter_store` | `counters`: the counter's store cannot be read; `create`: `store: lastOrderNumber` on a box that writes no orders |
+| `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
