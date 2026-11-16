@@ -658,12 +658,16 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 		return Acceptance{}, err // nothing reserved: the counter has not moved
 	}
 	q.highest[c.Key] = n
-	q.gen.Add(1)
 	q.mu.Lock()
 	q.byNumber[n] = orderIndexStem(key)
 	q.mu.Unlock()
 	q.crash(crashOrderAfterIndexReserved)
-	if err := c.advancePast(n); err != nil {
+	err = c.advancePast(n)
+	// Review R5: the cache's generation moves once the store has moved — a
+	// report read in between, under the old generation, would serve the old
+	// last number for the cache's whole lifetime.
+	q.gen.Add(1)
+	if err != nil {
 		// The index owns n, so this order goes ahead under it — refusing would
 		// leave the key reserved and its order never written. But the counter
 		// still offers n: issue nothing more until recovery has moved it on.

@@ -238,6 +238,7 @@ func (w *ReceiptWriter) recoverLocked() error {
 	if err := w.lockDataLocked(); err != nil {
 		return err
 	}
+	defer w.gen.Add(1) // review R5: once the store moved (or not), never before
 	entries, err := w.index.all()
 	if err != nil {
 		return fmt.Errorf("recover receipts: %w", err)
@@ -442,7 +443,9 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 	}
 	w.addIssued(n)
 	w.crash(crashAfterIndexReserved)
-	if err := w.counter.advancePast(n); err != nil {
+	err = w.counter.advancePast(n)
+	w.gen.Add(1) // review R5: after the store moved, never before
+	if err != nil {
 		// The index owns n but the store still offers it. Issue nothing more
 		// until Recover has moved the store past it.
 		w.recovered = false
@@ -613,14 +616,12 @@ func (w *ReceiptWriter) setIssued(entries []*receiptIndexEntry) {
 	w.issuedMu.Lock()
 	w.issued = ns
 	w.issuedMu.Unlock()
-	w.gen.Add(1) // recovery: the store may move next
 }
 
 func (w *ReceiptWriter) addIssued(n int64) {
 	w.issuedMu.Lock()
 	w.issued = append(w.issued, n)
 	w.issuedMu.Unlock()
-	w.gen.Add(1)
 }
 
 // Generation changes whenever this writer reserves a receipt number or

@@ -99,3 +99,37 @@ func TestReceiptWriter_RefusedFolderWritesNothing(t *testing.T) {
 		t.Fatalf("next receipt %d, want 1001", res.ReceiptNumber)
 	}
 }
+
+// Review R5: GET /api/counters' cache keys on the generation, so it must move
+// only once the store has moved. Bumped at the index save, a report read
+// between the save and the store's advance — under the new generation — kept
+// the old last number for the cache's 3 s.
+func TestGeneration_MovesAfterTheStore(t *testing.T) {
+	h := newCountersHarness(t)
+	q := h.queue(false)
+	g0, atIndex := q.Generation(), uint64(0)
+	q.crashPoint = func(p string) {
+		if p == crashOrderAfterIndexReserved {
+			atIndex = q.Generation()
+		}
+	}
+	if _, err := q.Accept(keyedOrder("g1")); err != nil {
+		t.Fatal(err)
+	}
+	if atIndex != g0 || q.Generation() == g0 {
+		t.Fatalf("order: generation %d at the index save (before %d), %d after; want it to move only after the store", atIndex, g0, q.Generation())
+	}
+
+	r := newReceiptHarness(t, 1000)
+	w := r.writer()
+	g0, atIndex = w.Generation(), 0
+	w.crashPoint = func(p string) {
+		if p == crashAfterIndexReserved {
+			atIndex = w.Generation()
+		}
+	}
+	mustWrite(t, w, receiptFor(testKey(1)))
+	if atIndex != g0 || w.Generation() == g0 {
+		t.Fatalf("receipt: generation %d at the index save (before %d), %d after", atIndex, g0, w.Generation())
+	}
+}
