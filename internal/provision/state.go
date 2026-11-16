@@ -48,6 +48,14 @@ type StateResult struct {
 	Orders   StateOrders   `json:"orders"`
 	Receipts StateReceipts `json:"receipts"`
 	Pickup   *StatePickup  `json:"pickup,omitempty"`
+	// Counters (plan 087) are every counter the daemon would build from
+	// config.yaml — today's two under their implicit keys while none is
+	// configured — read from their stores, with the index and history
+	// scanned per range.
+	Counters []hasavshevet.CounterStatus `json:"counters"`
+	// Folders (plan 087) are the typed folders of config.yaml's documents
+	// block, each read like the pickup folder.
+	Folders  []StateFolder `json:"folders"`
 	TLS      *StateTLS     `json:"tls,omitempty"`
 	Link     StateLink     `json:"link"`
 	Disk     StateDisk     `json:"disk"`
@@ -134,6 +142,30 @@ type StateReceipts struct {
 	Index             *StateIndex `json:"index"`
 	// ByImport counts the index's entries by what the receipt importer did (model b).
 	ByImport map[string]*StateNumbers `json:"byImport,omitempty"`
+	// Dir and Counter (plan 087) are the folder receipts are written to
+	// (documents.receipts.folder's, else sendReceiptDir) and the counter that
+	// numbers them.
+	Dir     string `json:"dir,omitempty"`
+	Counter string `json:"counter,omitempty"`
+}
+
+// StateFolder is one typed folder (plan 087).
+type StateFolder struct {
+	Key         string `json:"key"`
+	Kind        string `json:"kind"`
+	Path        string `json:"path"`
+	NamePattern string `json:"namePattern"`
+	TempPrefix  string `json:"tempPrefix,omitempty"`
+	Layout      string `json:"layout,omitempty"`
+	Test        bool   `json:"test"`
+	// Receipts: documents.receipts.folder names it.
+	Receipts bool `json:"receipts,omitempty"`
+	// Pending are files waiting for the folder's importer (its pattern, with
+	// and without the temporary prefix, any case).
+	Pending StateNumbers `json:"pending"`
+	// Imported are the files Masofon renamed (*.MASOFON2.BAK).
+	Imported int    `json:"imported"`
+	Error    string `json:"error,omitempty"`
 }
 
 // StatePickup is the pickup folder of model (a) (DIG-1297).
@@ -228,6 +260,16 @@ func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
 	res.Receipts = receiptState(dir, cfg)
 	if cfg != nil && strings.TrimSpace(cfg.SendOrderPickupDir) != "" {
 		res.Pickup = pickupState(cfg.SendOrderPickupDir)
+	}
+	res.Counters, res.Folders = []hasavshevet.CounterStatus{}, []StateFolder{}
+	if cfg != nil {
+		res.Counters = hasavshevet.ReportCounters(hasavshevet.NewCounterSet(*cfg, dir), nil, nil, dir, strings.TrimSpace(cfg.SendOrderDir))
+		if res.Counters == nil {
+			res.Counters = []hasavshevet.CounterStatus{}
+		}
+		for _, k := range cfg.FolderKeys() {
+			res.Folders = append(res.Folders, folderState(k, cfg.Documents.Folders[k], cfg.Documents.Receipts.Folder == k))
+		}
 	}
 	if cfg != nil && cfg.TLS.Enabled() {
 		res.TLS = tlsState(cfg.TLS.CertFile, env.Now())
@@ -348,7 +390,10 @@ func orderState(dir string, cfg *config.Config) StateOrders {
 }
 
 func receiptState(dir string, cfg *config.Config) StateReceipts {
-	out := StateReceipts{Configured: cfg != nil && strings.TrimSpace(cfg.SendReceiptDir) != ""}
+	out := StateReceipts{Configured: cfg != nil && cfg.ReceiptsConfigured()}
+	if out.Configured {
+		out.Dir, out.Counter = cfg.ReceiptDir(), cfg.ReceiptCounterKey()
+	}
 	byImport := map[string]*StateNumbers{}
 	out.Index = indexState(filepath.Join(dir, "receipts", "index"), func(b []byte) (int64, string, string, error) {
 		var e struct {
@@ -501,6 +546,48 @@ func pickupState(dir string) *StatePickup {
 				if n, err := strconv.ParseInt(digits, 10, 64); err == nil {
 					out.Pending.Count++
 					out.Pending.Numbers = append(out.Pending.Numbers, n)
+				}
+			}
+		}
+	}
+	slices.Sort(out.Pending.Numbers)
+	if len(out.Pending.Numbers) > maxStateNumbers {
+		out.Pending.Numbers = out.Pending.Numbers[len(out.Pending.Numbers)-maxStateNumbers:]
+	}
+	return out
+}
+
+// folderState counts a typed folder's files: waiting (its pattern, with and without the temporary prefix, any case) and
+// imported (renamed *.MASOFON2.BAK).
+func folderState(key string, f config.FolderConfig, receipts bool) StateFolder {
+	out := StateFolder{Key: key, Kind: f.Kind, Path: f.Path, NamePattern: f.NamePattern, TempPrefix: f.TempPrefix, Layout: f.Layout,
+		Test: f.Test, Receipts: receipts, Pending: StateNumbers{Numbers: []int64{}}}
+	hasPrefix, stem, err := config.ParseNamePattern(f.NamePattern, f.TempPrefix)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	stems := []string{strings.ToLower(stem)}
+	if hasPrefix {
+		stems = append(stems, strings.ToLower(f.TempPrefix+stem))
+	}
+	entries, err := os.ReadDir(f.Path)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, e := range entries {
+		lower := strings.ToLower(e.Name())
+		if strings.HasSuffix(lower, ".masofon2.bak") {
+			out.Imported++
+			continue
+		}
+		for _, s := range stems {
+			if digits, ok := strings.CutSuffix(strings.TrimPrefix(lower, s), ".doc"); ok && strings.HasPrefix(lower, s) {
+				if n, err := strconv.ParseInt(digits, 10, 64); err == nil && n > 0 {
+					out.Pending.Count++
+					out.Pending.Numbers = append(out.Pending.Numbers, n)
+					break
 				}
 			}
 		}
