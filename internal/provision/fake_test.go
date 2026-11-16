@@ -105,7 +105,11 @@ type fakeSys struct {
 	candidates []string
 	writers    map[string][]string        // who besides the administrators can change a file (or a folder: FolderWriters)
 	accounts   map[string]dataacl.Account // LookupAccount, by lower-case name
-	daemon     *fakeDaemon
+	// folder-acl: the folders' security (one SDDL each), plan errors, parent writers
+	folderSD      map[string]string
+	lockdownErr   map[string]error
+	parentWriters map[string][]dataacl.Writer
+	daemon        *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
 	calls   []string
@@ -270,6 +274,45 @@ func (s *fakeSys) sidOf(name string) string {
 	h := fnv.New32a()
 	h.Write([]byte(strings.ToLower(name)))
 	return fmt.Sprintf("S-1-5-21-0-0-0-%d", 1000+h.Sum32()%100000)
+}
+
+// The folder-acl fakes: a folder's security is one SDDL string; a lock-down
+// replaces it (and clears its writers), a restore puts the recorded one back.
+func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string) (dataacl.LockdownPlan, error) {
+	s.call("plan-lockdown:" + filepath.Base(dir))
+	if err := s.lockdownErr[dir]; err != nil {
+		return dataacl.LockdownPlan{}, err
+	}
+	cur := s.folderSD[dir]
+	if cur == "" {
+		cur = "O:S-1-5-21-0-0-0-1001D:AI(A;OICIID;0x1301bf;;;BU)"
+	}
+	plan := dataacl.LockdownPlan{Entries: []dataacl.FolderEntry{{Rel: "", FileID: "id-" + dir, SDDL: cur}, {Rel: "history", FileID: "id-h", SDDL: cur}},
+		Principals:    []dataacl.PrincipalRights{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`, Before: "modify", After: "read"}},
+		ParentWriters: s.parentWriters[dir], FolderDACL: "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"}
+	for _, t := range trusted {
+		plan.Principals = append(plan.Principals, dataacl.PrincipalRights{SID: t, Name: t, Before: "modify", After: "modify"})
+	}
+	return plan, nil
+}
+
+func (s *fakeSys) ApplyFolderLockdown(dir string, _ []string, plan dataacl.LockdownPlan) (int, error) {
+	s.call("lockdown:" + filepath.Base(dir))
+	if s.folderSD == nil {
+		s.folderSD = map[string]string{}
+	}
+	s.folderSD[dir] = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	delete(s.writers, dir)
+	return len(plan.Entries), nil
+}
+
+func (s *fakeSys) RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (int, int, error) {
+	s.call("restore-acl:" + filepath.Base(dir))
+	if s.folderSD == nil {
+		s.folderSD = map[string]string{}
+	}
+	s.folderSD[dir] = entries[0].SDDL
+	return len(entries), 0, nil
 }
 
 // LookupAccount answers from accounts (keyed by the lower-case name).

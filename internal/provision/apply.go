@@ -45,6 +45,8 @@ type ApplyResult struct {
 	// write to and the command did not refuse: ones it left as they were
 	// (a warning, as the daemon gives) and ones allowWritable accepted.
 	WritableFolders []StateWritableFolder `json:"writableFolders,omitempty"`
+	// FolderACL (plan 087 review R1c) is the folder-acl command's answer.
+	FolderACL *FolderACLResult `json:"folderAcl,omitempty"`
 	// Check is what the run would do, when it was apply --check.
 	Check *CheckResult `json:"check,omitempty"`
 

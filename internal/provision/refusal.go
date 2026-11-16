@@ -89,6 +89,10 @@ const (
 	// resolve to an account / one that is not a single user account (a group, an alias, a well-known SID).
 	CodeWriterUnknown  = "writer_unknown"
 	CodeWriterTooBroad = "writer_too_broad"
+	// CodeFolderReparse / CodeFolderTooLarge: folder-acl (review R1c) — a reparse point, hard link or replaced
+	// entry in the folder (never followed or rewritten through) / more entries than a lock-down walks.
+	CodeFolderReparse  = "folder_reparse"
+	CodeFolderTooLarge = "folder_too_large"
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

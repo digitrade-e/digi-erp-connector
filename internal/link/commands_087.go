@@ -10,6 +10,9 @@ var provisionCommands087 = map[string]func(args []string) ([]string, bool){
 	"counters":        fixed("counters", "--spec", "-"),
 	"documents-check": fixed("documents", "--check", "--spec", "-"),
 	"documents":       fixed("documents", "--spec", "-"),
+	// review R1c: lock a document folder down, or restore what a lock-down recorded
+	"folder-acl-check": fixed("folder-acl", "--check", "--spec", "-"),
+	"folder-acl":       fixed("folder-acl", "--spec", "-"),
 }
 
 func init() {

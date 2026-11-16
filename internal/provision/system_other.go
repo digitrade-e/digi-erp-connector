@@ -50,3 +50,13 @@ func (otherSystem) LookupAccount(string) (dataacl.Account, error) {
 func (otherSystem) Service(string) (autostart.ServiceInfo, error) {
 	return autostart.ServiceInfo{}, errUnsupported
 }
+
+func (otherSystem) PlanFolderLockdown(string, []string) (dataacl.LockdownPlan, error) {
+	return dataacl.LockdownPlan{}, errUnsupported
+}
+func (otherSystem) ApplyFolderLockdown(string, []string, dataacl.LockdownPlan) (int, error) {
+	return 0, errUnsupported
+}
+func (otherSystem) RestoreFolderACL(string, []dataacl.FolderEntry) (int, int, error) {
+	return 0, 0, errUnsupported
+}

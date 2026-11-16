@@ -22,6 +22,9 @@ func TestPlan087Commands(t *testing.T) {
 		{"documents-check", nil, "documents --check --spec -"},
 		{"documents", nil, "documents --spec -"},
 		{"documents", []string{`C:\herp`}, ""},
+		{"folder-acl-check", nil, "folder-acl --check --spec -"},
+		{"folder-acl", nil, "folder-acl --spec -"},
+		{"folder-acl", []string{`C:\herp`}, ""},
 	}
 	for _, tc := range tests {
 		argv, err := Argv(linkproto.Envelope{Command: tc.command, Args: tc.args})
@@ -37,7 +40,7 @@ func TestPlan087Commands(t *testing.T) {
 			t.Errorf("%s must not require sealing: it carries no secret", name)
 		}
 	}
-	if len(provisionCommands087) != 4 {
+	if len(provisionCommands087) != 6 {
 		t.Errorf("plan 087 has %d commands", len(provisionCommands087))
 	}
 }

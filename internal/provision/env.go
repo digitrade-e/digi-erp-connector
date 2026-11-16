@@ -57,6 +57,12 @@ type System interface {
 	// type (dataacl.LookupAccount; review R1b); dataacl.ErrAccountUnknown
 	// when it names no account.
 	LookupAccount(name string) (dataacl.Account, error)
+	// PlanFolderLockdown, ApplyFolderLockdown and RestoreFolderACL are the
+	// folder-acl command's (dataacl; review R1c): read what a lock-down of a
+	// folder would do, write it, put a recorded pre-image back.
+	PlanFolderLockdown(dir string, trusted []string) (dataacl.LockdownPlan, error)
+	ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error)
+	RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (restored, skipped int, err error)
 }
 
 // Database is the SQL Server work provisioning does, as fixed operations.

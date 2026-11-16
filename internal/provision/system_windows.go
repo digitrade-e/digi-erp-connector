@@ -183,6 +183,15 @@ func (winSystem) FolderWriters(dir string) ([]dataacl.Writer, error) {
 func (winSystem) LookupAccount(name string) (dataacl.Account, error) {
 	return dataacl.LookupAccount(name)
 }
+func (winSystem) PlanFolderLockdown(dir string, trusted []string) (dataacl.LockdownPlan, error) {
+	return dataacl.PlanLockdown(dir, trusted)
+}
+func (winSystem) ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error) {
+	return dataacl.ApplyLockdown(dir, trusted, plan)
+}
+func (winSystem) RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (int, int, error) {
+	return dataacl.RestoreFolder(dir, entries)
+}
 
 func (winSystem) ImporterCandidates() ([]string, error) {
 	const max = 20
