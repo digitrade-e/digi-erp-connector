@@ -125,38 +125,63 @@ func (c Config) CountersConfigured() bool { return len(c.Documents.Counters) > 0
 
 // DefaultOrderCounterKey is the key of the counter that numbers an order
 // without a documentRule: the configured one with store lastOrderNumber, or
-// ImplicitOrderCounterKey while no counter is configured; "" when counters
-// are configured and none adopts lastOrderNumber.json (ValidateDocuments
-// refuses that when orders are configured).
+// ImplicitOrderCounterKey while no orders counter is configured (today's
+// counter, under its implicit key); "" when orders counters are configured
+// and none adopts lastOrderNumber.json (ValidateDocuments refuses that when
+// orders are configured).
 func (c Config) DefaultOrderCounterKey() string {
-	if !c.CountersConfigured() {
-		return ImplicitOrderCounterKey
+	if k := c.counterWithStore(CounterStoreLastOrderNumber); k != "" {
+		return k
 	}
-	for _, k := range c.CounterKeys() {
-		if c.Documents.Counters[k].Store == CounterStoreLastOrderNumber {
-			return k
-		}
+	if !c.hasCounterOfKind(DocumentKindOrders) {
+		return ImplicitOrderCounterKey
 	}
 	return ""
 }
 
 // ReceiptCounterKey is the key of the counter receipts are numbered from:
 // documents.receipts.counter, else the configured one with store
-// receiptNumber, else ImplicitReceiptCounterKey while no counter is
-// configured.
+// receiptNumber, else ImplicitReceiptCounterKey while no receipts counter is
+// configured; "" otherwise (ValidateDocuments refuses that when receipts are
+// configured).
 func (c Config) ReceiptCounterKey() string {
 	if k := strings.TrimSpace(c.Documents.Receipts.Counter); k != "" {
 		return k
 	}
-	if !c.CountersConfigured() {
+	if k := c.counterWithStore(CounterStoreReceiptNumber); k != "" {
+		return k
+	}
+	if !c.hasCounterOfKind(DocumentKindReceipts) {
 		return ImplicitReceiptCounterKey
 	}
+	return ""
+}
+
+// ImplicitCounter reports whether kind is numbered by today's store under its
+// implicit key: no counter of that kind is configured. Counters are adopted
+// one kind at a time (a box writing orders and receipts adopts one store,
+// then the other); a kind without a configured counter keeps today's. Its
+// range (1-999 999 999) may overlap the other kind's configured ranges: each
+// kind has its own index, history and job ids, so that is harmless, and
+// within a kind the implicit counter never sits beside a configured one.
+func (c Config) ImplicitCounter(kind string) bool { return !c.hasCounterOfKind(kind) }
+
+func (c Config) counterWithStore(store string) string {
 	for _, k := range c.CounterKeys() {
-		if c.Documents.Counters[k].Store == CounterStoreReceiptNumber {
+		if c.Documents.Counters[k].Store == store {
 			return k
 		}
 	}
 	return ""
+}
+
+func (c Config) hasCounterOfKind(kind string) bool {
+	for _, ctr := range c.Documents.Counters {
+		if ctr.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // ReceiptDir is the folder receipts are written to: the bound typed folder's
@@ -320,6 +345,12 @@ func (c Config) validateCounters() error {
 		default:
 			return fmt.Errorf("counter %s: kind %q is not %q or %q", k, ctr.Kind, DocumentKindOrders, DocumentKindReceipts)
 		}
+		// The implicit keys name today's stores while their kind has no
+		// configured counter: a configured counter of the other kind under
+		// one of them would share its key.
+		if (k == ImplicitOrderCounterKey && ctr.Kind != DocumentKindOrders) || (k == ImplicitReceiptCounterKey && ctr.Kind != DocumentKindReceipts) {
+			return fmt.Errorf("counter %s: the key %q is today's %s counter's; a counter of kind %s takes another key", k, k, map[string]string{ImplicitOrderCounterKey: "order", ImplicitReceiptCounterKey: "receipt"}[k], ctr.Kind)
+		}
 		if ctr.Min < 1 || ctr.Max > MaxDocumentNumber || ctr.Min > ctr.Max {
 			return fmt.Errorf("counter %s: range %d-%d is not within 1-%d with min ≤ max", k, ctr.Min, ctr.Max, MaxDocumentNumber)
 		}
@@ -358,10 +389,10 @@ func (c Config) validateCounters() error {
 	if c.OrdersConfigured() {
 		k := c.DefaultOrderCounterKey()
 		if k == "" {
-			return fmt.Errorf("orders are configured but no counter adopts the order counter (store %s): today's counter becomes a key before any other counter is added",
+			return fmt.Errorf("orders are configured but no counter adopts the order counter (store %s): today's counter becomes a key before any other orders counter is added",
 				CounterStoreLastOrderNumber)
 		}
-		ctr := c.Documents.Counters[k]
+		ctr := c.Documents.Counters[k] // the zero value for the implicit counter
 		if ctr.Test {
 			return fmt.Errorf("counter %s numbers the orders sent without a documentRule, which go to the production destination: it cannot be a test counter", k)
 		}
@@ -467,7 +498,7 @@ func (c Config) validateReceiptsBinding() error {
 			return fmt.Errorf("receipts are configured but no counter numbers them: adopt the receipt store (store %s) or name one in documents.receipts.counter",
 				CounterStoreReceiptNumber)
 		}
-		ctr := c.Documents.Counters[k]
+		ctr := c.Documents.Counters[k] // the zero value for the implicit counter
 		if ctr.Retired {
 			return fmt.Errorf("counter %s numbers the receipts: it cannot be retired", k)
 		}

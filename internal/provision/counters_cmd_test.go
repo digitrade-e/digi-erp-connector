@@ -370,3 +370,43 @@ func TestCounters_InputValidation(t *testing.T) {
 		t.Errorf("unknown field: %d %s", code, out)
 	}
 }
+
+// BFL writes orders and receipts: today's two stores are adopted one after
+// the other, in either order, then the test counters beside them.
+func TestCounters_AdoptBothStoresOnAnOrdersAndReceiptsBox(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	env := testEnv(sys, fdb)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.SendReceiptDir = mkdir(t, "kupain")
+	writeConfig(t, sys.dir, cfg)
+	writeOrderCounter(t, orders, 1_000_295)
+	if err := hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(sys.dir)).Seed(500_010); err != nil {
+		t.Fatal(err)
+	}
+	steps := []CountersInput{
+		countersIn("create", "receipts", func(in *CountersInput) {
+			in.ChangeSet = "cs-counters-r-01"
+			in.Kind, in.Store, in.Min, in.Max = "receipts", config.CounterStoreReceiptNumber, i64(500_000), i64(599_999)
+		}),
+		countersIn("create", "b2b", func(in *CountersInput) {
+			in.ChangeSet = "cs-counters-o-01"
+			in.Kind, in.Store, in.Min, in.Max = "orders", config.CounterStoreLastOrderNumber, i64(1_000_000), i64(1_999_999)
+		}),
+		countersIn("create", "receipts_test", func(in *CountersInput) {
+			in.ChangeSet = "cs-counters-rt-01"
+			in.Kind, in.Test, in.Min, in.Max = "receipts", true, i64(9_100_000), i64(9_199_999)
+		}),
+	}
+	for _, in := range steps {
+		if _, err := ApplyCounters(context.Background(), env, in, false); err != nil {
+			t.Fatalf("%s: %v", in.Key, err)
+		}
+	}
+	cfg, _ = readConfig(t, sys.dir)
+	if counterLastOn(t, sys.dir, cfg, "receipts") != 500_009 || counterLastOn(t, sys.dir, cfg, "b2b") != 1_000_295 {
+		t.Fatal("adopting moved a store")
+	}
+	if cfg.ReceiptCounterKey() != "receipts" || cfg.DefaultOrderCounterKey() != "b2b" {
+		t.Errorf("keys %q %q", cfg.ReceiptCounterKey(), cfg.DefaultOrderCounterKey())
+	}
+}

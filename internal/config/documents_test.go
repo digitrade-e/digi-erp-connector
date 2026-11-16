@@ -330,3 +330,29 @@ func TestDocuments_RoundTripsThroughYAML(t *testing.T) {
 		t.Errorf("lost fields: %+v", back.Documents)
 	}
 }
+
+// A box that writes orders and receipts adopts one store, then the other:
+// the kind without a configured counter keeps today's under its implicit key.
+func TestValidateDocuments_OneKindAtATime(t *testing.T) {
+	cfg := Config{ERP: ERPHasavshevet, SendOrderDir: t.TempDir(), SendReceiptDir: t.TempDir(), Documents: DocumentsConfig{
+		Counters: map[string]CounterConfig{"b2b": {Kind: DocumentKindOrders, Min: 1_000_000, Max: 1_999_999, Store: CounterStoreLastOrderNumber}},
+	}}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("orders adopted first: %v", err)
+	}
+	if cfg.ReceiptCounterKey() != ImplicitReceiptCounterKey || !cfg.ImplicitCounter(DocumentKindReceipts) || cfg.ImplicitCounter(DocumentKindOrders) {
+		t.Errorf("receipts keep today's store: %q", cfg.ReceiptCounterKey())
+	}
+	cfg.Documents.Counters = map[string]CounterConfig{"receipts": {Kind: DocumentKindReceipts, Min: 500_000, Max: 599_999, Store: CounterStoreReceiptNumber}}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("receipts adopted first: %v", err)
+	}
+	if cfg.DefaultOrderCounterKey() != ImplicitOrderCounterKey {
+		t.Errorf("orders keep today's counter: %q", cfg.DefaultOrderCounterKey())
+	}
+	// The implicit keys are not for a counter of the other kind.
+	cfg.Documents.Counters["orders"] = CounterConfig{Kind: DocumentKindReceipts, Min: 1, Max: 9}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "today's order counter") {
+		t.Errorf("a receipts counter named orders: %v", err)
+	}
+}

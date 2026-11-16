@@ -146,8 +146,10 @@ documents:
 
 Refused (`config.ValidateDocuments`, from `ValidateOrders`: the daemon, `CheckConfig`, the GUI save): keys not
 `[a-z][a-z0-9_]{0,31}`; a kind other than `orders`/`receipts`; a range outside 1–999 999 999; **overlapping ranges —
-any two counters on the box**; a store adopted twice or by the wrong kind; with counters configured and orders on, no
-counter adopting `lastOrderNumber` (or it test or retired); receipts on and no receipt counter (or it retired); a
+any two counters on the box**; a store adopted twice or by the wrong kind; orders on and orders counters configured but none
+adopting `lastOrderNumber` (or it test or retired); receipts on and receipts counters configured but none bound or
+adopting `receiptNumber` (or it retired); the key `orders` / `receipts` on a counter of the other kind (a kind with
+no configured counter keeps today's store under that implicit key); a
 folder path that is relative, is or holds `sendOrderDir`, or is another folder's; a test folder (or one of the other
 kind) at the pickup or receipt folder; a name pattern outside the closed grammar (`{prefix}` optional and first, an
 ASCII stem starting with a letter, `{n}`, `.doc`; no device name); `tempPrefix` without `{prefix}` or the reverse; an

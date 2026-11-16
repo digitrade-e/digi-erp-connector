@@ -361,8 +361,11 @@ Each op takes exactly its fields (another one is `spec_invalid`): `create` kind,
 - **`create`** adds `documents.counters.<key>` to `config.yaml`. `store` adopts one of today's stores **in place**:
   `lastOrderNumber` (`sendOrderDir\lastOrderNumber.json`, kind orders) or `receiptNumber`
   (`DataDir\receipts\receiptNumber.json`, kind receipts); otherwise the counter has a store of its own,
-  `DataDir\counters\<key>.json` `{"last": N}`. Today's order counter must be adopted **first** (the daemon's own
-  check, `config_refused`): it numbers the orders sent without a documentRule. The store is written while the service
+  `DataDir\counters\<key>.json` `{"last": N}`. Within a kind, today's store is adopted **before any other counter of
+  that kind** (the daemon's own check, `config_refused`): the order counter numbers the orders sent without a
+  documentRule. A kind with no configured counter keeps today's store under its implicit key (`orders` /
+  `receipts`, range 1–999 999 999), so a box writing both adopts one store, then the other, in either order. The
+  keys `orders` and `receipts` are for a counter of that kind only. The store is written while the service
   is stopped (after `config.yaml`, before the start) — only when it is missing or below the start: `from` is the
   next number, by default the lowest one above `min`, the adopted store's last and every number already issued in
   the range (order or receipt index, and history, scanned). `from` at or below one of those is `counter_lower`, past

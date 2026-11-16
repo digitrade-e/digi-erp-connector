@@ -184,6 +184,20 @@ func NewCounterSet(cfg config.Config, dataDir string) *CounterSet {
 		}
 		s.add(c)
 	}
+	// A kind with no configured counter yet keeps today's store under its
+	// implicit key (counters are adopted one kind at a time) — the order
+	// counter failing closed now that counters are configured.
+	if cfg.OrdersConfigured() && cfg.ImplicitCounter(config.DocumentKindOrders) {
+		s.orderStore = NewOrderNumberStore(orderPath)
+		s.orderStore.refuseMissing = true
+		s.add(&Counter{Key: config.ImplicitOrderCounterKey, Kind: config.DocumentKindOrders, Min: 1, Max: config.MaxDocumentNumber,
+			Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: orderPath, src: s.orderStore})
+	}
+	if cfg.ReceiptsConfigured() && cfg.ImplicitCounter(config.DocumentKindReceipts) {
+		p := ReceiptNumberStorePath(dataDir)
+		s.add(&Counter{Key: config.ImplicitReceiptCounterKey, Kind: config.DocumentKindReceipts, Min: 1, Max: config.MaxDocumentNumber,
+			Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: NewReceiptNumberStore(p)})
+	}
 	if cfg.OrdersConfigured() {
 		s.defaultKey = cfg.DefaultOrderCounterKey()
 	}
