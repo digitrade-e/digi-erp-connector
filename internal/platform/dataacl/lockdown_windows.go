@@ -47,13 +47,60 @@ func fileIDOf(info windows.ByHandleFileInformation) string {
 	return fmt.Sprintf("%08x-%08x%08x", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow)
 }
 
-// readSD reads an opened entry's owner and DACL.
+// readSD reads an opened entry's owner and DACL as the kernel holds them
+// (kernelSD), never MARTA's view of them.
 func readSD(path string, n node) (*windows.SECURITY_DESCRIPTOR, error) {
-	sd, err := windows.GetSecurityInfo(n.h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	sd, err := kernelSD(n.h, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return nil, fmt.Errorf("dataacl: read the security of %s: %w", path, err)
 	}
 	return sd, nil
+}
+
+var procGetKernelObjectSecurity = windows.NewLazySystemDLL("advapi32.dll").NewProc("GetKernelObjectSecurity")
+
+// kernelSD reads an opened object's security descriptor as the kernel holds
+// it (GetKernelObjectSecurity: self-relative, in Go memory). GetSecurityInfo
+// is MARTA's: for an entry without the auto-inherited mark it answers the
+// entry converted against its parent — explicit entries that match the
+// parent's inheritable ones marked inherited, the protection inferred — and a
+// lock-down that wrote that view back would make it the entry (seen on the
+// Windows CI).
+func kernelSD(h windows.Handle, info windows.SECURITY_INFORMATION) (*windows.SECURITY_DESCRIPTOR, error) {
+	buf := make([]byte, 1024)
+	for i := 0; i < 4; i++ {
+		var need uint32
+		r, _, err := procGetKernelObjectSecurity.Call(uintptr(h), uintptr(info), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&need)))
+		if r != 0 {
+			return (*windows.SECURITY_DESCRIPTOR)(unsafe.Pointer(&buf[0])), nil
+		}
+		if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || need <= uint32(len(buf)) {
+			return nil, err
+		}
+		buf = make([]byte, need)
+	}
+	return nil, errors.New("dataacl: the security descriptor kept growing while it was read")
+}
+
+// seDaclAutoInheritReq is SE_DACL_AUTO_INHERIT_REQ (winnt.h; not in x/sys).
+const seDaclAutoInheritReq windows.SECURITY_DESCRIPTOR_CONTROL = 0x0100
+
+// daclControl is the control a handle write needs for a DACL to land as
+// meant (the Windows CI's probe, read back raw): SetKernelObjectSecurity
+// takes the protection from SE_DACL_PROTECTED in the descriptor, not from
+// PROTECTED_/UNPROTECTED_DACL_SECURITY_INFORMATION (those are MARTA's), and
+// clears the auto-inherited mark unless SE_DACL_AUTO_INHERIT_REQ asks for it
+// — with it, the DACL is still written exactly as given (no entry merged
+// back from the old one).
+func daclControl(sd *windows.SECURITY_DESCRIPTOR, protected, autoInherited bool) error {
+	var set windows.SECURITY_DESCRIPTOR_CONTROL
+	if protected {
+		set |= windows.SE_DACL_PROTECTED
+	}
+	if autoInherited {
+		set |= windows.SE_DACL_AUTO_INHERITED | seDaclAutoInheritReq
+	}
+	return sd.SetControl(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED|seDaclAutoInheritReq, set)
 }
 
 // walkFolder visits every entry under dir (whose handle the caller holds and
@@ -130,8 +177,9 @@ func daclBytes(sd *windows.SECURITY_DESCRIPTOR) ([]byte, error) {
 }
 
 // writeDACL sets a raw DACL through the handle, protected or not, its
-// auto-inherited mark as the entry had it (an entry's inheritance is kept:
-// Windows' later propagation reads the mark); no propagation.
+// auto-inherited mark as the entry had it (daclControl: MARTA reads an entry
+// without the mark converted, and its later propagation from a parent goes
+// by that view); no propagation.
 func writeDACL(path string, h windows.Handle, acl []byte, protected, autoInherited bool) error {
 	sd, err := windows.NewSecurityDescriptor()
 	if err != nil {
@@ -140,10 +188,8 @@ func writeDACL(path string, h windows.Handle, acl []byte, protected, autoInherit
 	if err := sd.SetDACL((*windows.ACL)(unsafe.Pointer(&acl[0])), true, false); err != nil {
 		return err
 	}
-	if autoInherited {
-		if err := sd.SetControl(windows.SE_DACL_AUTO_INHERITED, windows.SE_DACL_AUTO_INHERITED); err != nil {
-			return err
-		}
+	if err := daclControl(sd, protected, autoInherited); err != nil {
+		return err
 	}
 	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
 	if protected {
@@ -474,6 +520,11 @@ func restoreSD(path string, n node, sddl string) error {
 	}
 	control, _, err := sd.Control()
 	if err != nil {
+		return err
+	}
+	// The recorded protection and auto-inherited mark, as daclControl writes
+	// them (without the request the kernel drops the mark).
+	if err := daclControl(sd, control&windows.SE_DACL_PROTECTED != 0, control&windows.SE_DACL_AUTO_INHERITED != 0); err != nil {
 		return err
 	}
 	info := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)

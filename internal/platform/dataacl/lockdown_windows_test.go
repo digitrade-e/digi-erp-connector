@@ -24,6 +24,27 @@ func ownerAndDACL(t *testing.T, path string) string {
 	return sd.String()
 }
 
+// kernelOf is path's owner and DACL as the kernel holds them (kernelSD),
+// with the DACL's control: MARTA's readers (daclOf, ownerAndDACL) show an
+// entry without the auto-inherited mark converted against its parent.
+func kernelOf(t *testing.T, path string) (string, windows.SECURITY_DESCRIPTOR_CONTROL) {
+	t.Helper()
+	n, err := open(path, windows.READ_CONTROL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(n.h)
+	sd, err := kernelSD(n.h, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctl, _, err := sd.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String(), ctl
+}
+
 // longTemp is t.TempDir() by its long name (the CI runner's is RUNNER~1).
 func longTemp(t *testing.T) string {
 	t.Helper()
@@ -59,7 +80,7 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 	paths := []string{herp, filepath.Join(herp, "b.txt"), sub, filepath.Join(sub, "a.txt")}
 	before := map[string]string{}
 	for _, p := range paths {
-		before[p] = ownerAndDACL(t, p)
+		before[p], _ = kernelOf(t, p)
 	}
 	me := currentUserSID(t)
 	users := wellKnownName(t, windows.WinBuiltinUsersSid)
@@ -72,7 +93,7 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 		t.Fatalf("plan %+v", plan)
 	}
 	for _, p := range paths { // the plan wrote nothing
-		if got := ownerAndDACL(t, p); got != before[p] {
+		if got, _ := kernelOf(t, p); got != before[p] {
 			t.Fatalf("the plan changed %s", p)
 		}
 	}
@@ -94,9 +115,9 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 		t.Fatalf("ApplyLockdown = %d, %v", n, err)
 	}
 	for _, p := range []string{herp, sub} {
-		d, ctl := daclOf(t, p)
-		if ctl&windows.SE_DACL_PROTECTED == 0 {
-			t.Errorf("%s: its DACL is no longer protected", p)
+		d, ctl := kernelOf(t, p) // the kernel's: MARTA infers protection
+		if ctl&windows.SE_DACL_PROTECTED == 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 {
+			t.Errorf("%s: its DACL is not protected and auto-inherited: %s [%#x]", p, d, ctl)
 		}
 		if strings.Contains(d, me) {
 			t.Errorf("%s: an entry was added for the trusted account: %s", p, d)
@@ -106,11 +127,11 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 			t.Errorf("%s after the lock-down: writers %+v, %v", p, who, err)
 		}
 	}
-	if d, _ := daclOf(t, sub); !strings.Contains(d, "0x1200a9;;;WD)") {
+	if d, _ := kernelOf(t, sub); !strings.Contains(d, "0x1200a9;;;WD)") {
 		t.Errorf("the subfolder's Everyone entry is not read & execute: %s", d)
 	}
 	// Inheritance kept: b.txt still inherits, auto-inherited as before.
-	if d, ctl := daclOf(t, filepath.Join(herp, "b.txt")); ctl&windows.SE_DACL_AUTO_INHERITED == 0 || ctl&windows.SE_DACL_PROTECTED != 0 || !strings.Contains(d, ";ID;") {
+	if d, ctl := kernelOf(t, filepath.Join(herp, "b.txt")); ctl&windows.SE_DACL_AUTO_INHERITED == 0 || ctl&windows.SE_DACL_PROTECTED != 0 || !strings.Contains(d, ";ID;") {
 		t.Errorf("b.txt after the lock-down: %s (control %#x)", d, ctl)
 	}
 
@@ -118,20 +139,11 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 	if err != nil || restored != 4 || skipped != 0 {
 		t.Fatalf("RestoreFolder = %d restored, %d skipped, %v", restored, skipped, err)
 	}
-	for _, p := range paths {
-		got := ownerAndDACL(t, p)
-		if ownerPart(got) != ownerPart(before[p]) || !sameDACL(got, before[p]) {
+	for _, p := range paths { // exactly, the marks included
+		if got, _ := kernelOf(t, p); got != before[p] {
 			t.Errorf("%s after the restore:\n got  %s\n want %s", p, got, before[p])
 		}
 	}
-}
-
-// ownerPart is the "O:…" of an SDDL.
-func ownerPart(sddl string) string {
-	if i := strings.Index(sddl, "D:"); i >= 0 {
-		return sddl[:i]
-	}
-	return sddl
 }
 
 // Review T2 on a real folder: a principal that could only add files gains no
@@ -278,8 +290,7 @@ func TestLockdown_LongPaths(t *testing.T) {
 	mkfile(t, file)
 	setDACL(t, longPath(deep), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	setDACL(t, longPath(file), "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	before := ownerAndDACL(t, longPath(file))
-	_, ctlBefore := daclOf(t, longPath(file))
+	before, ctlBefore := kernelOf(t, file)
 	plan, err := PlanLockdown(herp, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -294,26 +305,28 @@ func TestLockdown_LongPaths(t *testing.T) {
 	if _, err := ApplyLockdown(herp, nil, plan); err != nil {
 		t.Fatal(err)
 	}
-	after := ownerAndDACL(t, longPath(file))
-	if !strings.Contains(after, "0x1200a9;;;BU)") || strings.Contains(after, "0x1301bf;;;BU") {
+	after, ctl := kernelOf(t, file)
+	if !strings.Contains(after, "(A;;0x1200a9;;;BU)") || strings.Contains(after, "0x1301bf;;;BU") || strings.Contains(after, ";ID;") {
 		t.Errorf("the deep file after the lock-down: %s (before: %s)", after, before)
 	}
 	const inheritance = windows.SE_DACL_AUTO_INHERITED | windows.SE_DACL_PROTECTED
-	if _, ctl := daclOf(t, longPath(file)); ctl&inheritance != ctlBefore&inheritance {
+	if ctlBefore&windows.SE_DACL_PROTECTED == 0 || ctl&inheritance != ctlBefore&inheritance {
 		t.Errorf("the deep file's inheritance changed: control %#x, before %#x", ctl, ctlBefore)
 	}
 	if _, skipped, err := RestoreFolder(herp, plan.Entries); err != nil || skipped != 0 {
 		t.Fatalf("RestoreFolder: %d skipped, %v", skipped, err)
 	}
-	if got := ownerAndDACL(t, longPath(file)); !sameDACL(got, before) {
+	if got, _ := kernelOf(t, file); got != before {
 		t.Errorf("the deep file after the restore:\n got  %s\n want %s", got, before)
 	}
 }
 
 // writeDACL writes one entry's DACL through its handle and nothing else
-// (review T2): a protected entry stays protected with its explicit entries,
-// an inheriting one keeps its inherited entries and its auto-inherited mark,
-// and writing a folder never touches what is in it.
+// (review T2), as the kernel holds it afterwards: a protected entry stays
+// protected with its explicit entries, an inheriting one keeps its inherited
+// entries, both keep their auto-inherited mark, and writing a folder never
+// touches what is in it. (MARTA's readers would show an entry without the
+// mark converted against its parent — not what is on disk.)
 func TestWriteDACL_KeepsInheritanceAndTouchesNoChild(t *testing.T) {
 	root := longTemp(t)
 	d := filepath.Join(root, "d")
@@ -323,11 +336,10 @@ func TestWriteDACL_KeepsInheritanceAndTouchesNoChild(t *testing.T) {
 	setDACL(t, d, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	setDACL(t, f, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	show := func(p string) string {
-		s, ctl := daclOf(t, p)
+		s, ctl := kernelOf(t, p)
 		return fmt.Sprintf("%s [%#x]", s, ctl)
 	}
 	fBefore, gBefore := show(f), show(g)
-	t.Logf("before: d %s\n f %s\n g %s", show(d), fBefore, gBefore)
 	tr, err := newTrust()
 	if err != nil {
 		t.Fatal(err)
@@ -346,18 +358,20 @@ func TestWriteDACL_KeepsInheritanceAndTouchesNoChild(t *testing.T) {
 		if err := writeDACL(p, n.h, e.after, root || e.protected, e.autoInherited); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("wrote %s (protected %v, auto-inherited %v): now %s", filepath.Base(p), root || e.protected, e.autoInherited, show(p))
 	}
 	write(d, true)
+	if s, ctl := kernelOf(t, d); ctl&windows.SE_DACL_PROTECTED == 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 || !strings.Contains(s, "(A;OICI;0x1200a9;;;BU)") {
+		t.Errorf("d after its write: %s [%#x]", s, ctl)
+	}
 	if show(f) != fBefore || show(g) != gBefore {
 		t.Errorf("writing the folder changed what is in it:\n f %s (was %s)\n g %s (was %s)", show(f), fBefore, show(g), gBefore)
 	}
 	write(f, false)
-	if s, ctl := daclOf(t, f); ctl&windows.SE_DACL_PROTECTED == 0 || strings.Contains(s, ";ID;") || !strings.Contains(s, "(A;;0x1200a9;;;BU)") {
+	if s, ctl := kernelOf(t, f); ctl&windows.SE_DACL_PROTECTED == 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 || strings.Contains(s, ";ID;") || !strings.Contains(s, "(A;;0x1200a9;;;BU)") {
 		t.Errorf("f after its write: %s [%#x]", s, ctl)
 	}
 	write(g, false)
-	if s, ctl := daclOf(t, g); ctl&windows.SE_DACL_PROTECTED != 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 || !strings.Contains(s, ";ID;") {
+	if s, ctl := kernelOf(t, g); ctl&windows.SE_DACL_PROTECTED != 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 || !strings.Contains(s, "(A;ID;0x1200a9;;;BU)") || strings.Contains(s, "0x1301bf") {
 		t.Errorf("g after its write: %s [%#x]", s, ctl)
 	}
 }
