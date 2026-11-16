@@ -65,12 +65,17 @@ func (l *Link) knownSetupSHA(version string) string {
 			return job.SHA256
 		}
 	}
+	// review m11: a policy counts only at the box's epoch floor — a retired key's policy names no digest here
+	minEpoch, err := l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
+	if err != nil {
+		return ""
+	}
 	l.cfg.Store.policyMu.Lock()
 	pf, err := l.cfg.Store.loadPolicies()
 	l.cfg.Store.policyMu.Unlock()
 	if err == nil {
 		for _, sp := range pf.Policies {
-			if p, _, err := l.cfg.Team.VerifySignedPolicy(sp.Signed, 0); err == nil && p.Target != nil && p.Target.Version == version {
+			if p, _, err := l.cfg.Team.VerifySignedPolicy(sp.Signed, minEpoch); err == nil && p.Target != nil && p.Target.Version == version {
 				return p.Target.SHA256
 			}
 		}
