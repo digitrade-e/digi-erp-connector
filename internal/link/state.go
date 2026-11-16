@@ -70,6 +70,9 @@ var ErrNoSecret = errors.New("link: secret not found")
 const (
 	secretKeys     = "link_box_keys"
 	secretMinEpoch = "link_min_key_epoch"
+	// secretPolicyFloors is the seq floor per policy scope key (plan 088 review m3, m4), kept apart from
+	// link\policy.json so that a policy file deleted, lost or unreadable never reopens a replay.
+	secretPolicyFloors = "link_policy_floors"
 )
 
 // Store keeps the link's state under one directory.

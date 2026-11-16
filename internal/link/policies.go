@@ -71,9 +71,9 @@ type storedPolicy struct {
 	Signed     linkproto.SignedPolicy `json:"signed"`
 }
 
-// loadPolicies reads policy.json; none yet is an empty store. One that cannot be read is an error, never an empty
-// store: starting over would let a relay replay an older policy (fail closed, as the nonces). Unknown fields are
-// ignored, so a build rolled back to reads what a later one wrote.
+// loadPolicies reads policy.json; none yet is an empty store. One that cannot be read is an error: the scheduler holds,
+// and a delivery starts over only against the seq floors kept apart (loadFloors), never from nothing. Unknown fields
+// are ignored, so a build rolled back to reads what a later one wrote.
 func (s *Store) loadPolicies() (policyFile, error) {
 	b, err := readLinkFile(s.Dir, policyPath(s.Dir), 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -92,33 +92,96 @@ func (s *Store) loadPolicies() (policyFile, error) {
 	return pf, nil
 }
 
+// policyFloor is the highest seq the box accepted for one scope key, the SHA-256 of that policy's signed bytes (the
+// same seq comes back only as the same bytes) and the epoch of the key that signed it (once the box's epoch floor is
+// above it, the floor no longer binds: review m1).
+type policyFloor struct {
+	Seq    int64  `json:"seq"`
+	SHA256 string `json:"sha256"`
+	Epoch  int    `json:"epoch,omitempty"`
+}
+
+type floorRecord struct {
+	V      int                    `json:"v"`
+	Floors map[string]policyFloor `json:"floors"`
+}
+
+// loadFloors reads the seq floors (review m3, m4: kept in the secrets store beside the key-epoch floor, never pruned,
+// never started over). present is false when none was ever stored; one that cannot be read is an error (fail closed).
+func (s *Store) loadFloors() (floors map[string]policyFloor, present bool, err error) {
+	if s.Secrets == nil {
+		return nil, false, errors.New("no secrets store for the policy seq floors")
+	}
+	b, err := s.Secrets.Get(secretPolicyFloors)
+	if errors.Is(err, ErrNoSecret) {
+		return map[string]policyFloor{}, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("the policy seq floors cannot be read: %w", err)
+	}
+	var rec floorRecord
+	if err := json.Unmarshal(b, &rec); err != nil || rec.V != 1 {
+		return nil, false, fmt.Errorf("the policy seq floors do not parse (version %d): %v", rec.V, err)
+	}
+	if rec.Floors == nil {
+		rec.Floors = map[string]policyFloor{}
+	}
+	return rec.Floors, true, nil
+}
+
+func (s *Store) saveFloors(floors map[string]policyFloor) error {
+	b, _ := json.Marshal(floorRecord{V: 1, Floors: floors})
+	return s.Secrets.Set(secretPolicyFloors, b)
+}
+
+// floorOf is the floor an accepted policy sets.
+func floorOf(sp storedPolicy) policyFloor {
+	return policyFloor{Seq: sp.Seq, SHA256: linkproto.SHA256Hex(sp.Signed.Policy), Epoch: sp.Epoch}
+}
+
+// mergeFloors raises floors to what policy.json holds (a floor record lost, or older than the file).
+func mergeFloors(floors map[string]policyFloor, pf policyFile) {
+	for _, sp := range pf.Policies {
+		key := sp.Scope.Key()
+		if cur, ok := floors[key]; !ok || sp.Seq > cur.Seq {
+			floors[key] = floorOf(sp)
+		}
+	}
+}
+
 func (s *Store) savePolicies(pf policyFile) error {
 	pf.V = 1
 	b, _ := json.MarshalIndent(pf, "", "  ")
 	return writeLinkFile(s.Dir, policyPath(s.Dir), append(b, '\n'))
 }
 
-// put records an accepted policy for its scope key: a higher seq replaces, the same bytes at the same seq are a policy
-// delivered again (nothing changes), anything else is refused (seq_not_newer). An entry whose key is now below the
-// epoch floor (minEpoch) no longer binds (review m1): a stolen key's seq does not outlive the key's retirement.
-func (pf *policyFile) put(p linkproto.UpgradePolicy, sp linkproto.SignedPolicy, epoch, minEpoch int, now time.Time) (accepted bool, code string) {
+// put records an accepted policy for its scope key against the floor kept for that key (review m3, m4: apart from
+// policy.json, so a lost file reopens nothing): a higher seq replaces; the same seq is the same policy delivered again
+// only with the same bytes (taken back into policy.json when the file lost it); anything else is refused
+// (seq_not_newer). A floor whose key is now below the epoch floor (minEpoch) no longer binds (review m1): a stolen
+// key's seq does not outlive the key's retirement. changed: policy.json changed.
+func (pf *policyFile) put(p linkproto.UpgradePolicy, sp linkproto.SignedPolicy, epoch, minEpoch int, floors map[string]policyFloor,
+	now time.Time) (changed bool, code string) {
 	key := p.Scope.Key()
 	entry := storedPolicy{Scope: p.Scope, Seq: p.Seq, Epoch: epoch, AcceptedAt: now.UTC(), Signed: sp}
-	for i := range pf.Policies {
-		cur := &pf.Policies[i]
-		if cur.Scope.Key() != key {
-			continue
+	at := slices.IndexFunc(pf.Policies, func(cur storedPolicy) bool { return cur.Scope.Key() == key })
+	floor, held := floors[key]
+	binds := held && !(floor.Epoch > 0 && floor.Epoch < minEpoch) // a floor of unknown epoch binds (fail closed)
+	switch {
+	case !binds, p.Seq > floor.Seq:
+	case p.Seq == floor.Seq && linkproto.SHA256Hex(sp.Policy) == floor.SHA256:
+		if at >= 0 && bytes.Equal(pf.Policies[at].Signed.Policy, sp.Policy) {
+			return false, "" // delivered again: nothing changes
 		}
-		switch {
-		case p.Seq > cur.Seq, cur.Epoch > 0 && cur.Epoch < minEpoch: // an entry of unknown epoch binds (fail closed)
-			*cur = entry
-			return true, ""
-		case p.Seq == cur.Seq && bytes.Equal(cur.Signed.Policy, sp.Policy):
-			return false, ""
-		}
+	default:
 		return false, linkproto.CodeStaleSeq
 	}
-	pf.Policies = append(pf.Policies, entry)
+	if at >= 0 {
+		pf.Policies[at] = entry
+	} else {
+		pf.Policies = append(pf.Policies, entry)
+	}
+	floors[key] = floorOf(entry)
 	return true, ""
 }
 
@@ -218,11 +281,25 @@ func (l *Link) acceptDelivery(raw []byte) (refused []linkproto.ReportRefusal, ch
 	}
 	l.cfg.Store.policyMu.Lock()
 	defer l.cfg.Store.policyMu.Unlock()
-	pf, err := l.cfg.Store.loadPolicies()
+	floors, floorsKept, err := l.cfg.Store.loadFloors()
 	if err != nil {
-		l.logEvery("policy-store", func() { l.cfg.Log.Error("link: policies are refused until it is fixed by hand", err) })
+		l.logEvery("policy-floors", func() { l.cfg.Log.Error("link: policies are refused until it is fixed by hand", err) })
 		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
 	}
+	pf, err := l.cfg.Store.loadPolicies()
+	switch {
+	case err != nil && !floorsKept:
+		// no floors to judge a replay by: never start over (fail closed)
+		l.logEvery("policy-store", func() { l.cfg.Log.Error("link: policies are refused until it is fixed by hand", err) })
+		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
+	case err != nil:
+		// review m4: the floors are kept apart, so the box holds and takes the policies again, none below them
+		l.logEvery("policy-store", func() {
+			l.cfg.Log.Warn("link: " + err.Error() + "; the box holds and takes the relay's policies again, none below the seq floors it keeps")
+		})
+		pf = policyFile{V: 1, Policies: []storedPolicy{}}
+	}
+	mergeFloors(floors, pf)
 	now := l.cfg.Now()
 	l.noteStated(d.Tenant, d.Ring, now)
 	refused = []linkproto.ReportRefusal{}
@@ -246,7 +323,7 @@ func (l *Link) acceptDelivery(raw []byte) (refused []linkproto.ReportRefusal, ch
 			code = linkproto.CodeWrongScope
 		} else {
 			var accepted bool
-			if accepted, code = pf.put(p, sp, key.Epoch, minEpoch, now); accepted {
+			if accepted, code = pf.put(p, sp, key.Epoch, minEpoch, floors, now); accepted {
 				changed = true
 				l.cfg.Log.Info(fmt.Sprintf("link: policy %s #%d accepted (key %s): %s; by %q, expires %s",
 					p.Scope, p.Seq, key.ID, describePolicy(p), p.By, p.ExpiresAt.UTC().Format(time.RFC3339)))
@@ -268,6 +345,11 @@ func (l *Link) acceptDelivery(raw []byte) (refused []linkproto.ReportRefusal, ch
 	}
 	if !changed {
 		return refused, false, nil // the same policies again (the relay's hourly delivery): nothing to write
+	}
+	// the floors first: a crash between the two writes leaves them at or above policy.json, never below
+	if err := l.cfg.Store.saveFloors(floors); err != nil {
+		l.cfg.Log.Error("link: saving the policy seq floors", err)
+		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
 	}
 	if err := l.cfg.Store.savePolicies(pf); err != nil {
 		l.cfg.Log.Error("link: saving link\\policy.json", err)

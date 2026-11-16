@@ -644,3 +644,86 @@ func TestOnlyAChangeKicksTheScheduler(t *testing.T) {
 	time.Sleep(autoKickEvery)
 	waitChecks(3)
 }
+
+// Review m3, m4: the seq floors are kept apart from policy.json (in the secrets store) and never pruned — a policy file
+// deleted by hand, or lost, holds the box until the relay delivers again, and never lets an older policy back.
+func TestTheSeqFloorsSurviveALostPolicyFile(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	digest := strings.Repeat("ab", 32)
+	all5 := targetPolicy(everyBox(), 5, "1.0.31", digest, now)
+	list7 := holdPolicy(boxList("bfl-read", "bfl-write"), 7, now)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", all5), signed(t, priv, "team-1", list7)))
+	if rep := rs.next(t); len(rep.Policies) != 2 || rep.Effective.Why != linkproto.WhyPolicyHolds {
+		t.Fatalf("%+v", rep)
+	}
+	if err := os.Remove(policyPath(b.store.Dir)); err != nil {
+		t.Fatal(err)
+	}
+	// older policies of both keys, replayed into the empty file: refused
+	all4 := targetPolicy(everyBox(), 4, "1.0.31", digest, now)
+	list6 := targetPolicy(boxList("bfl-read"), 6, "1.0.31", digest, now)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", all4), signed(t, priv, "team-1", list6)))
+	rep := rs.next(t)
+	if len(rep.Refused) != 2 || rep.Refused[0].Code != linkproto.CodeStaleSeq || rep.Refused[1].Code != linkproto.CodeStaleSeq ||
+		len(rep.Policies) != 0 || rep.Effective.Why != linkproto.WhyNoPolicy || !rep.Effective.Hold {
+		t.Fatalf("a replay into a lost policy file: %+v", rep)
+	}
+	// the same seq with other bytes: refused too
+	other := all5
+	other.HealthMinutes = 30
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", other)))
+	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeStaleSeq {
+		t.Fatalf("other bytes at the floor's seq: %+v", rep.Refused)
+	}
+	// the very policies again: taken back
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", all5), signed(t, priv, "team-1", list7)))
+	if rep := rs.next(t); len(rep.Refused) != 0 || len(rep.Policies) != 2 || rep.Effective.Why != linkproto.WhyPolicyHolds {
+		t.Fatalf("taken back: %+v", rep)
+	}
+	pf, err := b.store.loadPolicies()
+	if err != nil || len(pf.Policies) != 2 {
+		t.Fatalf("policy.json %+v %v", pf, err)
+	}
+}
+
+// Review m4: an unreadable policy file no longer stops policies for good — the floors kept apart judge every replay —
+// but with no floors to judge by, it is never started over.
+func TestAnUnreadablePolicyFileStartsOverAgainstTheFloors(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	digest := strings.Repeat("ab", 32)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 5, "1.0.31", digest, now))))
+	rs.next(t)
+	_ = os.WriteFile(policyPath(b.store.Dir), []byte("{corrupt"), 0o600)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 4, "1.0.31", digest, now))))
+	rep := rs.next(t)
+	if len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeStaleSeq || rep.Effective.Why != linkproto.WhyStateUnreadable {
+		t.Fatalf("a replay against the floors: %+v", rep)
+	}
+	if got, _ := os.ReadFile(policyPath(b.store.Dir)); string(got) != "{corrupt" {
+		t.Fatal("a delivery that changed nothing rewrote the file")
+	}
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 6, "1.0.31", digest, now))))
+	if rep := rs.next(t); len(rep.Refused) != 0 || rep.Effective.Why != linkproto.WhyScheduled || rep.Effective.Seq != 6 {
+		t.Fatalf("a newer policy: %+v", rep)
+	}
+	if pf, err := b.store.loadPolicies(); err != nil || len(pf.Policies) != 1 || pf.Policies[0].Seq != 6 {
+		t.Fatalf("policy.json %+v %v", pf, err)
+	}
+	// the floors themselves unreadable: every delivery is refused, nothing is written
+	_ = b.store.Secrets.Set(secretPolicyFloors, []byte("{corrupt"))
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 9, "1.0.31", digest, now))))
+	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != codeStateUnreadable {
+		t.Fatalf("unreadable floors: %+v", rep.Refused)
+	}
+	if pf, _ := b.store.loadPolicies(); len(pf.Policies) != 1 || pf.Policies[0].Seq != 6 {
+		t.Fatalf("written past unreadable floors: %+v", pf.Policies)
+	}
+}
