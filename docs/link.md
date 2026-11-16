@@ -170,6 +170,11 @@ URL loses its whole userinfo, an unescaped `@` in a password included.
 A release from v1.0.29 on lists its setup in `SHA256SUMS` (release-windows.yml); v1.0.29 is the last version that must
 be installed by hand on a v1.0.28 box.
 
+There is no automatic rollback (decided with plan 086's review, m10): the runner keeps no previous setup and does not
+wait for the new link to reconnect, so a release whose link cannot start or reach the relay leaves the box to be
+reinstalled by hand — the result file and `setup.log` on the box say what happened. The setup runs as LocalSystem;
+CI refuses an Inno Setup older than 6.5.0, whose setups use the private `C:\Windows\SystemTemp` there (m11).
+
 ## Behind the link, `provision` is stricter
 
 See [provisioning.md § Behind the link](provisioning.md#behind-the-link-link-mode).

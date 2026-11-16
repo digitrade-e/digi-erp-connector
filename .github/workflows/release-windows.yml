@@ -55,6 +55,20 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y
 
+      # The upgrade over the link runs this setup as LocalSystem (plan 086 review m11). Inno Setup 6.5.0 and later put
+      # its temporary folder in the private C:\Windows\SystemTemp there (GetTempPath2), not the C:\Windows\Temp users
+      # can create entries in; 6.3.0 hardened DLL preloading. The runner image ships a current one (6.7.1 on
+      # 2026-11-16); this refuses an older one instead of pinning, so the image's fixes keep coming.
+      - name: Check the Inno Setup version
+        shell: powershell
+        run: |
+          $cmd = Get-Command iscc -ErrorAction Stop
+          $raw = $cmd.FileVersionInfo.ProductVersion
+          if (-not $raw) { $raw = $cmd.FileVersionInfo.FileVersion }
+          $v = [version](($raw.Trim() -split '[^0-9.]')[0])
+          Write-Host "Inno Setup $v ($($cmd.Source))"
+          if ($v -lt [version]'6.5.0') { Write-Error "Inno Setup $v is older than 6.5.0: no private temporary folder under LocalSystem"; exit 1 }
+
       - name: Build Windows executables
         shell: bash
         env:
