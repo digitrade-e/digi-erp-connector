@@ -1,0 +1,12 @@
+{
+  "reader": "the link's upgrade runner from v1.0.31 (internal/link/upgrade_health.go stateProbe): it runs the NEW build's provision.exe state --spec - and judges the upgrade by these fields; a build that drops or renames one is rolled back by the build before it",
+  "paths": {
+    "ok": "bool",
+    "result.daemon.asked": "bool",
+    "result.daemon.version": "string",
+    "result.daemon.health": "number",
+    "result.daemon.queue.queued": "number",
+    "result.daemon.queue.running": "number",
+    "result.daemon.error": "string"
+  }
+}
