@@ -459,7 +459,7 @@ func TestTheSchedulerTakesThePolicysRollbackDigest(t *testing.T) {
 // An upgrade that ended unhealthy and left the new build in place (plan 088 §2b) stops that target under that policy,
 // as a rolled-back one does.
 func TestAnUnhealthyTargetWithoutARollbackStops(t *testing.T) {
-	for _, outcome := range []string{linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor} {
+	for _, outcome := range []string{linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor, linkproto.OutcomeLinkInconclusive} {
 		t.Run(outcome, func(t *testing.T) {
 			a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
 			a.deliver(t, "", "", a.policy(1))

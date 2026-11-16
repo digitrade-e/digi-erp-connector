@@ -3,8 +3,11 @@ package link
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,7 +179,20 @@ func (r UpgradeRunner) healthRound(job UpgradeJob, accept []string, since time.T
 
 // noRollback says why an unhealthy upgrade keeps the new build, in plan 088 §2b's words: the outcome and the reason,
 // or "" when the rollback may run.
-func (r UpgradeRunner) noRollback(job UpgradeJob) (outcome, why string) {
+func (r UpgradeRunner) noRollback(job UpgradeJob, h *linkproto.UpgradeHealth) (outcome, why string) {
+	// D12: when only the new link failed, the build is to blame only if the relay answers from this box; a relay that
+	// is down (an outage, GKE maintenance) or a way out that is cut must not roll back every box upgrading in its window.
+	if linkOnly(h) {
+		check := r.RelayHealth
+		if check == nil {
+			check = func() error { return relayHealthz(r.DataDir, r.HTTPClient) }
+		}
+		if err := check(); err != nil {
+			return linkproto.OutcomeLinkInconclusive, fmt.Sprintf("only the new link failed, and the relay's /healthz did not answer from this box "+
+				"either (%v): the relay or the way to it is down, not proven the new build (D12); the new build stays", withoutCredentials(err.Error()))
+		}
+		r.Log.Info(fmt.Sprintf("link upgrade %s: only the new link failed, and the relay answers: the new build is to blame", r.Ticket))
+	}
 	pin := job.Rollback
 	switch {
 	case pin == nil || releaseOf(pin.Version) != job.From || !sha256Re.MatchString(pin.SHA256):
@@ -197,6 +213,77 @@ func (r UpgradeRunner) noRollback(job UpgradeJob) (outcome, why string) {
 			"new build wrote; the new build stays, and a person decides", job.From, floor)
 	}
 	return "", ""
+}
+
+// linkOnly reports whether the link is the only check of h that failed.
+func linkOnly(h *linkproto.UpgradeHealth) bool {
+	if h == nil || h.OK {
+		return false
+	}
+	failed := 0
+	for _, c := range h.Checks {
+		if !c.OK {
+			if c.Name != "link" {
+				return false
+			}
+			failed++
+		}
+	}
+	return failed > 0
+}
+
+// relayHealthTimeout bounds the runner's question to the relay (D12).
+const relayHealthTimeout = 30 * time.Second
+
+// relayHealthURL is the relay's /healthz for its /link URL: wss → https, ws → http, the same host, no user or query.
+func relayHealthURL(relay string) (string, error) {
+	u, err := url.Parse(relay)
+	if err != nil {
+		return "", fmt.Errorf("the relay URL does not parse: %w", errors.New(withoutCredentials(err.Error())))
+	}
+	switch u.Scheme {
+	case "wss", "https":
+		u.Scheme = "https"
+	case "ws", "http":
+		u.Scheme = "http"
+	default:
+		return "", fmt.Errorf("the relay URL's scheme %q is not ws or wss", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", errors.New("the relay URL names no host")
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/healthz"}).String(), nil
+}
+
+// relayHealthz asks link.yaml's relay for /healthz through client (the link's proxy): nil when it answers 200.
+func relayHealthz(dataDir string, client *http.Client) error {
+	st, err := (&Store{Dir: dataDir}).LoadState()
+	if err != nil {
+		return fmt.Errorf("link.yaml: %w", err)
+	}
+	target, err := relayHealthURL(st.RelayURL())
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), relayHealthTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s answered %d", target, resp.StatusCode)
+	}
+	return nil
 }
 
 // formatFloor is the floor a rollback may not go below: DataDir\format-floor or this runner's compiled one, the higher.

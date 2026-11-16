@@ -80,6 +80,9 @@ type UpgradeRunner struct {
 	// FormatFloor reads DataDir\format-floor (plan 088 D11): "" when none is recorded. Nil = formatfloor.Read. The
 	// runner never rolls back below it, nor below its own compiled formatfloor.RollbackFloor.
 	FormatFloor func() (string, error)
+	// RelayHealth asks the relay's /healthz from this box, through its proxy (plan 088 D12): nil when it answers. Nil =
+	// relayHealthz on link.yaml's relay.
+	RelayHealth func() error
 }
 
 // NewUpgradeRunner is the runner on this machine.
@@ -109,6 +112,7 @@ func NewUpgradeRunner(dataDir, ticket string, log Logger) UpgradeRunner {
 		KillProcess:   killProcess,
 	}
 	ur.Fetch = ur.fetchRelease
+	ur.RelayHealth = func() error { return relayHealthz(dataDir, ur.HTTPClient) }
 	return ur
 }
 
@@ -220,7 +224,7 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		res.Health = r.checkHealth(job, []string{job.To, job.From}, setupStarted)
 		if !res.Health.OK {
 			msg := fmt.Sprintf("not healthy within %d min after the setup (%s)", job.HealthMinutes, failedChecks(res.Health))
-			if outcome, why := r.noRollback(job); outcome != "" {
+			if outcome, why := r.noRollback(job, res.Health); outcome != "" {
 				res.Outcome = outcome
 				msg += "; " + why
 				r.Log.Warn(fmt.Sprintf("link upgrade %s: no rollback: %s", r.Ticket, why))

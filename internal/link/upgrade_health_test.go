@@ -3,6 +3,8 @@ package link
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,9 @@ type healthRig struct {
 	// linkUp says whether the link of build installed is connected at now; probe answers provision state.
 	linkUp func(installed string, now time.Time) bool
 	probe  func(installed string) (stateProbe, error)
+	// relayErr is what the relay's /healthz answers from the box (nil: it is up); relayChecks counts the questions.
+	relayErr    error
+	relayChecks int
 }
 
 func healthyProbe(installed string) (stateProbe, error) {
@@ -71,6 +76,12 @@ func newHealthRig(t *testing.T, daemonWasRunning bool, edit func(*UpgradeJob)) *
 		installed := g.installed
 		g.mu.Unlock()
 		return g.probe(installed)
+	}
+	g.r.RelayHealth = func() error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.relayChecks++
+		return g.relayErr
 	}
 	g.r.Session = func() (SessionMarker, error) {
 		g.mu.Lock()
@@ -441,5 +452,78 @@ func TestAStaleSessionMarkerIsNoProof(t *testing.T) {
 				t.Fatalf("health %+v error %q", r.Health, r.Error)
 			}
 		})
+	}
+}
+
+// D12: when only the new link failed, the runner rolls back only if the relay answers from the box — a relay outage
+// during a fleet window must not roll every upgrading box back.
+func TestALinkOnlyFailureIsInconclusiveWhileTheRelayIsDown(t *testing.T) {
+	g := newHealthRig(t, true, nil)
+	g.linkUp = func(installed string, _ time.Time) bool { return false }
+	g.relayErr = errors.New("dial tcp: i/o timeout")
+	r := g.run(t)
+	if r.Rollback != nil || g.ran != 1 || g.relayChecks != 1 || r.Outcome != linkproto.OutcomeLinkInconclusive ||
+		!strings.Contains(r.Error, "the relay's /healthz did not answer from this box either (dial tcp: i/o timeout)") {
+		t.Fatalf("rollback %+v, ran %d, %d relay checks, outcome %q, error %q", r.Rollback, g.ran, g.relayChecks, r.Outcome, r.Error)
+	}
+	// the relay answers: the new build is to blame, and the build it replaced goes back
+	g = newHealthRig(t, true, nil)
+	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.31" }
+	if r := g.run(t); r.Outcome != linkproto.OutcomeRolledBack || g.relayChecks != 1 || !g.log.has("only the new link failed, and the relay answers") {
+		t.Fatalf("relay up: %q %q, %d checks", r.Outcome, r.Error, g.relayChecks)
+	}
+	// the daemon failed too: not the link alone, so the relay is not asked and the rollback runs
+	g = newHealthRig(t, true, nil)
+	g.relayErr = errors.New("down")
+	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.31" }
+	g.probe = func(installed string) (stateProbe, error) {
+		if installed == "1.0.32" {
+			var p stateProbe
+			p.OK, p.Result.Daemon.Asked, p.Result.Daemon.Error = true, true, "POST /auth/token answered 401"
+			return p, nil
+		}
+		return healthyProbe(installed)
+	}
+	if r := g.run(t); r.Outcome != linkproto.OutcomeRolledBack || g.relayChecks != 0 {
+		t.Fatalf("daemon and link: %q, %d checks", r.Outcome, g.relayChecks)
+	}
+}
+
+func TestTheRelaysHealthz(t *testing.T) {
+	for in, want := range map[string]string{
+		"wss://link.digitrade-admin.org/link":        "https://link.digitrade-admin.org/healthz",
+		"ws://127.0.0.1:8080/link":                   "http://127.0.0.1:8080/healthz",
+		"wss://user:secret@relay.example:8443/x?y=1": "https://relay.example:8443/healthz",
+		"https://relay.example/link":                 "https://relay.example/healthz",
+	} {
+		if got, err := relayHealthURL(in); err != nil || got != want {
+			t.Errorf("%s: %q %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"ftp://relay.example/link", "wss:///link", "::"} {
+		if _, err := relayHealthURL(bad); err == nil {
+			t.Errorf("%q: no error", bad)
+		}
+	}
+	// against a stand-in relay, through the client the runner is given
+	status := http.StatusOK
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		path = req.URL.Path
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "link.yaml"), []byte("relay: ws"+strings.TrimPrefix(srv.URL, "http")+"/link\n"), 0o600)
+	if err := relayHealthz(dir, srv.Client()); err != nil || path != "/healthz" {
+		t.Fatalf("up: %v, asked %q", err, path)
+	}
+	status = http.StatusServiceUnavailable
+	if err := relayHealthz(dir, srv.Client()); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("503: %v", err)
+	}
+	srv.Close()
+	if err := relayHealthz(dir, srv.Client()); err == nil {
+		t.Fatal("a relay that is gone answered")
 	}
 }
