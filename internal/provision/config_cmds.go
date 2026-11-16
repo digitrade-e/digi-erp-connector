@@ -207,8 +207,12 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 	if !t.ReceiptsConfigured() {
 		return nil
 	}
-	if info, err := os.Stat(t.SendReceiptDir); err != nil || !info.IsDir() {
-		return refuse(CodeReceiptDirMissing, "create the folder the receipt importer reads", "sendReceiptDir %s is not a folder on this machine", t.SendReceiptDir)
+	// The receipt folder: documents.receipts.folder's path when bound (plan
+	// 087), else sendReceiptDir.
+	if dir := t.ReceiptDir(); dir != "" {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			return refuse(CodeReceiptDirMissing, "create the folder the receipt importer reads", "the receipt folder %s is not a folder on this machine", dir)
+		}
 	}
 	runs := []string{t.HasReceiptBatFile}
 	if t.HasReceiptParamFile != "" {
