@@ -130,7 +130,54 @@ connector, or restart it yourself.
 | `503 COUNTER_EXHAUSTED` (plan 087) | The counter's next number is outside its range — `GET /api/counters` shows `remaining: 0`. Nothing was reserved. Widen the range (`counters range`, digi-mcp) or move the rule to another counter; resend with the same `historyId`. Also the order counter past 999 999 999. |
 | `503 COUNTER_MISSING` (plan 087) | A counter's store does not exist where it fails closed: `DataDir\counters\<key>.json`, or `lastOrderNumber.json` once counters are configured. It is never restarted at 1. Restore the file from a backup, or set it (`counters start-from`, `expectLast: -1`, `from` above every number issued — the command scans the index and history). |
 | `409 DOCUMENT_RULE_CONFLICT` (plan 087) | The `historyId` was accepted with another `documentRule` (or none). The rule is fixed at reservation; a re-release under the new rule is a new key from the B2B. |
+| `503 FOLDER_WRITABLE` (orders or receipts), provision `folder_writable`, log `FOLDER REFUSED` / `FOLDER WRITABLE` | Accounts besides the administrators can write to a folder the connector writes documents into. See [A folder others can write to](#a-folder-others-can-write-to). |
 | Two orders interfered with each other | Should be impossible — the queue is single-worker. If the customer has *another* process importing IMOVEIN files from the same directory, that is the collision. Give the connector its own directory. |
+
+## A folder others can write to
+
+The connector writes orders and receipts, as LocalSystem, into folders an ERP importer reads: `sendOrderDir` (the
+order counter, the history copies, model (b)'s `IMOVEIN.doc` — and `has.exe` runs there), the pickup folder, the
+typed folders of plan 087 and the receipt folder. Whoever else can add a file to one can pre-create the next
+document's name (every order into it then fails for good, each burning a number), drop a document the importer takes
+into the books, or plant a program or DLL that an importer running in that folder loads as LocalSystem. On a default
+Windows Server every folder an administrator creates under `C:\` lets every local user (`BUILTIN\Users`) create files
+in it, so a folder is writable until someone locks it down (plan 087 review M1).
+
+Who can write is read on the folder itself (add a file or a folder, delete an entry, rename it, change its ACL or
+owner, and its owner) and on every folder above it (rename one away: delete on it, or delete-child on its parent).
+Creating files in a folder *above* is harmless and not counted. `state`'s `writableFolders` lists every such folder
+with the accounts, and:
+
+- **Behind the link** the daemon writes nothing into a typed folder others can write to (orders with a rule naming it,
+  receipts when it is the bound receipt folder: `503 FOLDER_WRITABLE`, nothing reserved; server.log `FOLDER REFUSED`);
+  the `documents`, `receipts` and `orders` commands refuse such a folder (`folder_writable`), `allowWritable` with it.
+  `sendOrderDir`, the pickup folder and `sendReceiptDir` predate plan 087: the daemon only warns about them (server.log
+  `FOLDER WRITABLE`), so a box upgraded from v1.0.29 keeps taking orders until they are locked down.
+- **Over WinRM** the commands refuse it unless `allowWritable` (a human accepted the risk: a `folder_writable:` warning),
+  and the daemon warns.
+
+**Lock a folder down** (an elevated prompt, on the box; the path is an example):
+
+```bat
+icacls "C:\xampp\htdocs\herp" /setowner "*S-1-5-32-544"
+icacls "C:\xampp\htdocs\herp" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"
+```
+
+That makes Administrators the owner, drops the inherited entries (Users' create-files right comes from `C:\`), and
+leaves SYSTEM and Administrators full control and Users read. Then:
+
+1. **The importer's account.** The ERP's scheduler renames what it imported (`*.MASOFON2.BAK`), so the account it runs
+   as needs Modify there. An administrator or SYSTEM is covered above. Any other account must be added
+   (`icacls … /grant "DOMAIN\account:(OI)(CI)M"`) and is then named as a writer: over WinRM that needs
+   `allowWritable`; behind the link run the scheduler as an administrator or SYSTEM.
+2. **The folders above.** Nobody but the administrators may delete or rename them: `icacls "C:\xampp\htdocs"` (and each
+   folder up to the drive) must not give `Users`, `Authenticated Users`, `Everyone` or `Domain Users` `(D)`, `(DC)`,
+   `(F)`, `(M)`, `(WDAC)` or `(WO)`.
+3. **What is already there.** A file someone created before the lock-down is still theirs. `dir /q` shows each file's
+   owner: move aside every `*.doc`, `*.prm`, `*.dll`, `*.exe`, `*.bat` or `*.cmd` neither the connector nor the ERP
+   wrote — before the next order.
+4. **Check and restart.** `state`'s `writableFolders` no longer lists it; restart the service (`daemon` restart over
+   the link, or services.msc): the daemon reads the folders' ACLs once, at its start.
 
 ## File endpoint returns INVALID_FILE_PATH
 

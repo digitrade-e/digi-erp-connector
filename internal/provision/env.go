@@ -47,6 +47,10 @@ type System interface {
 	// Writers names who besides the administrators can change what a file
 	// runs (dataacl.Writers); empty when nobody can.
 	Writers(path string) ([]string, error)
+	// FolderWriters names who besides the administrators can add to, delete
+	// from or rename away a folder the connector writes documents into
+	// (dataacl.FolderWriters; plan 087 review M1); empty when nobody can.
+	FolderWriters(dir string) ([]string, error)
 }
 
 // Database is the SQL Server work provisioning does, as fixed operations.

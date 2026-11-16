@@ -81,6 +81,9 @@ const (
 	CodeFolderForbidden  = "folder_forbidden"   // documents: a link, inside the data directory, or not a path link mode takes
 	CodeFolderInFlight   = "folder_in_flight"   // documents: orders frozen for that folder are not finished
 	CodeReceiptsInFlight = "receipts_in_flight" // documents: a receipt is reserved, and the receipt folder or counter would change
+	// CodeFolderWritable: documents, receipts, orders — accounts besides the administrators can write to a folder the
+	// connector writes documents into (plan 087 review M1); allowWritable accepts it over WinRM only.
+	CodeFolderWritable = "folder_writable"
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

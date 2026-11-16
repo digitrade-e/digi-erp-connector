@@ -618,6 +618,28 @@ func writersChain(path string) []writerCheck {
 	return out
 }
 
+// folderWritersChain is what FolderWriters reads for dir: the folder itself (adding an entry, deleting one, renaming
+// it away, its ACL or owner) and every folder above it to the volume's root (renaming one away). Adding an entry to a
+// folder above changes nothing in dir — Users may create files and folders in most folders an administrator makes
+// under C:\ — so, unlike writersChain's file case, the parent is judged by ancestorWrite, not folderWrite.
+func folderWritersChain(dir string) []writerCheck {
+	dir = filepath.Clean(dir)
+	out := []writerCheck{{dir, folderWrite}}
+	for {
+		up := filepath.Dir(dir)
+		if up == dir {
+			break
+		}
+		mask := uint32(ancestorWrite)
+		if filepath.Dir(up) == up {
+			mask = rootWrite
+		}
+		out = append(out, writerCheck{up, mask})
+		dir = up
+	}
+	return out
+}
+
 // Writers names who, besides SYSTEM, the Administrators, TrustedInstaller and
 // this process's own account, can change what path runs: an owner outside
 // them, and every account an allow entry gives a write-class right on the
@@ -629,14 +651,26 @@ func writersChain(path string) []writerCheck {
 // is their code run as SYSTEM (plan 068's panel, 2026-10-20); the link trusts
 // the daemon's certificate file (review m8). Empty: only the administrators
 // control it.
-func Writers(path string) ([]string, error) {
+func Writers(path string) ([]string, error) { return writers(writersChain(path)) }
+
+// FolderWriters names who, besides the same trusted accounts, can change what is in the folder dir: an owner outside
+// them, and every account an allow entry gives a right on dir to add a file or a folder, delete an entry, rename dir
+// away or rewrite its ACL or owner (folderWrite), or a right on a folder above it to rename that one away
+// (ancestorWrite). The connector writes documents there for an ERP importer, as LocalSystem (plan 087 review M1):
+// whoever can add a file can pre-create the next document's name, drop a document the importer takes into the
+// books, or — where an importer runs with the folder as its working directory — plant a program or DLL it loads.
+// Empty: only the administrators control it. Existing files are not read: a file someone created before the folder
+// was locked down is still theirs (docs/troubleshooting.md).
+func FolderWriters(dir string) ([]string, error) { return writers(folderWritersChain(dir)) }
+
+func writers(chain []writerCheck) ([]string, error) {
 	t, err := newTrust()
 	if err != nil {
 		return nil, err
 	}
 	out := []string{}
 	seen := map[string]bool{}
-	for _, o := range writersChain(path) {
+	for _, o := range chain {
 		sd, err := windows.GetNamedSecurityInfo(longPath(o.path), windows.SE_FILE_OBJECT,
 			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err != nil {

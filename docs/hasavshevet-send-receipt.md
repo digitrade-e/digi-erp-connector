@@ -251,6 +251,11 @@ set by digi-mcp's signed `documents` / `counters` commands ([provisioning.md](pr
   over the counter's range only: a receipt of another counter neither moves it nor is finished into this folder (a
   repeat of such a key answers 503 until its counter is bound again). The binding does not change while a receipt is
   reserved (`receipts_in_flight`).
+- The receipt folder must be one only the administrators can write to (plan 087 review M1): the `receipts` and
+  `documents` commands refuse it otherwise (`folder_writable`; `allowWritable` over WinRM only), and behind the link a
+  bound typed folder others can write to gets nothing written (`503 FOLDER_WRITABLE`, nothing reserved; Recover
+  finishes no reserved receipt there) until it is locked down and the service restarted
+  ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)).
 
 ## Idempotency and recovery
 

@@ -28,9 +28,13 @@ type DocumentsInput struct {
 	Folders   map[string]*FolderInput `json:"folders,omitempty"`
 	// Receipts binds POST /api/sendReceipt to a receipts folder and a
 	// receipts counter; a field left out keeps the box's, "" clears it.
-	Receipts   *DocumentsReceiptsInput `json:"receipts,omitempty"`
-	AssumeIdle bool                    `json:"assumeIdle,omitempty"`
-	Expect     *Expect                 `json:"expect,omitempty"`
+	Receipts *DocumentsReceiptsInput `json:"receipts,omitempty"`
+	// AllowWritable accepts, over WinRM only, a folder set or bound that
+	// accounts besides the administrators can write to (review M1): a risk a
+	// human was shown. Behind the link it is refused.
+	AllowWritable bool    `json:"allowWritable,omitempty"`
+	AssumeIdle    bool    `json:"assumeIdle,omitempty"`
+	Expect        *Expect `json:"expect,omitempty"`
 }
 
 // FolderInput is one typed folder (config.FolderConfig).
@@ -67,6 +71,11 @@ func (in DocumentsInput) Validate(linked bool, systemDirs []string) *Refusal {
 	}
 	if len(in.Folders) == 0 && in.Receipts == nil {
 		return refuse(CodeSpecInvalid, "name at least one folder, or the receipts binding", "the input changes nothing")
+	}
+	if linked {
+		if r := refuseAllowWritableLinked(in.AllowWritable); r != nil {
+			return r
+		}
 	}
 	for _, k := range sortedFolderKeys(in.Folders) {
 		f := in.Folders[k]
@@ -150,11 +159,12 @@ func ApplyDocuments(ctx context.Context, env Env, in DocumentsInput, check bool)
 }
 
 // checkDocuments: each folder set is a folder on this machine, not a link or
-// junction, outside the data directory; a folder removed exists and holds no
-// unfinished order frozen for it; the receipts' folder or counter changes
-// only while no receipt is reserved (Recover finishes one into the folder in
-// use).
+// junction, outside the data directory, that only the administrators can
+// write to (review M1); a folder removed exists and holds no unfinished order
+// frozen for it; the receipts' folder or counter changes only while no
+// receipt is reserved (Recover finishes one into the folder in use).
 func (a *applier) checkDocuments(in DocumentsInput) error {
+	checked := map[string]bool{}
 	for _, k := range sortedFolderKeys(in.Folders) {
 		f := in.Folders[k]
 		if f == nil {
@@ -179,10 +189,20 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 		if inside(p, a.dir) {
 			return refuse(CodeFolderForbidden, "name the folder the ERP's importer reads, outside the connector's data directory", "folder %s: %s is in the data directory", k, p)
 		}
+		if err := a.checkFolderWriters("folder "+k, p, in.AllowWritable); err != nil {
+			return err
+		}
+		checked[k] = true
 		if old, ok := a.cur.Documents.Folders[k]; ok && (old.Kind != f.Kind || !sameFolder(old.Path, p)) {
 			if r := a.folderIdle(k, "moved or retyped"); r != nil {
 				return r
 			}
+		}
+	}
+	// The receipt folder a binding names (it may have been set earlier).
+	if k := strings.TrimSpace(a.tgt.Documents.Receipts.Folder); in.Receipts != nil && k != "" && !checked[k] && a.tgt.ReceiptDir() != "" {
+		if err := a.checkFolderWriters("folder "+k, a.tgt.ReceiptDir(), in.AllowWritable); err != nil {
+			return err
 		}
 	}
 	if a.cur.ReceiptDir() != a.tgt.ReceiptDir() || a.cur.ReceiptCounterKey() != a.tgt.ReceiptCounterKey() {

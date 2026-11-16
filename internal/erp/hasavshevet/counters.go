@@ -52,6 +52,12 @@ var ErrCounterRetired = errors.New("counter retired")
 // ErrCounterLower is RaiseTo asked to move a counter back.
 var ErrCounterLower = errors.New("a counter never moves back")
 
+// ErrFolderWritable means the document's folder is one accounts besides the
+// administrators can write to, on a box behind the link, so the connector
+// does not write into it (plan 087 review M1; the daemon checks at its
+// start). Nothing is reserved; the routes answer it 503 FOLDER_WRITABLE.
+var ErrFolderWritable = errors.New("folder writable by accounts besides the administrators")
+
 // numberSource is a counter's store: the next number, and moving past one.
 type numberSource interface {
 	Peek() (int64, error)

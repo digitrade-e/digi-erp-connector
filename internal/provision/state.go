@@ -56,10 +56,24 @@ type StateResult struct {
 	// Folders (plan 087) are the typed folders of config.yaml's documents
 	// block, each read like the pickup folder.
 	Folders []StateFolder `json:"folders"`
-	TLS     *StateTLS     `json:"tls,omitempty"`
-	Link    StateLink     `json:"link"`
-	Disk    StateDisk     `json:"disk"`
-	Errors  []string      `json:"errors,omitempty"`
+	// WritableFolders (plan 087 review M1) are the folders the connector
+	// writes documents into that accounts besides the administrators can
+	// write to — or whose writers could not be read (error). Empty when every
+	// one is the administrators' only. Behind the link the daemon writes into
+	// no typed folder listed here (503 FOLDER_WRITABLE), and the documents,
+	// receipts and orders commands refuse them (folder_writable).
+	WritableFolders []StateWritableFolder `json:"writableFolders"`
+	TLS             *StateTLS             `json:"tls,omitempty"`
+	Link            StateLink             `json:"link"`
+	Disk            StateDisk             `json:"disk"`
+	Errors          []string              `json:"errors,omitempty"`
+}
+
+// StateWritableFolder is one folder others can write to (config.WriteFolder).
+type StateWritableFolder struct {
+	config.WriteFolder
+	Writers []string `json:"writers"`
+	Error   string   `json:"error,omitempty"`
 }
 
 // StateServices are both Windows services.
@@ -271,6 +285,7 @@ func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
 			res.Folders = append(res.Folders, folderState(k, cfg.Documents.Folders[k], cfg.Documents.Receipts.Folder == k))
 		}
 	}
+	res.WritableFolders = writableFolders(env.Sys, cfg)
 	if cfg != nil && cfg.TLS.Enabled() {
 		res.TLS = tlsState(cfg.TLS.CertFile, env.Now())
 	}
@@ -595,6 +610,24 @@ func folderState(key string, f config.FolderConfig, receipts bool) StateFolder {
 	slices.Sort(out.Pending.Numbers)
 	if len(out.Pending.Numbers) > maxStateNumbers {
 		out.Pending.Numbers = out.Pending.Numbers[len(out.Pending.Numbers)-maxStateNumbers:]
+	}
+	return out
+}
+
+// writableFolders reads who besides the administrators can write to each folder the connector writes documents into.
+func writableFolders(sys System, cfg *config.Config) []StateWritableFolder {
+	out := []StateWritableFolder{}
+	if cfg == nil {
+		return out
+	}
+	for _, f := range cfg.WriteFolders() {
+		who, err := sys.FolderWriters(f.Path)
+		switch {
+		case err != nil:
+			out = append(out, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})
+		case len(who) > 0:
+			out = append(out, StateWritableFolder{WriteFolder: f, Writers: who})
+		}
 	}
 	return out
 }

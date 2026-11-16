@@ -89,3 +89,43 @@ func TestWritersLooksAtEveryFolderAbove(t *testing.T) {
 		t.Fatalf("delete on the folder: %v, %v", who, err)
 	}
 }
+
+// Plan 087 review M1: a folder the connector writes documents into. Adding a file to it or deleting one, renaming it
+// away (DELETE on it, delete-child on its parent) name the account; adding entries to the parent — which Users may do
+// in most folders an administrator makes under C:\ — does not, though Writers' file case judges the parent by that.
+func TestFolderWriters(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	top := filepath.Join(t.TempDir(), "xampp")
+	dir := filepath.Join(top, "herp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	users := wellKnownName(t, windows.WinBuiltinUsersSid)
+	setDACL(t, top, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, dir, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if who, err := FolderWriters(dir); err != nil || len(who) != 0 {
+		t.Fatalf("an administrators-only folder: %v, %v", who, err)
+	}
+	for _, tc := range []struct {
+		name           string
+		topACE, dirACE string
+		named          bool
+	}{
+		{"Users create files in it", "", "(A;;0x1200a9;;;BU)(A;;0x2;;;BU)", true},
+		{"Users create folders in it", "", "(A;;0x1200a9;;;BU)(A;;0x4;;;BU)", true},
+		{"Users delete entries in it", "", "(A;;0x1200a9;;;BU)(A;;0x40;;;BU)", true},
+		{"Users rename it away", "", "(A;;0x10000;;;BU)", true},
+		{"Users read it", "", "(A;;0x1200a9;;;BU)", false},
+		{"Users create files and folders in the parent", "(A;;0x1200a9;;;BU)(A;;0x6;;;BU)", "", false},
+		{"Users delete entries in the parent", "(A;;0x1200a9;;;BU)(A;;0x40;;;BU)", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setDACL(t, top, adminsOnly+tc.topACE, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+			setDACL(t, dir, adminsOnly+tc.dirACE, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+			who, err := FolderWriters(dir)
+			if err != nil || slices.Contains(who, users) != tc.named {
+				t.Fatalf("FolderWriters = %v, %v; Users named: want %v", who, err, tc.named)
+			}
+		})
+	}
+}

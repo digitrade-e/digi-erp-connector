@@ -321,13 +321,20 @@ restart only on change, the proof with the box's own credential, the rollback). 
 - **`receipts`**: `sendReceiptDir` (`""` turns receipts off), model (b)'s `hasReceiptBatFile` or
   `hasReceiptParamFile` (`""` clears one), `receiptCardNames` (the whole block; `{}` clears it). Refused: a folder or
   file that is not on the machine (`receipt_dir_missing`, `importer_missing`), a runner others can change
-  (`importer_writable`; `allowWritable` over WinRM only — it runs as LocalSystem once per receipt), anything the
+  (`importer_writable`; `allowWritable` over WinRM only — it runs as LocalSystem once per receipt), a receipt folder
+  others can write to (`folder_writable`, plan 087 review M1 — the same `allowWritable` over WinRM), anything the
   daemon's own receipt guard refuses (`config_refused`: the order folder, both runners). Behind the link: plain local
-  paths outside the system folders, a `.bat`/`.cmd` only.
+  paths outside the system folders, a `.bat`/`.cmd` only, never `allowWritable`.
 - **`orders`**: `sendOrderDir` and `importer` with `apply`'s checks (the importer stated, its files present and
   administrators-only, the counter carried to a new folder at the restart, two counters refused), and model (a)'s
   `sendOrderPickupDir` (`""` off) and `sendOrderFormat` (`official` / `legacy`; required with a pickup folder —
-  the daemon's `ValidateOrders`). Behind the link: `apply`'s importer rules, folders outside the system folders.
+  the daemon's `ValidateOrders`). `sendOrderDir` and the pickup folder must be ones only the administrators can write
+  to (`folder_writable`, plan 087 review M1; a top-level `allowWritable` accepts them over WinRM — the importer keeps
+  `importer.allowWritable`). Behind the link: `apply`'s importer rules, folders outside the system folders, never
+  `allowWritable`.
+
+Both check the folders on every run, whatever the input changes: a box whose folders were never locked down gets
+`folder_writable` until they are ([troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to)).
 
 ## `receipt-seed <N>`
 
@@ -412,7 +419,9 @@ Checked before any write: the name pattern's closed grammar (`{prefix}` optional
 digits and `_` starting with a letter, `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
 is `COM1.doc`), `tempPrefix` exactly with `{prefix}` (orders only), `layout` `official`/`legacy` for orders; the
 folder exists (`folder_missing`; the connector never creates it), is not a link or junction and not inside the data
-directory (`folder_forbidden`); behind the link a plain local path outside the system folders (link mode's rules).
+directory (`folder_forbidden`), and only the administrators can write to it — and to the receipt folder a binding
+names (`folder_writable`, plan 087 review M1: `allowWritable` accepts it over WinRM with a warning); behind the link a
+plain local path outside the system folders (link mode's rules), never `allowWritable`.
 The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
 distinct; a test folder never the pickup or receipt folder; a test counter only into a test folder; no model (b)
 receipt importer with a test receipt folder (it would import test receipts into the books). A folder whose
@@ -471,6 +480,7 @@ actually changed.
 | `counter_store` | `counters`: the counter's store cannot be read |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
+| `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
 
@@ -502,6 +512,8 @@ credential (the queue checks before writes and restarts, the proofs, `verify`) m
 model always writes that `config.yaml` lacks (their defaults apply); `unknownKeys` are keys it does not know (left from
 an older build, or misspelt). Index entries are read for their number and state only (a receipt's request never
 leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
+`writableFolders` (plan 087 review M1) lists every folder the connector writes documents into that accounts besides
+the administrators can write to: `{name, path, key?, typed?, receipts?, writers, error?}` — `[]` when there is none.
 
 ## Behind the link (link mode)
 
@@ -517,6 +529,9 @@ the WinRM path is unchanged:
   `%ProgramFiles(x86)%` and `%ProgramData%` (`importer_not_erp`): it runs as LocalSystem once per order.
 - **Image folders** are outside those folders and outside any `AppData` (`image_folder_forbidden`): `/api/file` serves
   what is in them.
+- **A folder documents are written into** (`documents`, `receipts`, `orders`) is one only the administrators can write
+  to (`folder_writable`; never `allowWritable`), and the daemon writes into no typed folder others can write to
+  (`503 FOLDER_WRITABLE`) — plan 087 review M1.
 
 These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
 takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login

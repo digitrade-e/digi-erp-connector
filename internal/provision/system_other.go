@@ -41,6 +41,7 @@ func (otherSystem) SQLInstances() ([]SQLInstance, error)       { return nil, err
 func (otherSystem) Host() (HostInfo, error)                    { return HostInfo{}, errUnsupported }
 func (otherSystem) ImporterCandidates() ([]string, error)      { return nil, errUnsupported }
 func (otherSystem) Writers(string) ([]string, error)           { return nil, errUnsupported }
+func (otherSystem) FolderWriters(string) ([]string, error)     { return nil, errUnsupported }
 
 func (otherSystem) Service(string) (autostart.ServiceInfo, error) {
 	return autostart.ServiceInfo{}, errUnsupported

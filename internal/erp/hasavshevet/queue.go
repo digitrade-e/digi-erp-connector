@@ -111,6 +111,11 @@ type OrderQueue struct {
 	// sendOrderDir/history/<n> at recovery, then every number reserved since.
 	// The counter must offer more.
 	highest map[string]int64
+	// refusedFolders (guarded by closeMu) are the typed folders this queue
+	// writes nothing into, by key, with why: on a box behind the link, ones
+	// accounts besides the administrators can write to (review M1;
+	// RefuseFolders).
+	refusedFolders map[string]string
 
 	crashPoint func(point string) // test seam
 }
@@ -167,6 +172,25 @@ func (q *OrderQueue) UseCounters(set *CounterSet) {
 	defer q.closeMu.Unlock()
 	q.counters = set
 	clear(q.recovered)
+}
+
+// RefuseFolders makes the queue refuse every new order, and every re-queue,
+// into the typed folders named (key → why): ErrFolderWritable, nothing
+// reserved, nothing written. A repeat of an order already written is still
+// answered. The daemon calls it at its start (review M1).
+func (q *OrderQueue) RefuseFolders(why map[string]string) {
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	q.refusedFolders = why
+}
+
+// folderRefused is RefuseFolders' refusal for an order into folder, or nil.
+// Caller holds closeMu.
+func (q *OrderQueue) folderRefused(folder string) error {
+	if why, ok := q.refusedFolders[folder]; ok {
+		return fmt.Errorf("%w: folder %s — %s; nothing reserved", ErrFolderWritable, folder, why)
+	}
+	return nil
 }
 
 // orderCounters is the queue's counter set.
@@ -546,6 +570,11 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 				ErrDocumentRuleConflict, key, e.Number, e.Rule.describe(), describeRule(req.Rule))
 		}
 		if e.State == orderRetryable && !q.jobActive(e.Number) {
+			if e.Rule != nil {
+				if err := q.folderRefused(e.Rule.Folder); err != nil {
+					return Acceptance{JobID: strconv.FormatInt(e.Number, 10)}, err
+				}
+			}
 			return q.requeueLocked(e, req)
 		}
 		return q.replay(e, req), nil
@@ -553,6 +582,11 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 
 	if c.Retired {
 		return Acceptance{}, fmt.Errorf("%w: counter %s issues no new number", ErrCounterRetired, c.Key)
+	}
+	if req.Rule != nil {
+		if err := q.folderRefused(req.Rule.Folder); err != nil {
+			return Acceptance{}, err
+		}
 	}
 	if !q.recovered[c.Key] {
 		if err := q.recoverCountersLocked([]*Counter{c}); err != nil {

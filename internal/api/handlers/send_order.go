@@ -435,6 +435,10 @@ func writeSendOrderError(w http.ResponseWriter, err error) {
 	case errors.Is(err, hasavshevet.ErrCounterRetired):
 		respond.Error(w, http.StatusBadRequest, "documentRule/counter: the counter is retired and issues no new number",
 			"VALIDATION_ERROR", map[string]any{"field": "documentRule/counter"})
+	case errors.Is(err, hasavshevet.ErrFolderWritable):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The folder this order goes to can be written by accounts besides the administrators, and this connector is behind the link: it writes nothing there until the folder is locked down and the service restarted — nothing was reserved; see the connector log",
+			"FOLDER_WRITABLE", nil)
 	case errors.Is(err, hasavshevet.ErrDocumentRuleInvalid):
 		respond.Error(w, http.StatusBadRequest, "documentRule: names what this connector does not have",
 			"VALIDATION_ERROR", map[string]any{"field": "documentRule"})

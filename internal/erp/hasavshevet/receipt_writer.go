@@ -98,6 +98,12 @@ type ReceiptWriterConfig struct {
 	// typed folder's); "" = KUPAIN_{n}.doc. KUPAIN.prm keeps its name, and
 	// the history copies keep KUPAIN_<n>.doc.
 	NamePattern string
+	// FolderRefused, when set, is why nothing is written into SendReceiptDir:
+	// on a box behind the link, a bound typed folder accounts besides the
+	// administrators can write to (plan 087 review M1). A new receipt and the
+	// finishing of a reserved one are ErrFolderWritable; a repeat of a
+	// written one is still answered; Recover finishes none.
+	FolderRefused string
 }
 
 // ReceiptResult is what a Write produced or, on a repeat, what the key's first
@@ -267,6 +273,11 @@ func (w *ReceiptWriter) recoverLocked() error {
 		if e.State != receiptReserved {
 			continue
 		}
+		if w.cfg.FolderRefused != "" {
+			w.log.Warn(fmt.Sprintf("receipt %d (key %s) is reserved but not finished: the connector writes nothing into the receipt folder (%s)",
+				e.Number, e.Key, w.cfg.FolderRefused))
+			continue
+		}
 		if !w.counter.InRange(e.Number) {
 			w.log.Warn(fmt.Sprintf("receipt %d (key %s) is reserved but outside the range of the receipt counter in use (%s, %d-%d): it is not finished into this folder; switch back to its counter to finish it, or finish it by hand",
 				e.Number, e.Key, w.counter.Key, w.counter.Min, w.counter.Max))
@@ -380,6 +391,9 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 			w.log.Warn(fmt.Sprintf("receipt key=%s repeated with a different body; answering receipt %d as first written", key, e.Number))
 		}
 		if e.State == receiptReserved {
+			if err := w.folderRefused(); err != nil {
+				return nil, err
+			}
 			if !w.counter.InRange(e.Number) {
 				return nil, fmt.Errorf("%w: receipt %d of key %s is reserved under another counter's range than the one in use (%s, %d-%d); it is not finished into this folder",
 					ErrStoreUnavailable, e.Number, key, w.counter.Key, w.counter.Min, w.counter.Max)
@@ -392,6 +406,9 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 		return w.result(e, true, notes), nil
 	}
 
+	if err := w.folderRefused(); err != nil {
+		return nil, err
+	}
 	if w.counter.Retired {
 		return nil, fmt.Errorf("%w: receipt counter %s issues no new number", ErrCounterRetired, w.counter.Key)
 	}
@@ -549,6 +566,15 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 	if err := w.index.save(e); err != nil {
 		w.log.Error(fmt.Sprintf("receipt %d: could not record the import outcome %s", e.Number, e.Import), err)
 		return []string{fmt.Sprintf("the import outcome (%s) could not be recorded; a repeat of this key will report the import as started", e.Import)}
+	}
+	return nil
+}
+
+// folderRefused is ErrFolderWritable when the receipt folder is refused
+// (FolderRefused), else nil.
+func (w *ReceiptWriter) folderRefused() error {
+	if why := w.cfg.FolderRefused; why != "" {
+		return fmt.Errorf("%w: the receipt folder %s — %s; nothing reserved", ErrFolderWritable, w.cfg.SendReceiptDir, why)
 	}
 	return nil
 }

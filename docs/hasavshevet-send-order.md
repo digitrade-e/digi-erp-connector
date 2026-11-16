@@ -371,6 +371,11 @@ never over another (`.<name>.tmp-*`, a no-replace rename). No `.prm` in the fold
 and layout are read from the config when the worker writes; a folder removed from the config makes the order
 retryable (`documents` refuses removing or moving a folder with unfinished orders frozen for it).
 
+**Who can write to the folder** (plan 087 review M1): only the administrators. The `documents` command refuses a
+folder others can write to (`folder_writable`; `allowWritable` over WinRM only), and the daemon reads every typed
+folder's writers at its start: behind the link an order into one others can write to is `503 FOLDER_WRITABLE`,
+nothing reserved (a re-queue waits the same way) — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to).
+
 **Downgrade.** Never put a build older than v1.0.30 back on a box that has counters or folders configured, or that
 took an order with a rule: it ignores `documents` (lenient YAML) and refuses index entries holding a `rule` (strict
 decode: `ORDER_INDEX_UNREADABLE` for those keys).

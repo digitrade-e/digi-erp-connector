@@ -176,7 +176,8 @@ func hostAddresses() []string {
 	return out
 }
 
-func (winSystem) Writers(path string) ([]string, error) { return dataacl.Writers(path) }
+func (winSystem) Writers(path string) ([]string, error)      { return dataacl.Writers(path) }
+func (winSystem) FolderWriters(dir string) ([]string, error) { return dataacl.FolderWriters(dir) }
 
 func (winSystem) ImporterCandidates() ([]string, error) {
 	const max = 20

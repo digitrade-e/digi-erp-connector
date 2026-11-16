@@ -100,7 +100,7 @@ type fakeSys struct {
 	instances  []SQLInstance
 	host       HostInfo
 	candidates []string
-	writers    map[string][]string // who besides the administrators can change a file
+	writers    map[string][]string // who besides the administrators can change a file (or a folder: FolderWriters)
 	daemon     *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
@@ -248,6 +248,9 @@ func (s *fakeSys) Writers(path string) ([]string, error) {
 	}
 	return []string{}, nil
 }
+
+// FolderWriters answers from the same map, keyed by the folder.
+func (s *fakeSys) FolderWriters(dir string) ([]string, error) { return s.Writers(dir) }
 
 func (s *fakeSys) ImporterCandidates() ([]string, error) {
 	return s.candidates, nil

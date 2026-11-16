@@ -94,6 +94,8 @@ Today's body plus an optional `documentRule` — which counter numbers the order
 - A repeat of a `historyId` with another rule (or none, through `/api/sendOrder`) → `409 DOCUMENT_RULE_CONFLICT`,
   nothing written: the rule is fixed when the number is reserved.
 - The counter's next number outside its range → `503 COUNTER_EXHAUSTED`; its store missing → `503 COUNTER_MISSING`.
+- Behind the link, a folder accounts besides the administrators can write to → `503 FOLDER_WRITABLE`, nothing
+  reserved (the daemon checks at its start; a re-queue into it waits the same way).
 - A connector older than v1.0.30 answers the route `404 NOT_FOUND` (nothing written). `/api/sendOrder` ignores
   `documentRule`, as every older connector did.
 
@@ -125,7 +127,7 @@ strictly: a missing or `null` key, an unknown field, a wrong type, a duplicate k
 or a key in the wrong case is a 400. Only a 400 is final for the backend; it
 retries anything else with the same key. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
-`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` (503), `RECEIPT_CONFIG_INVALID` /
+`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` / `FOLDER_WRITABLE` (503), `RECEIPT_CONFIG_INVALID` /
 `RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
 `RECEIPT_WRITE_FAILED` (500). Full contract, field
 table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
@@ -176,6 +178,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `DOCUMENT_RULE_CONFLICT` | 409 | Plan 087: this `historyId` was accepted with another `documentRule` (or none). Nothing written; the rule is fixed at reservation. |
 | `COUNTER_EXHAUSTED` | 503 | Plan 087: the counter's next number is outside its range (orders and receipts; also the order counter past 999 999 999). Nothing reserved; resend with the same key once the range is widened (`counters range`). |
 | `COUNTER_MISSING` | 503 | Plan 087: the counter's store does not exist where it fails closed (a counter of its own, or `lastOrderNumber.json` once counters are configured). Never 1 again; restore it or set it (`counters start-from` with `expectLast: -1`). |
+| `FOLDER_WRITABLE` | 503 | Plan 087 review M1: behind the link, the order's typed folder (or the bound receipt folder) can be written by accounts besides the administrators, so the connector writes nothing there. Nothing reserved; resend with the same key once the folder is locked down and the service restarted ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |

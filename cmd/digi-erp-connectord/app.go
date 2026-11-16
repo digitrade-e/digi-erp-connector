@@ -201,13 +201,17 @@ func (a *serverApp) Start() error {
 		return err
 	}
 	counters := hasavshevet.NewCounterSet(cfg, paths.DataDir())
+	// Who can write to the folders documents go to (plan 087 review M1):
+	// behind the link, typed folders others can write to are refused.
+	refusedFolders, refusedReceipts := checkWriteFolders(cfg, linkedBox(paths.DataDir()), logSvc)
 	queue := buildOrderQueue(cfg, dbConn, paths.DataDir(), counters, logSvc)
+	queue.RefuseFolders(refusedFolders)
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	queue.Start(queueCtx)
 	a.orderQueue = queue
 	a.queueCancel = queueCancel
 
-	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, logSvc)
+	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, refusedReceipts, logSvc)
 	if err != nil {
 		logSvc.Error("receipt configuration", err)
 		a.Stop(context.Background())
@@ -387,7 +391,10 @@ func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, counters
 // serves. If it fails the writer is still returned: the route retries
 // recovery on each request and answers an error until it succeeds, and orders
 // and queries are not held hostage to it.
-func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
+//
+// refused, when set, is why nothing is written into the receipt folder
+// (checkWriteFolders): receipts answer 503 FOLDER_WRITABLE.
+func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, refused string, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
 	if !cfg.ReceiptsConfigured() {
 		return nil, nil
 	}
@@ -398,6 +405,7 @@ func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet
 	if c := counters.Receipts(); c != nil {
 		wc.Counter = c // the set the read routes report
 	}
+	wc.FolderRefused = refused
 	w, err := hasavshevet.NewReceiptWriter(wc, log)
 	if err != nil {
 		return nil, err

@@ -148,6 +148,9 @@ func writeReceiptError(w http.ResponseWriter, log logger.LoggerService, key stri
 	case errors.Is(err, hasavshevet.ErrCounterRetired):
 		status, code, msg = http.StatusServiceUnavailable, "COUNTER_EXHAUSTED",
 			"The receipt counter is retired and issues no new number; nothing was written — see the connector log"
+	case errors.Is(err, hasavshevet.ErrFolderWritable):
+		status, code, msg = http.StatusServiceUnavailable, "FOLDER_WRITABLE",
+			"The receipt folder can be written by accounts besides the administrators, and this connector is behind the link: it writes nothing there until the folder is locked down and the service restarted — nothing was written; see the connector log"
 	case errors.Is(err, hasavshevet.ErrStoreUnavailable):
 		status, code, msg = http.StatusServiceUnavailable, "RECEIPT_NUMBER_STORE_UNAVAILABLE",
 			"The receipt number store is not available (not seeded, unreadable or exhausted); see the connector log"

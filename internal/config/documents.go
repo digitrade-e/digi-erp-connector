@@ -209,6 +209,50 @@ func (c Config) ReceiptNamePattern() string {
 	return DefaultReceiptNamePattern
 }
 
+// WriteFolder is a folder the connector writes documents into, as
+// LocalSystem, for an importer to read (plan 087 review M1): whoever else can
+// write to it can pre-create the next document's name, drop a document the
+// importer takes into the books, or plant what an importer running there
+// loads. Only the administrators should be able to.
+type WriteFolder struct {
+	// Name is how logs, state and refusals name it: "sendOrderDir",
+	// "sendOrderPickupDir", "sendReceiptDir" or "folder <key>".
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// Key is a typed folder's key; Typed marks a typed folder (plan 087), set
+	// only by the documents command — behind the link the daemon writes into
+	// none that others can write to. The other three predate plan 087: the
+	// daemon warns about them.
+	Key   string `json:"key,omitempty"`
+	Typed bool   `json:"typed,omitempty"`
+	// Receipts: receipts are written here (documents.receipts.folder's
+	// folder, or sendReceiptDir).
+	Receipts bool `json:"receipts,omitempty"`
+}
+
+// WriteFolders lists every folder the connector writes documents into:
+// sendOrderDir (the order counter, history and model (b)'s IMOVEIN, where
+// has.exe runs) and the pickup folder when orders are configured, every typed
+// folder, and sendReceiptDir when receipts go there (no bound typed folder).
+func (c Config) WriteFolders() []WriteFolder {
+	var out []WriteFolder
+	if c.OrdersConfigured() {
+		out = append(out, WriteFolder{Name: "sendOrderDir", Path: strings.TrimSpace(c.SendOrderDir)})
+		if c.OrdersPickup() {
+			out = append(out, WriteFolder{Name: "sendOrderPickupDir", Path: strings.TrimSpace(c.SendOrderPickupDir)})
+		}
+	}
+	bound := strings.TrimSpace(c.Documents.Receipts.Folder)
+	for _, k := range c.FolderKeys() {
+		out = append(out, WriteFolder{Name: "folder " + k, Path: strings.TrimSpace(c.Documents.Folders[k].Path), Key: k, Typed: true,
+			Receipts: k == bound && c.ReceiptsConfigured()})
+	}
+	if bound == "" && c.ReceiptsConfigured() {
+		out = append(out, WriteFolder{Name: "sendReceiptDir", Path: strings.TrimSpace(c.SendReceiptDir), Receipts: true})
+	}
+	return out
+}
+
 // CounterKeys and FolderKeys are the configured keys, sorted.
 func (c Config) CounterKeys() []string { return sortedKeys(c.Documents.Counters) }
 func (c Config) FolderKeys() []string  { return sortedKeys(c.Documents.Folders) }

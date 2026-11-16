@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -304,5 +305,29 @@ func TestDocumentCapabilitiesRoute(t *testing.T) {
 	NewDocumentCapabilitiesHandler(legacy, hasavshevet.NewCounterSet(legacy, t.TempDir()))(w, httptest.NewRequest(http.MethodGet, "/", nil))
 	if got := strings.TrimSpace(w.Body.String()); got != `{"contract":1,"folders":[],"counters":[{"key":"orders","kind":"orders","test":false}],"placeholders":["prefix","n"]}` {
 		t.Errorf("legacy: %s", got)
+	}
+}
+
+// Review M1: behind the link the daemon refuses a typed folder others can
+// write to — 503 FOLDER_WRITABLE, nothing reserved — and so does a receipt.
+func TestSendOrderV2_RefusedFolderIs503(t *testing.T) {
+	b := newV2Box(t)
+	b.queue.RefuseFolders(map[string]string{"herp": `it can be written by BUILTIN\Users`})
+	w := postJSON(t, NewSendOrderV2Handler(b.queue, b.cfg), "/api/v2/sendOrder", orderWithRule(t, "f1", `{"v":1,"folder":"herp","counter":"b2b"}`))
+	if w.Code != http.StatusServiceUnavailable || decodeBody(t, w)["code"] != "FOLDER_WRITABLE" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), "Users") {
+		t.Error("the answer names the box's accounts (the log does)")
+	}
+	if c, _ := b.set.Get("b2b"); c != nil {
+		if last, _ := c.Last(); last != 1_000_122 {
+			t.Errorf("b2b moved to %d", last)
+		}
+	}
+	rw := httptest.NewRecorder()
+	writeReceiptError(rw, nil, "k", fmt.Errorf("%w: the receipt folder", hasavshevet.ErrFolderWritable))
+	if rw.Code != http.StatusServiceUnavailable || decodeBody(t, rw)["code"] != "FOLDER_WRITABLE" {
+		t.Fatalf("receipt: %d %s", rw.Code, rw.Body)
 	}
 }
