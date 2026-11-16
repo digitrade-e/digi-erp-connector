@@ -399,6 +399,11 @@ goes whole — sqlcmd's `-P`, a URL's password (up to the last `@`), DPAPI blobs
 shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; at most 64 MiB is read backwards per
 answer.
 
+**`state`'s `link.autoUpgrade`** (v1.0.31, plan 088) is managed auto-update: `link.yaml`'s `autoUpgrade` switch as it
+reads now, and the link's last view from `link\autoupgrade.json` — the policies it holds, what decides, the next window
+and check — with the last automatic upgrade's outcome, health and rollback read afresh from its result
+([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)).
+
 **`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
 the credential in `config.yaml` (an error says so when the daemon runs another one) — and only when the socket at
 `config.yaml`'s address belongs to the service's own process (the TCP table against the service manager's PID);

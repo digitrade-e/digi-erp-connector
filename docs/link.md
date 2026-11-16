@@ -60,12 +60,22 @@ Since v1.0.29 (Digitrade plan 086) the set also has, run by `provision` the same
 **`state`** (read-only diagnostics). And, answered by the link itself: **`link-status`**, **`upgrade`** and
 **`upgrade-result`** (below). See [§ Plan 086 commands](#plan-086-commands-v1029).
 
+From v1.0.31 (Digitrade plan 088) the link also takes **upgrade policies**: not commands, but approvals signed by the
+same team key, on which the box upgrades itself in its own maintenance window and checks it is healthy afterwards —
+[§ Managed auto-update](#managed-auto-update-plan-088-v1031).
+
 ## For the client's IT
 
 - **State:** `link.yaml` in `%ProgramData%\digi-erp-connector\` — the relay, this box's id once paired, the proxy.
 - **Upgrades over the link** leave their trace in `upgrade\<ticket>\` (`job.json`, `runner.log`, `setup.log`) and
   `results\upgrade-<ticket>.json` in the same folder, and in the Event Log. `admin: false` refuses them like every
   other command.
+- **Automatic upgrades (v1.0.31 on):** the box upgrades itself in a maintenance window, to a release Digitrade
+  approved for it, and goes back to the release it had if it is not healthy afterwards. Each one is in the Event Log
+  and `link.log` (`auto-update … accepted, ticket …`, `auto-update ticket … ended: …`). **Turn them off:**
+  `autoUpgrade: false` in `link.yaml` (commands keep working); `admin: false` stops them too. A connector window left
+  open on the server, in any user's session, is closed before an upgrade's setup runs — **unsaved changes in it are
+  lost**.
 - **Turn remote commands off:** set `admin: false` in `link.yaml`. Data keeps flowing (the shop's sync and orders);
   every command is refused and logged.
 - **Every command** is logged to `link.log` (same folder) and to the Windows **Event Log** (Application, source
@@ -104,8 +114,8 @@ relay, the box id and whether commands are on; `fingerprint` prints it again.
 |---|---|---|
 | `logs` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?:RFC3339,"maxLines"?:≤2000,"grep"?:"literal"}` | `provision logs`: `{"source","untrusted":true,"lines":[…oldest first],"truncated","files"}` |
 | `state` | `{}` | `provision state`: services, the daemon's queue and health, config.yaml against the service start and the model, order and receipt numbers and indexes, the pickup folder, TLS expiry, `link.yaml` (no secrets), free disk |
-| `link-status` | none | the relay, box, `admin`, the proxy (host only) and where it came from, the team-key epoch floor, the live connection, the last connect error, the daemon address and TLS piped to, uptime |
-| `upgrade` | `{"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:bool}` | `{"accepted":true,"ticket","from","to"}` at once, or `{"accepted":false,"refusal":{code,message,fix}}` (exit 1) |
+| `link-status` | none | the relay, box, `admin`, the proxy (host only) and where it came from, the team-key epoch floor, the live connection, the last connect error, the daemon address and TLS piped to, uptime; from v1.0.31 `autoUpgrade` (below) |
+| `upgrade` | `{"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:bool,"healthMinutes"?:5-120}` | `{"accepted":true,"ticket","from","to"}` at once, or `{"accepted":false,"refusal":{code,message,fix}}` (exit 1); `healthMinutes` (v1.0.31; default 15) is the runner's health check |
 | `upgrade-result` | `{"ticket":"…"}` | the result file, `{"ticket","pending":true}`, or `{"ticket","pending":false,"lost":true,"error"}` |
 
 **`logs` and `state` cross the relay signed, not sealed** (plan 086 D1): the same trust as the data path. Nothing
@@ -153,8 +163,10 @@ link's own stop: it is released when the link process ends.
 
 The setup stops the link itself, so the link hands over to a **runner**: a copy of `digi-erp-connector-link.exe` in
 `%ProgramData%\digi-erp-connector\upgrade\<ticket>\`, started detached (it outlives the link and is outside the
-install folder the setup replaces). It waits 10 s for the answer to leave, checks the setup's digest again, runs it
-`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=…`, then puts the services back as they were: the link
+install folder the setup replaces). It waits 10 s for the answer to leave, checks the setup's digest again, ends any
+open connector window (below), runs it
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /LOGCLOSEAPPLICATIONS /LOG=…`,
+then puts the services back as they were: the link
 running, the connector running if it ran before (started again when a failed setup left it stopped) — and a connector
 that was stopped before the upgrade stopped again, since the setup starts it whatever it was. A service that is not as
 it was makes the result an error, whatever the setup's exit code. It then reads the installed build and writes
@@ -170,10 +182,118 @@ URL loses its whole userinfo, an unescaped `@` in a password included.
 A release from v1.0.29 on lists its setup in `SHA256SUMS` (release-windows.yml); v1.0.29 is the last version that must
 be installed by hand on a v1.0.28 box.
 
-There is no automatic rollback (decided with plan 086's review, m10): the runner keeps no previous setup and does not
-wait for the new link to reconnect, so a release whose link cannot start or reach the relay leaves the box to be
-reinstalled by hand — the result file and `setup.log` on the box say what happened. The setup runs as LocalSystem;
-CI refuses an Inno Setup older than 6.5.0, whose setups use the private `C:\Windows\SystemTemp` there (m11).
+**Open connector windows (from v1.0.31; digi-mcp G-143).** The setup runs as LocalSystem in session 0. A connector
+window open in someone's RDP session holds `digi-erp-connector.exe`, and Inno's `/CLOSEAPPLICATIONS` cannot close it:
+it closes only what the Restart Manager reports with no reboot reason, and a process in another Terminal Services
+session comes back `RmRebootReasonSessionMismatch` — so the setup failed (GROOPY's terminal server). Before each setup
+(the upgrade's and a rollback's) the runner therefore ends every process whose image is the **installed**
+`digi-erp-connector.exe` — by full path; another copy, or a process it cannot read, is left alone — in every session,
+and waits up to 15 s. Unsaved changes in such a window are lost. The result records `closedApps` /
+`rollbackClosedApps` `{found, closed, stillOpen, sessions, error?}`; one still open after 15 s means the setup could
+not replace the file, so it is not run, and the result says why.
+
+**Health and one rollback (from v1.0.31; plan 088 D5, which closes plan 086's review m10).** After the setup the
+runner waits up to `healthMinutes` (the command's, default 15; a policy's own) for the box to be healthy, and if it is
+not, installs once more exactly the release it replaced — [§ Health and the one rollback](#health-and-the-one-rollback).
+The runner is a copy of the build being replaced, so this runs from the v1.0.31 → next upgrade on; an upgrade to
+v1.0.31 still has none. The setup runs as LocalSystem; CI refuses an Inno Setup older than 6.5.0, whose setups use the
+private `C:\Windows\SystemTemp` there (m11).
+
+## Managed auto-update (plan 088, v1.0.31)
+
+A box on v1.0.31 or later upgrades **itself**, in its own maintenance window, to a release Digitrade has **approved
+once** for a group of boxes, checks that it is healthy afterwards, and goes back to the release it had if not. It does
+**not** follow GitHub's newest release: every merge to this repository's `main` publishes one, and a box following that
+would run any merged change as LocalSystem within hours. It follows an **upgrade policy** that a person approved
+through digi-mcp (`connector_rollout`, an approval form), signed with the team key.
+
+### Why a relay cannot misuse it (D1, D2)
+
+- **Signed by the team key, not set at the relay (D1).** digi-mcp signs a policy with the team key that signs commands —
+  compiled into this release, at or above the key-epoch floor (a policy signed by a newer key raises the floor, as a
+  command does). The relay stores and delivers policies, nothing more. It cannot invent or change one. It can withhold
+  one: the box then keeps what it holds, and an expired policy means hold. It can state another tenant or ring for the
+  box (D6): that only exposes the box to another signed, approved policy. Withholding a *hold* lets the box follow
+  another policy a person approved — nothing reaches the box that a person did not approve.
+- **The same download checks as the `upgrade` command (D2).** The scheduler only decides *when*; the upgrade is the
+  command's own path: an official release of this repository (the compiled-in prefix), newer than the running build,
+  its setup's SHA-256 equal to the policy's **and** to the release's `SHA256SUMS` line, the order queue idle. A stolen
+  team key can at most install an official newer release — the trust a person has downloading it by hand.
+- **Scopes and anti-replay (D3).** A policy names `all` boxes, a `ring`, a `tenant` or one `box`; the most specific
+  valid one decides — box, then tenant, then ring, then all. Each carries a `seq`. The box keeps the highest it
+  accepted per scope (also after it expires) and refuses a lower one, or other bytes at the same seq: an old signed
+  policy cannot be replayed to pin the box to an old release or to undo a hold. The same policy delivered again (the
+  relay does, on every connection and hourly) changes nothing. An expired policy does not count; with none valid, the
+  box holds.
+
+The policy, as signed (`pkg/linkproto` `UpgradePolicy`, shared with the relay and digi-mcp):
+
+```json
+{"v":1,"kind":"upgrade-policy","scope":{"type":"ring","value":"canary"},"seq":12,
+ "issuedAt":"2026-11-16T09:00:00Z","expiresAt":"2026-12-16T09:00:00Z",
+ "target":{"version":"1.0.31","sha256":"<64 hex of digi-erp-connector-setup-1.0.31.exe>"},"hold":false,
+ "window":{"days":["mon","tue","wed","thu","sun"],"from":"02:00","to":"05:00"},"healthMinutes":15,"by":"ilya"}
+```
+
+It travels as `{"policy":"<the exact bytes, base64>","keyId":"team-1","sig":"<base64 Ed25519>"}`; the signature covers
+`digi-link-policy-v1\0` + those bytes, and a box accepts only the canonical encoding `linkproto.SignPolicy` makes
+(no unknown, duplicate or re-cased key). `target: null` or `hold: true`: do not upgrade. The window is in **the box's
+local time**; `to` before `from` runs past midnight (the occurrence belongs to the day it starts on), `to` may be
+`24:00`. `healthMinutes` is 5 to 120; a policy lives at most 366 days.
+
+### What the box does
+
+- **Policies arrive on a policy stream** the relay opens: on every connection (an empty list too), when a policy that
+  applies to the box changes, and hourly. The link verifies each one (key, epoch floor, canonical bytes, shape), checks
+  it is not expired, names this box — its id, or the tenant or ring the relay states for it — and has a newer seq, and
+  keeps it in `link\policy.json`. Then it answers on a **report stream**: its view — what it holds per scope, what it
+  refused and why, what decides, the last automatic upgrade — signed by the box's own key, so the relay can store it
+  but not forge it (digi-mcp checks it against the key it pinned at pairing). The box opens a report stream only on a
+  connection whose relay opened a policy stream (an older relay closes a connection whose box opens a second stream),
+  and at most five a minute (the relay's limit is six); one over that goes later, as the latest view.
+- **Every 10 minutes (± 1), and at once after a delivery**, the scheduler looks at what decides. The box upgrades when
+  the policy names a release newer than its own, the box's local time is inside the policy's window, no upgrade is
+  running, and `link.yaml` lets it (`autoUpgrade` and `admin` not `false`, no key it does not know). Orders in the
+  queue, another command or a provisioning run: tried again at the next check, in the same window. Any other refusal
+  (a download that failed, a digest that does not match): the next window — never more than one attempt per window
+  per target. A ticket that ends unhealthy or rolled back stops that target under that policy, and so do three failed
+  tickets: a newer policy (a higher seq, even for the same release) arms it again.
+- **The upgrade itself** is a ticket like a command's, with `auto: true` and the policy (`{scope, seq}`) in its job and
+  result, the policy's `healthMinutes`, and — when this box knows it — the digest of the setup that installed the
+  build it replaces (`fromSha256`: an earlier ticket, a rollback or a policy it holds installed it).
+
+### Health and the one rollback
+
+After the setup the runner waits up to `healthMinutes` for one healthy round: the installed build is the target (or
+the build it replaced, when the setup left that), both services are as they were before, the daemon proves itself the
+way provision's `state` does (it logs in with `config.yaml`'s credential and answers `/api/ping` with the installed
+build; a daemon stopped before is not asked), and the installed build's link is connected to the relay
+(`link\session.json`: its build, a liveness answer since the setup started and within 3 minutes).
+
+Not healthy: it installs **exactly the build it replaced**, once — that release's setup, downloaded from the
+compiled-in prefix, its SHA-256 equal to the release's `SHA256SUMS` line and, when the box recorded one, to the digest
+that installed it here. It waits up to 5 minutes for the order queue to empty first, ends open connector windows, puts
+the services back as they were and checks health again. That rollback is the only downgrade the link ever makes, only
+for the ticket's own rollback; a second failure leaves the box as that setup left it, and the result says so. A setup
+still running when the runner stops waiting is never followed by a health check or a second setup. DIG-1297's rule
+holds for it too: never below 1.0.25 on a box with a pickup folder. The result gains `health`
+`{ok, minutes, seconds, checks:[{name, ok, detail}]}` and `rollback`
+`{to, sha256, exitCode, ok, installedVersion, services, health, startedAt, finishedAt, error?}`; its outcome is `ok`,
+`failed` (the setup or the services failed, and the box was healthy as it was), `unhealthy` or `rolled_back`.
+
+Every later build must keep writing `link\session.json` and keep `state`'s `daemon` fields (`asked`, `version`,
+`error`): the runner is a copy of the build being replaced and judges the new one by them.
+
+### Where to look
+
+- `link-status` and provision's `state` (`link.autoUpgrade`): the switch, the policies held (scope, seq, target,
+  window, health minutes, issued and expiry, by, whether each applies or expired), what decides and why
+  (`scheduled`, `up_to_date`, `upgrading`, `policy_hold`, `no_policy`, `auto_upgrade_off`, `admin_off`,
+  `state_unreadable`, `stopped`), the next window and the next check, a "not now" (`waiting`), and the last automatic
+  upgrade with its outcome, health and rollback. `digi-erp-connector-link.exe status` prints the switch.
+- Files in the data directory: `link\policy.json` (what the box holds — one that cannot be read refuses deliveries
+  and holds, never starts over; delete it by hand only on Digitrade's request), `link\autoupgrade.json` (the
+  scheduler's memory and its last view), `link\session.json`, and the tickets' `upgrade\` and `results\` as above.
 
 ## Behind the link, `provision` is stricter
 

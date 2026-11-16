@@ -261,3 +261,22 @@ Digitrade plan 086 (every connector operation through digi-mcp), builder B2, bra
 - `upgrade` / `upgrade-result` (C8, decision D2): official newer releases only, setup digest = envelope = SHA256SUMS,
   a detached runner (copy of the link in DataDir\upgrade\<ticket>\) writes DataDir\results\upgrade-<ticket>.json;
   the release workflow now lists the setup in SHA256SUMS.
+
+## 2026-11-16 — plan 088 A: managed auto-update (for v1.0.31)
+
+Digitrade plan 088 (the box upgrades itself to a release a person approved once), builder A, branch
+`feat/088-auto-update`:
+
+- `pkg/linkproto/policy.go` (pushed first, commit 962048e, which the relay and digi-mcp pin): the signed
+  `UpgradePolicy` of plan 088 §3, `SignPolicy` / `VerifySignedPolicy` / `VerifyPolicy` (canonical bytes only,
+  domain-separated signature), `ActiveAt`, `Applies`, `MostSpecific`, `Effective`, window `Start` / `NextStart` in box
+  time, `PolicyDelivery`, the signed `Report`, stream types `P` and `R`.
+- The link: policy streams verified at the epoch floor and kept per scope in `link\policy.json` (seq never lower, fail
+  closed); signed reports, only to a relay that sent policies, at most five a minute; the scheduler (10 min ± 1) runs the
+  upgrade command's own path in the policy's window with the queue idle — one attempt per window per target, a
+  rolled-back target stopped until a newer policy; `link\autoupgrade.json`; `link\session.json`; `link.yaml
+  autoUpgrade`.
+- The runner: health within `healthMinutes` and one rollback to the exact build replaced (release SHA256SUMS + the
+  recorded `fromSha256`), closing plan 086's review m10; before each setup it ends the installed GUI in every session
+  (digi-mcp G-143: Inno's `/CLOSEAPPLICATIONS` cannot reach another Terminal Services session — GROOPY's failure).
+- `link-status` and `state` show the policies, what decides, the next check, the last automatic upgrade.

@@ -238,3 +238,23 @@ when `history\<n>\IMOVEIN_<n>.doc` already exists or another entry holds `n`.
 It logs `ORDER NOT QUEUED AGAIN: order <n> (historyId=…) is retryable, but …`
 with the reason, answers the repeat as `failed` and leaves the entry as it is —
 fix the entry by the steps above.
+
+## The box did not upgrade itself (auto-update, v1.0.31)
+
+`link-status` (or provision's `state`, `link.autoUpgrade`) says why, in `effective.why`
+([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)):
+
+| `why` | Meaning, and the way on |
+|---|---|
+| `no_policy` | No valid policy names this box: none was published for it, the one it held expired, or the relay states another ring or tenant than the policy's (`tenant`, `ring`, each policy's `applies`). |
+| `policy_hold` | The most specific policy holds (`hold`, or no target) — a box or tenant hold outranks a ring's or every box's target. |
+| `scheduled` | It will: `nextWindow` is when, in the box's local time. A `waiting` entry says why the last check in the window did not (`orders_pending`, `busy`); `last` with `outcome: refused` says why the last attempt failed (a download, a digest) — tried again in the next window. |
+| `up_to_date` | The box already runs the target or a newer build. |
+| `upgrading` | A ticket is running: `last.ticket`, and `upgrade-result` with it. |
+| `stopped` | This target rolled back (or failed three times) under this policy; `last` has the health checks and the rollback. A newer policy (a higher seq, even for the same release) tries again. |
+| `auto_upgrade_off`, `admin_off` | `link.yaml` turns it off (`autoUpgrade: false`, `admin: false`). |
+| `state_unreadable` | `link.yaml` names a key the link does not know (a misspelt `autoUpgrade`?), or `link\policy.json` / `link\autoupgrade.json` does not read: the box holds and never starts over by itself. `error` names the file. |
+
+A policy refused on delivery is in `refused` with its code: `seq_not_newer` (the box holds this scope at that seq or a
+higher one — publish a newer seq), `wrong_scope`, `expired`, `key_revoked` / `key_unknown` / `signature_refused` (not
+signed by a team key this build trusts at its epoch floor).

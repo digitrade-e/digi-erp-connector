@@ -173,11 +173,12 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 - The strict decoder's key walk descends only where the Go type nests (≤ 8 levels) and skips other values with `Decode` — walking them token by token cost O(depth²) memory.
 - Every text value is edge-trimmed on the RAW value, then `normalize1255`, then strict Windows-1255; widths are encoded bytes (U+FB2A and an inner line break are two).
 
-## Link diagnostics and upgrade (plan 086 C4/C5/C8)
+## Link diagnostics, upgrade and auto-update (plan 086 C4/C5/C8, plan 088)
 
 `digi-erp-connector-link` (internal/link, docs/link.md) runs signed commands from a fixed set: provision commands
 (commands.go, plus commands_086.go: `logs`, `state`) and ones it answers itself (`selfCommands`: `hashes`,
-`link-status`, `upgrade`, `upgrade-result`). A test pins both sets — adding one is a reviewed change.
+`link-status`, `upgrade`, `upgrade-result`). A test pins both sets — adding one is a reviewed change. Plan 088 adds
+two stream types, not commands: `policy` ('P', relay → box) and `report` ('R', box → relay), `pkg/linkproto/policy.go`.
 
 | command | where | hard rules |
 |---|---|---|
@@ -185,6 +186,8 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 | `state` | provision/state.go | writes nothing (no file, no DACL, no DB); the daemon only through its read-only routes; no secret, not even set/missing; a receipt's request never read out |
 | `link-status` | link/linkstatus.go | proxy by host only; URL credentials dropped from errors |
 | `upgrade` / `upgrade-result` | link/upgrade.go, upgrade_runner.go, upgrade_windows.go | D2: official release only (compiled-in `releasePrefix`, tests alone change it), newer than the link's build, setup SHA-256 = envelope pin = release SHA256SUMS line; every check before `accepted`; the runner is a detached copy of the link in DataDir\upgrade\<ticket>\ (never in the install folder the setup replaces); a failed setup's stopped services are started again; results through plain folders only |
+| runner health + rollback (plan 088 D5) | link/upgrade_health.go, upgrade_close.go, procs_windows.go | before each setup end the INSTALLED `digi-erp-connector.exe` in every session, by full path (G-143: Inno cannot close another session's), ≤ 15 s, else no setup; after it, health within `healthMinutes` (build, services as before, the daemon proved as `state` does, the new link in `link\session.json`); unhealthy → reinstall exactly the build replaced, once: setup = its SHA256SUMS line = the recorded `fromSha256` when known — the only downgrade; never after a setup still running; DIG-1297 guard kept. Later builds must keep `session.json` and `state`'s `daemon` fields: the old build's runner judges by them |
+| policies, reports, scheduler (plan 088) | link/policies.go, autoupgrade.go, session.go; pkg/linkproto/policy.go | a policy counts only signed by a compiled-in team key at the epoch floor, in its canonical bytes, active, naming this box (id, or the relay-stated tenant/ring), seq above the scope's (same bytes = re-delivery); `link\policy.json` never starts over when unreadable (hold). Reports are signed by the box key, sent only on a connection whose relay opened a 'P' (an old relay drops the connection otherwise), ≤ 5 a minute. The scheduler decides only *when* and calls `startUpgrade`, the command's own path — never a second download path; `autoUpgrade: false`, `admin: false` or an unknown link.yaml key hold |
 
 The data path reads the daemon's address/TLS per stream (`DaemonWatch`, link/daemon.go) — never cache it at service
 start again: an apply that moved the port stranded the data path until someone restarted the link. The previous
