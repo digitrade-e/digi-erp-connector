@@ -280,3 +280,24 @@ Digitrade plan 088 (the box upgrades itself to a release a person approved once)
   recorded `fromSha256`), closing plan 086's review m10; before each setup it ends the installed GUI in every session
   (digi-mcp G-143: Inno's `/CLOSEAPPLICATIONS` cannot reach another Terminal Services session — GROOPY's failure).
 - `link-status` and `state` show the policies, what decides, the next check, the last automatic upgrade.
+
+## 2026-11-16 — plan 088: the security review's fixes (D8–D13, B1, M1–M3, m1–m7, m9–m11, m16, m17)
+
+Same branch, before any merge (v1.0.31 is unreleased, so the policy format changed in place, `v` still 1). The review
+(B1, M1–M4, m1–m17) found that a rollback could install whatever the network served, that the relay's tenant/ring
+could undo holds, that a later hold did not brake a more specific target, that a rollback had no data floor; plan 088
+§2b decided D8–D13.
+
+- `pkg/linkproto` (commit fcd0277, which the relay and digi-mcp re-pin): scopes `all` / `boxes:[ids]` (D9; ring,
+  tenant and box scope types removed), `rollbacks` on a policy and `rollback` on `UpgradeSpec` (D8), `Decide` (D10:
+  the most specific decides, an expired policy holds for its scope, a hold issued at or after a moving policy wins),
+  seq ≤ 2³¹−1, lifetime ≤ 90 days, a window ≥ healthMinutes + 30 min (D13, m16, m17), new outcome and why codes.
+- The runner: rolls back only to a signed digest (B1), never below `DataDir\format-floor` (D11, new
+  `internal/formatfloor`, raised by the daemon and the link at start), and keeps the new build on a link-only failure
+  while the relay's `/healthz` is down (D12); checks the order queue again right before the setup (m6); ends windows
+  through the handle it checked (m5); resumes the health check once after a restart (m7, `health.json`).
+- The link: the relay's statements are information only (M1); deliveries coalesced, writes and kicks only on a
+  change (m2); seq floors in the secrets store, never pruned, judge every policy (m3, m4); a retired key's floor no
+  longer binds (m1); stops and failures tallied apart from the attempts (m10); `knownSetupSHA` at the epoch floor (m11).
+- Not here: M4, m13–m15 are digi-mcp's; the relay's 90-day cap comes with its linkproto re-pin; m8 (a CI contract
+  test for the health probe's fields) and m12 (binding a policy to a relay) are open.

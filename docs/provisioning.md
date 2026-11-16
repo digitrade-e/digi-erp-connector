@@ -400,9 +400,11 @@ shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; a
 answer.
 
 **`state`'s `link.autoUpgrade`** (v1.0.31, plan 088) is managed auto-update: `link.yaml`'s `autoUpgrade` switch as it
-reads now, and the link's last view from `link\autoupgrade.json` — the policies it holds, what decides, the next window
-and check — with the last automatic upgrade's outcome, health and rollback read afresh from its result
-([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)).
+reads now, and the link's last view from `link\autoupgrade.json` — the policies it holds, what decides (and a target a
+later hold brakes), the next window and check — with the last automatic upgrade's outcome, health and rollback read
+afresh from its result ([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)). Downgrading by
+hand: never below `DataDir\format-floor` either — it names the oldest release that reads every file format the builds
+on this box wrote (plan 088 D11).
 
 **`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
 the credential in `config.yaml` (an error says so when the daemon runs another one) — and only when the socket at
