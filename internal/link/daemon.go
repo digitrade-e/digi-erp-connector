@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,10 @@ type DaemonWatch struct {
 	// Windows, that it is the connector's own service (DaemonOwnerCheck, review B1). nil: no check (off Windows, and
 	// tests).
 	Owner func(net.Conn) error
+	// CertSafe, when set, refuses a certificate (or key) file that others than the administrators can change, or whose
+	// folders they can swap (review m8: the file is read again every 30 s, so a local user who can write there would
+	// have the link trust their certificate). nil: no check (off Windows, and tests). Machine sets CertWriters.
+	CertSafe func(path string) error
 
 	mu        sync.Mutex
 	loaded    bool
@@ -51,6 +56,7 @@ type DaemonWatch struct {
 	loadedAt  time.Time
 	err       error
 	logged    string
+	certErr   string // why the certificate is not trusted (CertSafe), "" when it is
 }
 
 // daemonRecheck bounds how long a target is trusted without reading config.yaml again.
@@ -143,7 +149,27 @@ func (w *DaemonWatch) reload(cs fileStamp) {
 	}
 	t := DaemonTarget{Addr: LocalAddr(cfg.APIListen), TLS: cfg.TLS.Enabled(), CertFile: cfg.TLS.CertFile}
 	if t.TLS {
-		t.Cert = readCert(t.CertFile)
+		certErr := ""
+		if w.CertSafe != nil {
+			for _, p := range []string{cfg.TLS.CertFile, cfg.TLS.KeyFile} {
+				if strings.TrimSpace(p) == "" {
+					continue
+				}
+				if err := w.CertSafe(p); err != nil {
+					certErr = err.Error()
+					break
+				}
+			}
+		}
+		if certErr == "" {
+			t.Cert = readCert(t.CertFile) // nil: unusable, no stream (errDaemonCert)
+		}
+		if certErr != w.certErr && certErr != "" && w.Log != nil {
+			w.Log.Error("link: the connector's TLS certificate is not trusted; no data stream is served", errors.New(certErr))
+		}
+		w.certErr = certErr
+	} else {
+		w.certErr = ""
 	}
 	w.err, w.logged = nil, ""
 	w.cfgStamp, w.certStamp = cs, stampOf(t.CertFile)
@@ -176,8 +202,11 @@ func (w *DaemonWatch) Status() DaemonStatus {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	s := DaemonStatus{ReadAt: w.loadedAt.UTC()}
-	if w.err != nil {
+	switch {
+	case w.err != nil:
 		s.Error = w.err.Error()
+	case w.certErr != "":
+		s.Error = "the certificate is not trusted: " + w.certErr
 	}
 	if len(ts) > 0 {
 		s.Address, s.TLS = ts[0].Addr, ts[0].TLS

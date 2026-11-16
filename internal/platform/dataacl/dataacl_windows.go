@@ -578,22 +578,57 @@ const fileDeleteChild = 0x40
 // folder, adding an entry (FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY are the
 // bits of FILE_WRITE_DATA and FILE_APPEND_DATA — and cmd.exe looks in the
 // current folder first for a command a BAT names) or deleting one.
+//
+// Every folder above (review m12, m8): whoever can rename one away — DELETE on it, or FILE_DELETE_CHILD on its
+// parent — can put a folder of their own in its place, so the folder holding the file gets DELETE as well
+// (folderWrite), and each ancestor is judged by ancestorWrite (DELETE, except on the volume's root, which cannot be
+// renamed). Adding an entry to an ancestor (Users may create folders in C:\) changes nothing below it.
 const (
 	fileWrite = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | windows.WRITE_DAC |
 		windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL
 	dirWrite = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | fileDeleteChild | windows.WRITE_DAC |
 		windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL
+	folderWrite   = dirWrite | windows.DELETE
+	ancestorWrite = fileDeleteChild | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL
+	rootWrite     = fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL
 )
+
+// writerCheck is one object Writers reads, and the rights on it that let someone change what the file runs.
+type writerCheck struct {
+	path string
+	mask uint32
+}
+
+// writersChain is what Writers reads for path: the file, its folder, and every folder above it to the volume's root.
+func writersChain(path string) []writerCheck {
+	dir := filepath.Dir(path)
+	out := []writerCheck{{path, fileWrite}, {dir, folderWrite}}
+	for {
+		up := filepath.Dir(dir)
+		if up == dir {
+			break
+		}
+		mask := uint32(ancestorWrite)
+		if filepath.Dir(up) == up {
+			mask = rootWrite
+		}
+		out = append(out, writerCheck{up, mask})
+		dir = up
+	}
+	return out
+}
 
 // Writers names who, besides SYSTEM, the Administrators, TrustedInstaller and
 // this process's own account, can change what path runs: an owner outside
 // them, and every account an allow entry gives a write-class right on the
-// file (fileWrite) or on its folder (dirWrite). OWNER RIGHTS and CREATOR
+// file (fileWrite), on its folder (folderWrite) or on a folder above it
+// (ancestorWrite: renaming one away; review m12). OWNER RIGHTS and CREATOR
 // OWNER are left out: the owner is judged itself, and CREATOR OWNER only
 // shapes what a folder's new entries inherit. The connector runs its
 // importer as LocalSystem for every order, so a file someone else can change
-// is their code run as SYSTEM (plan 068's panel, 2026-10-20). Empty: only the
-// administrators control it.
+// is their code run as SYSTEM (plan 068's panel, 2026-10-20); the link trusts
+// the daemon's certificate file (review m8). Empty: only the administrators
+// control it.
 func Writers(path string) ([]string, error) {
 	t, err := newTrust()
 	if err != nil {
@@ -601,10 +636,7 @@ func Writers(path string) ([]string, error) {
 	}
 	out := []string{}
 	seen := map[string]bool{}
-	for _, o := range []struct {
-		path string
-		mask uint32
-	}{{path, fileWrite}, {filepath.Dir(path), dirWrite}} {
+	for _, o := range writersChain(path) {
 		sd, err := windows.GetNamedSecurityInfo(longPath(o.path), windows.SE_FILE_OBJECT,
 			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err != nil {

@@ -123,8 +123,10 @@ tried second — for at most 3 minutes after the change, only until the new addr
 plaintext address behind a TLS one. A certificate that cannot be read serves no data stream at all, to no address. On
 Windows a stream is piped only to a socket owned by the connector's own service (`digi-erp-connectord`'s process, from
 the TCP table): a local user who takes the port while the daemon restarts, or a port left behind, gets nothing — not
-erp-manager's `/auth/token` login. The link also starts on a server with no `config.yaml` yet: commands work, data
-waits for one.
+erp-manager's `/auth/token` login. The certificate (and key) is trusted only where nobody but the administrators can
+change it or rename a folder above it (the same check as the importer's, every folder up to the root): otherwise no
+data stream is served, and `link-status` says why. The link also starts on a server with no `config.yaml` yet:
+commands work, data waits for one.
 
 ### Upgrade over the link
 

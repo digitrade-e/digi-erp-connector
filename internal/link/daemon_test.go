@@ -259,6 +259,54 @@ func TestThePreviousAddressExpires(t *testing.T) {
 	}
 }
 
+// Review m8: the certificate is read again every 30 s from wherever config.yaml points; one that users can change (or
+// whose folder they can swap) is not trusted, and no stream is served.
+func TestACertificateUsersCanChangeIsNotTrusted(t *testing.T) {
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, "tls") }))
+	t.Cleanup(secure.Close)
+	certFile := tlsCertFile(t, secure)
+	fc := newFakeConfig(t, secure.Listener.Addr().String())
+	fc.set(t, func(c *config.Config) { c.TLS = config.TLSConfig{CertFile: certFile, KeyFile: certFile + ".key"} })
+	var writable atomicBool
+	log := &testLog{}
+	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path, Log: log, CertSafe: func(p string) error {
+		if writable.get() && p == certFile {
+			return errors.New(p + ` can be changed by BUILTIN\Users`)
+		}
+		return nil
+	}}
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	_, rc := pairedBox(t, r, "bfl-read", kr, "", func(c *Config) { c.Daemon = watch })
+	if got := get(t, rc); got != "tls" {
+		t.Fatalf("a safe certificate: %q", got)
+	}
+	writable.set(true)
+	fc.set(t, func(*config.Config) {}) // the next read (at the latest daemonRecheck later)
+	if got := get(t, rc); got != "" {
+		t.Fatalf("a certificate users can change still served %q", got)
+	}
+	if s := watch.Status(); s.CertReadable || !strings.Contains(s.Error, "not trusted") {
+		t.Fatalf("status %+v", s)
+	}
+	if !log.has(`BUILTIN\Users`) {
+		t.Fatal("not logged")
+	}
+	writable.set(false)
+	fc.set(t, func(*config.Config) {})
+	if got := get(t, rc); got != "tls" {
+		t.Fatalf("made safe again: %q", got)
+	}
+}
+
+type atomicBool struct {
+	mu sync.Mutex
+	v  bool
+}
+
+func (b *atomicBool) get() bool  { b.mu.Lock(); defer b.mu.Unlock(); return b.v }
+func (b *atomicBool) set(v bool) { b.mu.Lock(); b.v = v; b.mu.Unlock() }
+
 // On Windows the data path pipes only to a socket the connector's service owns (DaemonOwnerCheck): a stream whose
 // far end is another process is closed unanswered, whichever address it is.
 func TestAStreamGoesOnlyToTheDaemonsOwnProcess(t *testing.T) {

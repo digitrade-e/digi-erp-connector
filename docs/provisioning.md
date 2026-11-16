@@ -348,7 +348,7 @@ actually changed.
 | `loopback_listen` | `apiListen` is loopback: the Hub cannot reach it |
 | `sa_login` | the connector would keep `sa`: set `leastPrivilege` or `allowSa` |
 | `importer_required` / `importer_missing` | orders are configured but no importer is named / the named file is not on the machine |
-| `importer_writable` | someone besides the administrators can change the importer or its folder |
+| `importer_writable` | someone besides the administrators can change the importer or its folder, or rename a folder above it (DELETE on it, or delete-child on its parent) |
 | `db_host_public` | `db.host` is not this machine or its LAN |
 | `send_order_dir_missing` | the order folder does not exist |
 | `auth_password_weak` | the credential is shorter than 16 characters or not plain text |
