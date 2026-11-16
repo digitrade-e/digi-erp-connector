@@ -25,13 +25,40 @@ import (
 // every box or an explicit signed list of box ids (D9), and the tenant and ring the relay states are only repeated in
 // the box's reports.
 
-// policyFile is DataDir\link\policy.json.
+// policyFile is DataDir\link\policy.json: the accepted policies, one per scope key. What the relay states about the
+// box (its tenant and ring) is not in it: that is information for reports only (D9, review M1), kept in memory.
 type policyFile struct {
 	V        int            `json:"v"`
-	Tenant   string         `json:"tenant,omitempty"` // as the relay last stated them (plan 088 D6)
-	Ring     string         `json:"ring,omitempty"`
-	StatedAt time.Time      `json:"statedAt,omitzero"`
 	Policies []storedPolicy `json:"policies"`
+}
+
+// statedPlace is the tenant and ring the relay last stated for this box: repeated in reports and link-status, never
+// used to decide anything (D9, review M1).
+type statedPlace struct {
+	tenant, ring string
+	at           time.Time
+}
+
+// noteStated records what a delivery states. A change is logged at most once a minute (review m2: a relay alternating
+// its statements must not flood link.log and the Event Log).
+func (l *Link) noteStated(tenant, ring string, now time.Time) {
+	l.statedMu.Lock()
+	prev := l.stated
+	l.stated = statedPlace{tenant: tenant, ring: ring, at: now.UTC()}
+	l.statedMu.Unlock()
+	if prev.tenant != tenant || prev.ring != ring {
+		l.logEvery("policy-stated", func() {
+			l.cfg.Log.Info(fmt.Sprintf("link: the relay states tenant %q, ring %q for this box (it was %q, %q): information only, no policy depends on it",
+				tenant, ring, prev.tenant, prev.ring))
+		})
+	}
+}
+
+// statedNow is what the relay last stated.
+func (l *Link) statedNow() statedPlace {
+	l.statedMu.Lock()
+	defer l.statedMu.Unlock()
+	return l.stated
 }
 
 // storedPolicy is one accepted policy: the signed bytes as delivered, verified again at every use. Epoch is the epoch
@@ -150,12 +177,10 @@ func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 		return nil, &linkproto.Refusal{Code: codeStateUnreadable}
 	}
 	now := l.cfg.Now()
-	if pf.Tenant != d.Tenant || pf.Ring != d.Ring {
-		l.cfg.Log.Info(fmt.Sprintf("link: the relay places this box in tenant %q, ring %q (it was %q, %q)", d.Tenant, d.Ring, pf.Tenant, pf.Ring))
-	}
-	pf.Tenant, pf.Ring, pf.StatedAt = d.Tenant, d.Ring, now.UTC()
+	l.noteStated(d.Tenant, d.Ring, now)
 	refused := []linkproto.ReportRefusal{}
 	unverified, lastUnverified := 0, ""
+	changed := false
 	for _, sp := range d.Policies {
 		p, key, err := l.cfg.Team.VerifySignedPolicy(sp, minEpoch)
 		if err != nil {
@@ -176,6 +201,7 @@ func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 		} else {
 			var accepted bool
 			if accepted, code = pf.put(p, sp, key.Epoch, minEpoch, now); accepted {
+				changed = true
 				l.cfg.Log.Info(fmt.Sprintf("link: policy %s #%d accepted (key %s): %s; by %q, expires %s",
 					p.Scope, p.Seq, key.ID, describePolicy(p), p.By, p.ExpiresAt.UTC().Format(time.RFC3339)))
 			}
@@ -193,6 +219,9 @@ func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 		l.logEvery("policy-unverified", func() {
 			l.cfg.Log.Warn(fmt.Sprintf("link: %d policy(ies) of a delivery refused before verification (last: %s)", unverified, lastUnverified))
 		})
+	}
+	if !changed {
+		return refused, nil // the same policies again (the relay's hourly delivery): nothing to write
 	}
 	if err := l.cfg.Store.savePolicies(pf); err != nil {
 		l.cfg.Log.Error("link: saving link\\policy.json", err)

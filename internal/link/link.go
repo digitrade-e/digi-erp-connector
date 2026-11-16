@@ -96,6 +96,8 @@ type Link struct {
 	policySlots chan struct{}
 	refusedMu   sync.Mutex
 	refused     []linkproto.ReportRefusal // the last policy delivery's refusals
+	statedMu    sync.Mutex
+	stated      statedPlace // the tenant and ring the relay last stated: information only
 	autoMu      sync.Mutex
 	autoKick    chan struct{}
 }

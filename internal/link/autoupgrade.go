@@ -73,7 +73,7 @@ type autoFile struct {
 // AutoUpgradeStatus is the auto-update part of link-status and of provision's state (plan 088).
 type AutoUpgradeStatus struct {
 	Enabled   bool                      `json:"enabled"`          // link.yaml autoUpgrade (default true)
-	Tenant    string                    `json:"tenant,omitempty"` // as the relay last stated them
+	Tenant    string                    `json:"tenant,omitempty"` // as the relay last stated them: information only (D9)
 	Ring      string                    `json:"ring,omitempty"`
 	StatedAt  time.Time                 `json:"statedAt,omitzero"`
 	Policies  []PolicyStatus            `json:"policies"`
@@ -149,7 +149,8 @@ type autoInputs struct {
 	build    string
 	now      time.Time // the box's local time
 	attempts []autoAttempt
-	pending  bool // an upgrade ticket (a command's or the scheduler's) is running
+	pending  bool        // an upgrade ticket (a command's or the scheduler's) is running
+	stated   statedPlace // what the relay last stated: shown, never weighed
 }
 
 // autoView is decideAuto's answer.
@@ -166,7 +167,7 @@ func decideAuto(in autoInputs) autoView {
 	var v autoView
 	s := &v.status
 	s.Enabled = in.state.AutoUpgradeOn()
-	s.Tenant, s.Ring, s.StatedAt = in.pf.Tenant, in.pf.Ring, in.pf.StatedAt
+	s.Tenant, s.Ring, s.StatedAt = in.stated.tenant, in.stated.ring, in.stated.at
 	s.Policies = []PolicyStatus{}
 	hold := func(why string) autoView {
 		s.Effective.Hold, s.Effective.Why = true, why
@@ -283,7 +284,7 @@ func decideAuto(in autoInputs) autoView {
 }
 
 func (l *Link) autoInputs(now time.Time, af autoFile, afErr error) autoInputs {
-	in := autoInputs{team: l.cfg.Team, build: l.cfg.Build, now: now, attempts: af.Attempts, afErr: afErr}
+	in := autoInputs{team: l.cfg.Team, build: l.cfg.Build, now: now, attempts: af.Attempts, afErr: afErr, stated: l.statedNow()}
 	in.state, in.stateErr = l.cfg.Store.LoadState()
 	in.minEpoch, in.epochErr = l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
 	l.cfg.Store.policyMu.Lock()

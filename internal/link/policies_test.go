@@ -494,7 +494,7 @@ func TestReportsStayWithinTheRelaysLimit(t *testing.T) {
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			// taken, and its slot let go (the relay waits for the report, or 10 s, before its next delivery)
-			if pf, err := b.store.loadPolicies(); err == nil && pf.Ring == ring && len(b.link.policySlots) == 0 {
+			if b.link.statedNow().ring == ring && len(b.link.policySlots) == 0 {
 				return
 			}
 			if time.Now().After(deadline) {
@@ -534,5 +534,38 @@ func TestTheDeliverySlotIsFreeBeforeTheReport(t *testing.T) {
 		if n := len(b.link.policySlots); n != 0 {
 			t.Fatalf("delivery %d: the slot was still held when the report arrived", i)
 		}
+	}
+}
+
+// Review M1 (with D9): what the relay states about the box is information for its reports — never stored with the
+// policies, never a reason to rewrite policy.json, its changes logged at most once a minute.
+func TestTheRelaysStatementsAreInformationOnly(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	p := signed(t, priv, "team-1", targetPolicy(everyBox(), 3, "1.0.31", strings.Repeat("ab", 32), time.Now()))
+	deliver(t, rc, delivery("bfl-read", "bflstore", "canary", p))
+	if rep := rs.next(t); rep.Tenant != "bflstore" || rep.Ring != "canary" {
+		t.Fatalf("%+v", rep)
+	}
+	before, err := os.ReadFile(policyPath(b.store.Dir))
+	if err != nil || strings.Contains(string(before), "bflstore") || strings.Contains(string(before), "canary") {
+		t.Fatalf("policy.json holds what the relay stated: %s (%v)", before, err)
+	}
+	fi, _ := os.Stat(policyPath(b.store.Dir))
+	for i, stated := range []string{"tamig", "bflstore", "tamig", "bflstore", "tamig"} {
+		deliver(t, rc, delivery("bfl-read", stated, "", p))
+		if rep := rs.next(t); rep.Tenant != stated || len(rep.Refused) != 0 || rep.Effective.Why != linkproto.WhyScheduled {
+			t.Fatalf("delivery %d: %+v", i, rep)
+		}
+	}
+	after, _ := os.ReadFile(policyPath(b.store.Dir))
+	fi2, _ := os.Stat(policyPath(b.store.Dir))
+	if string(after) != string(before) || !fi2.ModTime().Equal(fi.ModTime()) {
+		t.Fatal("policy.json was rewritten for a statement")
+	}
+	if n := b.log.count("the relay states tenant"); n != 1 {
+		t.Fatalf("the statement's change logged %d times", n)
 	}
 }
