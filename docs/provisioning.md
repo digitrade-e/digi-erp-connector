@@ -28,10 +28,12 @@ same way in an elevated PowerShell. The code is
 | `receipts [--check] --spec -` | `{"version":1,"changeSet","sendReceiptDir"?,"hasReceiptBatFile"?,"hasReceiptParamFile"?,"receiptCardNames"?,"allowWritable"?,"assumeIdle"?,"expect"?}` | The receipt settings only (below) | `config.yaml` |
 | `orders [--check] --spec -` | `{"version":1,"changeSet","sendOrderDir"?,"importer"?,"sendOrderPickupDir"?,"sendOrderFormat"?,"assumeIdle"?,"expect"?}` | The order settings only, model (a) included (below) | `config.yaml`, the order counter |
 | `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
+| `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
+| `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
-| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk. Plan 086 C4 | nothing |
+| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
@@ -336,6 +338,87 @@ numbering nor hide a damaged file; a seed at or below a receipt already written 
 (`receipt_seed_low`). No pre-image (there was no file) and no restart: the receipt writer reads the store on every
 request.
 
+## `counters`: named counters (plan 087, DIG-1563)
+
+The only way a counter is created, given a range, moved or retired — signed, run by digi-mcp over the link (approval
+form, audit, pre-image). The data path only reads counters (`GET /api/counters`): the B2B shop holds the same
+credential, and one bad "start from max" would block every order for good. Not sealed: no secret.
+
+```json
+{"version":1,"changeSet":"cs-bfl-ctr-01","op":"create","key":"b2b","kind":"orders",
+ "min":1000000,"max":1999999,"store":"lastOrderNumber"}
+{"version":1,"changeSet":"cs-bfl-ctr-02","op":"create","key":"b2b_test","kind":"orders",
+ "min":9000000,"max":9099999,"test":true}
+{"version":1,"changeSet":"cs-bfl-ctr-03","op":"range","key":"b2b","min":1000000,"max":2999999}
+{"version":1,"changeSet":"cs-bfl-ctr-04","op":"start-from","key":"b2b","from":1000500,"expectLast":1000295}
+{"version":1,"changeSet":"cs-bfl-ctr-05","op":"retire","key":"b2b_test"}
+```
+
+Each op takes exactly its fields (another one is `spec_invalid`): `create` kind, min, max, test?, store?, from?;
+`range` min, max; `start-from` from, expectLast; `retire` nothing. Keys `[a-z][a-z0-9_]{0,31}`; `1 ≤ min ≤ max ≤
+999 999 999`.
+
+- **`create`** adds `documents.counters.<key>` to `config.yaml`. `store` adopts one of today's stores **in place**:
+  `lastOrderNumber` (`sendOrderDir\lastOrderNumber.json`, kind orders) or `receiptNumber`
+  (`DataDir\receipts\receiptNumber.json`, kind receipts); otherwise the counter has a store of its own,
+  `DataDir\counters\<key>.json` `{"last": N}`. Today's order counter must be adopted **first** (the daemon's own
+  check, `config_refused`): it numbers the orders sent without a documentRule. The store is written while the service
+  is stopped (after `config.yaml`, before the start) — only when it is missing or below the start: `from` is the
+  next number, by default the lowest one above `min`, the adopted store's last and every number already issued in
+  the range (order or receipt index, and history, scanned). `from` at or below one of those is `counter_lower`, past
+  `max` `counter_range`; a store already above `max` is `counter_range`.
+- **`range`** sets min/max: the counter's last stays inside (`last ≥ min-1`, `last ≤ max`; otherwise
+  `counter_range` — move it with `start-from` first), and no number already issued in the old range is above the new
+  max.
+- **`start-from`** moves the store **forward only**: `from` is the number the next document gets, inside the range,
+  above the last and above every number issued in the range (`counter_lower`, `counter_range`); `expectLast` is the
+  last number as the plan read it (`-1` = the store is missing; a missing store is then created): another value on
+  the box is `counter_moved`. With the service running: the queue is asked (`orders_pending`), the service stopped,
+  the store read again (`counter_moved` if an order slipped in), set — a receipt counter only under the receipt
+  writer's OS lock (`DataDir\receipts\writer.lock`), so a process still alive refuses instead of racing it — the
+  service started and proved. No pre-image: **a counter never moves back**, not even by `restore`.
+- **`retire`** marks it retired: it issues no new number and its range stays reserved (no other counter may take it).
+  Refused while orders (reserved, or waiting for a resend) or receipts (reserved) of its range are unfinished
+  (`counter_in_flight`); the daemon refuses retiring the counter of rule-less orders or of receipts.
+
+`create`, `range` and `retire` run the config-command flow (every check first, the pre-image of `config.yaml`, the
+queue, the restart, the proof, the rollback). Ranges never overlap on one box — test and production, orders and
+receipts, retired ones included (`config_refused`): an order's job id, status, history folder and re-queue check are
+keyed by its number alone. `--check` answers `check.counter`: `{key, last, highestIssued, setLast?, inFlight}`.
+`restore` of a `create`/`range`/`retire` puts `config.yaml` back and leaves every store where it is; a restored
+range that no longer holds the last number makes that counter refuse (503 `COUNTER_EXHAUSTED`) — fail closed, never
+a number twice. `receipt-seed` stays for a box without counters; with counters, `counters create` adopts or creates
+the receipt store.
+
+## `documents`: typed folders and the receipts binding (plan 087)
+
+```json
+{"version":1,"changeSet":"cs-bfl-doc-01",
+ "folders":{
+   "herp":          {"kind":"orders","path":"C:\\xampp\\htdocs\\herp","namePattern":"{prefix}IMOVEIN_{n}.doc","tempPrefix":"TMP_","layout":"legacy"},
+   "herp_receipts": {"kind":"receipts","path":"C:\\xampp\\htdocs\\herp\\receipts","namePattern":"KUPAIN_{n}.doc"},
+   "herp_test":     {"kind":"orders","path":"C:\\xampp\\htdocs\\herp_test","namePattern":"{prefix}IMOVEIN_{n}.doc","tempPrefix":"TMP_","layout":"legacy","test":true}},
+ "receipts":{"folder":"herp_receipts","counter":"receipts"}}
+```
+
+Each folder named is set whole (an object) or removed (`null`); folders not named are kept. `receipts.folder` /
+`receipts.counter` bind `POST /api/sendReceipt` (a field left out keeps the box's, `""` clears it); the bound
+folder's path replaces `sendReceiptDir`, its pattern the receipt file's name (`KUPAIN.prm` keeps its name).
+
+Checked before any write: the name pattern's closed grammar (`{prefix}` optional and first, a stem of ASCII letters,
+digits and `_` starting with a letter, `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
+is `COM1.doc`), `tempPrefix` exactly with `{prefix}` (orders only), `layout` `official`/`legacy` for orders; the
+folder exists (`folder_missing`; the connector never creates it), is not a link or junction and not inside the data
+directory (`folder_forbidden`); behind the link a plain local path outside the system folders (link mode's rules).
+The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
+distinct; a test folder never the pickup or receipt folder; a test counter only into a test folder; no model (b)
+receipt importer with a test receipt folder (it would import test receipts into the books). A folder whose
+unfinished orders (frozen rule naming it) would be written elsewhere is not removed, moved or retyped
+(`folder_in_flight`; a pattern change is fine — the frozen file name stays the order's). The receipts folder or
+counter does not change while a receipt is reserved (`receipts_in_flight`). Config-command flow; `restore` puts
+`config.yaml` back. Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
+`documents` (and refuses index entries holding a frozen rule).
+
 ## `restore` and pre-images without files
 
 A pre-image holding no file (`service`, `firewall-remove`) changes nothing the service reads: its `restore` neither
@@ -377,6 +460,14 @@ actually changed.
 | `dependency_disabled` | `service`: a dependency whose start type is Disabled |
 | `receipt_dir_missing` | `receipts`: `sendReceiptDir` is not a folder on this machine |
 | `receipt_store_exists`, `receipt_seed_low` | `receipt-seed`: the store exists already / N is at or below a receipt already written |
+| `counter_unknown`, `counter_exists`, `counter_retired` | `counters`: no configured counter of that key / the key is taken (create) / the counter is retired |
+| `counter_moved` | `counters start-from`: the last number is not `expectLast` (a number was issued in between) |
+| `counter_lower` | `counters`: a number at or below one already issued, or below the range — a counter never moves back |
+| `counter_range` | `counters`: the range would exclude the counter's last or an issued number, or `from` is outside it |
+| `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished |
+| `counter_store` | `counters`: the counter's store cannot be read |
+| `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
+| `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
 

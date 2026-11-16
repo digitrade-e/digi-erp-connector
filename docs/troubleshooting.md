@@ -127,6 +127,9 @@ connector, or restart it yourself.
 | `500 ORDER_INDEX_UNREADABLE`, or log `ORDER INDEX ENTRY SKIPPED` | One key's entry in `DataDir/orders/index/` is damaged; only that key is refused. See [A damaged order index entry](#a-damaged-order-index-entry). |
 | A repeat of an order answers `"status":"unknown"` / log `ORDER OUTCOME UNKNOWN` | The connector stopped between accepting the order and recording its outcome. See [An order whose outcome is unknown](#an-order-whose-outcome-is-unknown). |
 | A repeat answers `"status":"queued","replay":true` for an order that had failed | Expected: it failed before any file was written (`retryable` — e.g. `IMOVEIN.doc` held by the importer, the account lookup failed), so the repeat queued it again under its first number. |
+| `503 COUNTER_EXHAUSTED` (plan 087) | The counter's next number is outside its range — `GET /api/counters` shows `remaining: 0`. Nothing was reserved. Widen the range (`counters range`, digi-mcp) or move the rule to another counter; resend with the same `historyId`. Also the order counter past 999 999 999. |
+| `503 COUNTER_MISSING` (plan 087) | A counter's store does not exist where it fails closed: `DataDir\counters\<key>.json`, or `lastOrderNumber.json` once counters are configured. It is never restarted at 1. Restore the file from a backup, or set it (`counters start-from`, `expectLast: -1`, `from` above every number issued — the command scans the index and history). |
+| `409 DOCUMENT_RULE_CONFLICT` (plan 087) | The `historyId` was accepted with another `documentRule` (or none). The rule is fixed at reservation; a re-release under the new rule is a new key from the B2B. |
 | Two orders interfered with each other | Should be impossible — the queue is single-worker. If the customer has *another* process importing IMOVEIN files from the same directory, that is the collision. Give the connector its own directory. |
 
 ## File endpoint returns INVALID_FILE_PATH

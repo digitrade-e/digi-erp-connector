@@ -124,6 +124,36 @@ takes over once the first has stopped. The file itself is not the lock — one
 left behind by a crash locks nobody out — so never delete it to "unlock" a
 connector; stop the other process.
 
+## `documents` — named counters and typed folders (plan 087)
+
+Optional, omitted when empty (then every install numbers and writes exactly as before). It says what the keys of a
+`documentRule` (`POST /api/v2/sendOrder`) mean on this box, and which folder and counter receipts use. **Set it only
+with the provision commands `counters` and `documents`** (digi-mcp; signed, with a pre-image) — a hand edit is
+checked the same way at start (the daemon refuses to start on an invalid block) but has no audit and no restore.
+No GUI widget; a GUI save keeps it and checks it.
+
+```yaml
+documents:
+  counters:
+    b2b:      {kind: orders,   min: 1000000, max: 1999999, store: lastOrderNumber}
+    receipts: {kind: receipts, min: 500000,  max: 599999,  store: receiptNumber}
+    b2b_test: {kind: orders,   min: 9000000, max: 9099999, test: true}
+  folders:
+    herp:          {kind: orders,   path: 'C:\xampp\htdocs\herp', namePattern: '{prefix}IMOVEIN_{n}.doc', tempPrefix: TMP_, layout: legacy}
+    herp_receipts: {kind: receipts, path: 'C:\xampp\htdocs\herp\receipts', namePattern: 'KUPAIN_{n}.doc'}
+  receipts: {folder: herp_receipts, counter: receipts}
+```
+
+Refused (`config.ValidateDocuments`, from `ValidateOrders`: the daemon, `CheckConfig`, the GUI save): keys not
+`[a-z][a-z0-9_]{0,31}`; a kind other than `orders`/`receipts`; a range outside 1–999 999 999; **overlapping ranges —
+any two counters on the box**; a store adopted twice or by the wrong kind; with counters configured and orders on, no
+counter adopting `lastOrderNumber` (or it test or retired); receipts on and no receipt counter (or it retired); a
+folder path that is relative, is or holds `sendOrderDir`, or is another folder's; a test folder (or one of the other
+kind) at the pickup or receipt folder; a name pattern outside the closed grammar (`{prefix}` optional and first, an
+ASCII stem starting with a letter, `{n}`, `.doc`; no device name); `tempPrefix` without `{prefix}` or the reverse; an
+orders folder without `layout`; a test receipt counter into a production folder; a test receipt folder with a model
+(b) receipt importer. Never downgrade a box with this block below v1.0.30.
+
 ## Data directory permissions (Windows)
 
 The data directory gets a **protected DACL** — nothing inherited from

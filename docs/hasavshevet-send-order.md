@@ -319,6 +319,62 @@ profile reading `herp\imovein_<n>.doc` with the static `imovein.prm`. Read
 `masofon.ini`'s `digitrade` and `digitrade_tmp` lines on the box before the
 first live order (plan 075 P1-6; BFL §8 Q4).
 
+### documentRule — `POST /api/v2/sendOrder` (plan 087)
+
+Each tenant writes Hashavshevet documents by its own rules (BFL: order 31 / quote 40 permanent, return 74 temporary
+with the `TMP_` prefix; several counters with disjoint ranges; test ranges before cutover). Two layers:
+
+- **ERP-manager's outbound mapping** (per order mode) sends, with each order, a `documentRule` of **keys only**:
+  `{"v": 1, "temporary": false, "folder": "herp", "counter": "b2b"}`. Never a path or a file name: the connector runs
+  as LocalSystem, and whoever can edit a mapping must not be able to choose where it writes or which name the
+  importer sees.
+- **The box** (`config.yaml`'s `documents`, set only by the signed `counters` / `documents` provision commands)
+  says what each key means:
+
+```yaml
+documents:
+  counters:
+    b2b:      {kind: orders,   min: 1000000, max: 1999999, store: lastOrderNumber}  # today's counter, in place
+    b2b_test: {kind: orders,   min: 9000000, max: 9099999, test: true}               # DataDir\counters\b2b_test.json
+    receipts: {kind: receipts, min: 500000,  max: 599999,  store: receiptNumber}     # today's receipt store, in place
+  folders:
+    herp:      {kind: orders, path: 'C:\xampp\htdocs\herp',      namePattern: '{prefix}IMOVEIN_{n}.doc', tempPrefix: TMP_, layout: legacy}
+    herp_test: {kind: orders, path: 'C:\xampp\htdocs\herp_test', namePattern: '{prefix}IMOVEIN_{n}.doc', tempPrefix: TMP_, layout: legacy, test: true}
+    herp_receipts: {kind: receipts, path: 'C:\xampp\htdocs\herp\receipts', namePattern: 'KUPAIN_{n}.doc'}
+  receipts: {folder: herp_receipts, counter: receipts}
+```
+
+The rule is read on **`POST /api/v2/sendOrder` only**. An older connector answers that route 404 and writes nothing
+(its lenient decoder would drop `documentRule` from `/api/sendOrder` silently and write under the default counter and
+name), and `/api/sendOrder` ignores the key as before. No rule = exactly today's output (the DIG-1295 precedent).
+
+Before anything is reserved (else `400 VALIDATION_ERROR`, `details.field` `documentRule/<key>`): the object's keys
+are exactly `v`, `temporary`, `folder`, `counter` (case-sensitive, each once); `v` the number `1`; `folder` an orders
+folder and `counter` an orders counter configured on the box; a **test counter only into a test folder** (a test
+number must never reach the production books); `temporary: true` only on a folder with a temporary prefix; a retired
+counter issues nothing. The folder's layout (`official`/`legacy`) replaces `sendOrderFormat` for that order, its
+legacy-fit check included.
+
+**Frozen at reservation.** Under the queue's lock the counter's next number is taken (`503 COUNTER_EXHAUSTED` outside
+its range, nothing reserved), and the index entry stores the rule with the resolved file name:
+`"rule":{"counter":"b2b","folder":"herp","temporary":true,"fileName":"TMP_IMOVEIN_1000123.doc"}`. Every re-queue and
+recovery uses the stored rule, never the repeat's (before plan 087 a retry re-queued with the repeat's body); a repeat
+of the `historyId` with another rule — or none, through `/api/sendOrder` — answers `409 DOCUMENT_RULE_CONFLICT`. The
+`202` echoes `{"counter","number","fileName","folder"}` (the frozen ones on a replay): the reference DIG-1300 lacks,
+and the per-document proof that the rule was applied.
+
+**The write** is model (a) into the typed folder, whatever the box does with rule-less orders: the number must be
+free there under the folder's pattern — `<stem><n>.` and `<tempPrefix><stem><n>.`, any case, `.MASOFON2.BAK` included
+— else the order fails for good; the folder must take a file (probed first: retryable); the history copies keep
+`history/<n>/IMOVEIN_<n>.doc/.prm` (recovery and the re-queue check read that name); last the file appears whole and
+never over another (`.<name>.tmp-*`, a no-replace rename). No `.prm` in the folder, no importer. The folder's path
+and layout are read from the config when the worker writes; a folder removed from the config makes the order
+retryable (`documents` refuses removing or moving a folder with unfinished orders frozen for it).
+
+**Downgrade.** Never put a build older than v1.0.30 back on a box that has counters or folders configured, or that
+took an order with a rule: it ignores `documents` (lenient YAML) and refuses index entries holding a `rule` (strict
+decode: `ORDER_INDEX_UNREADABLE` for those keys).
+
 ---
 
 ## Order numbering
@@ -338,6 +394,25 @@ a negative) is refused and left as found: no new order is accepted (`503
 ORDER_COUNTER_UNREADABLE`, the reason in the log) until a person repairs it. Until
 DIG-1291 such a file silently restarted at 1. Other fields in a legacy file are
 ignored. The file is written by atomic rename.
+
+**Plan 087 (v1.0.30):**
+
+- The order counter never issues past **999 999 999** (`503 COUNTER_EXHAUSTED`): IMOVEIN's MyID (line3) and the
+  default asmahta2 are nine digits, and a tenth was cut silently.
+- Today's counter becomes a **named counter in place** (`counters create … store: lastOrderNumber`); the file stays
+  here in its legacy format. With counters configured a **missing** file is refused (`503 COUNTER_MISSING`), never 1
+  again; and the counter's range applies (`COUNTER_EXHAUSTED` outside it). Other counters keep their own store,
+  `DataDir\counters\<key>.json` `{"last": N}`, failing closed when missing.
+- **Recovery and the "never at or below the highest issued" guard are per counter**, over the numbers in its range
+  (index entries and `history/<n>`). Before, both were global: with a second counter in another range (b2b
+  1 000 000–1 999 999, shopify 5 000 000–5 999 999) the first shopify order made the next b2b number "already issued",
+  and recovery moved b2b's counter into shopify's range. A counter that cannot be read refuses its own orders only.
+- **Ranges are disjoint on a box** — test and production, orders and receipts, retired counters included (the
+  daemon refuses an overlap at start, the GUI at save, provision before writing). The job id, the status lookup, the
+  history folder and the re-queue check are keyed by the number alone; disjoint ranges keep them unique without
+  changing the `jobId` on the wire. A number in no range (an old series) fences nothing and is logged.
+- A counter moves only through the signed `counters` command (create, range, start-from upward with `expectLast`,
+  retire), never on the data path; `GET /api/counters` reads them.
 
 ---
 
