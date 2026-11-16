@@ -158,7 +158,15 @@ with the accounts, and:
 - **Over WinRM** the commands refuse it unless `allowWritable` (a human accepted the risk: a `folder_writable:` warning),
   and the daemon warns.
 
-**Lock a folder down** (an elevated prompt, on the box; the path is an example):
+**Lock a folder down — the command** (plan 087 review R1c): digi-mcp sends `folder-acl` with `op: lockdown` and the
+folder's name (a typed folder's key, or `sendOrderDir` / `pickup` / `sendReceiptDir`); `folder-acl-check` first shows
+every principal's rights before and after. It records the previous ACLs on the box (`preimage`, for `op: restore`),
+writes the lock-down below by handle to the folder and everything in it, and restarts the service. Name the ERP's
+scheduler account in `documents`' `trustedWriters` **before** the lock-down: a trusted writer keeps Modify. Folders
+above it are never changed — `parentWritable` says who could still rename the folder away through one.
+
+**Lock a folder down by hand** (background — what the command does, for a box without the link; an elevated prompt;
+the path is an example):
 
 ```bat
 icacls "C:\xampp\htdocs\herp" /setowner "*S-1-5-32-544"
@@ -178,7 +186,7 @@ leaves SYSTEM and Administrators full control and Users read. Then:
 3. **What is already there.** A file someone created before the lock-down is still theirs. `dir /q` shows each file's
    owner: move aside every `*.doc`, `*.prm`, `*.dll`, `*.exe`, `*.bat` or `*.cmd` neither the connector nor the ERP
    wrote — before the next order.
-4. **Check.** `state`'s `writableFolders` no longer lists it. The daemon reads the folders' ACLs in the background
+4. **Check.** `state`'s `writableFolders` no longer lists it (a trusted writer shows under `trusted`). The daemon reads the folders' ACLs in the background
    (review R3): right after its start (until then, behind the link, a typed folder counts as refused), a refused folder
    again at most once a minute when an order or a receipt needs it, an allowed one every ten minutes — no restart
    needed (`folder-acl` and `documents` restart it anyway). server.log says `FOLDER ALLOWED` when a refused folder is

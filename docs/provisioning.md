@@ -30,6 +30,7 @@ same way in an elevated PowerShell. The code is
 | `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
 | `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
 | `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
+| `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`?, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
@@ -468,6 +469,48 @@ one among them would be stranded unseen) unless `acceptUnreadable` is the number
 test ranges, and its GUI save drops the block —
 [troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).
 
+## `folder-acl`: lock a document folder down (plan 087 review R1c)
+
+digi-mcp locks down a folder the connector writes documents into itself — no human running `icacls` on the box.
+Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
+
+```json
+{"version":1,"changeSet":"cs-bfl-acl-01","op":"lockdown","folders":["herp","sendOrderDir"]}
+{"version":1,"changeSet":"cs-bfl-acl-02","op":"restore","folder":"herp","preimage":"<the sha256 the lockdown answered>"}
+```
+
+- **Named folders only**: a typed folder's key, or the roles `sendOrderDir`, `pickup`, `sendReceiptDir`, resolved from
+  `config.yaml` — never a path (`spec_invalid`); one the box does not have is `folder_unknown`; a drive's root, a system
+  folder or the data directory, or a folder holding one, is `folder_forbidden`. At most 8 per run.
+- **The new DACL**: protected; SYSTEM and Administrators Full Control `(OI)(CI)`; each `documents.trustedWriters`
+  account Modify `(OI)(CI)`; every other principal that had any allow entry read & execute only `(OI)(CI)`; deny entries
+  kept (they only take rights away). The folder's owner becomes Administrators.
+- **Propagation — the bound chosen**: every entry beneath is walked **by handle** (never following anything) and made to
+  inherit exactly that — its own explicit entries dropped, an owner that is not SYSTEM, an administrator or a trusted
+  writer handed to Administrators — so an existing subfolder (`history\`, `receipts\`) or a planted file keeps no old
+  right. At most 20 000 entries (the folder included), counted before anything is written: more is `folder_too_large`
+  (move old `*.MASOFON2.BAK` files out first). A reparse point or a multiply-linked file anywhere beneath is
+  `folder_reparse`: never followed, never written through. No path-based propagation (as LocalSystem a path can be
+  redirected). **Folders above are never changed**: who can still rename the folder away through one is reported — a
+  `parent_writable:` warning and the folder's `parentWritable` (the lock-down of the folder itself still applies).
+- **The pre-image**, recorded before the first write: the folder's and every entry's owner and DACL (SDDL) with its file
+  ID, in a protected file `DataDir\folder-acl\<sha256>.json` — the sha256 of the file's bytes, answered as the
+  folder's `preimage`. Kept on the box.
+- **`restore`** takes `folder` and `preimage` and puts back **only** a pre-image this box recorded, for that folder, at
+  its configured path, whose bytes still match the sha256 (otherwise `preimage_missing`) — never an SDDL from the input:
+  a stolen team key can only tighten a configured folder or put back an ACL it had. Each entry is restored only if it is
+  still the same object (file ID) at the same place; the others (gone, replaced, a link now) are counted as `skipped`.
+  The folder itself must be the object recorded (`folder_reparse` otherwise).
+- **`--check`** reads and writes nothing: per folder `{name, path, entries, principals: [{sid, name, before, after}],
+  parentWritable}` — every principal of the folder's DACL with its rights before and after (`full`, `modify`, `write`,
+  `read`, `special`, `none`; a deny noted), so the approval form shows who loses write access.
+- **Unfinished work**: `folder_in_flight` (as the `documents` command) — orders frozen for a typed folder, rule-less
+  orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
+  unless `acceptUnreadable` names their number.
+- **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
+- The answer: `folderAcl: {op, folders: [{name, path, entries, principals?, parentWritable?, preimage?, written?,
+  restored?, skipped?}]}`.
+
 ## `restore` and pre-images without files
 
 A pre-image holding no file (`service`, `firewall-remove`) changes nothing the service reads: its `restore` neither
@@ -518,6 +561,7 @@ actually changed.
 | `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore` (review R7): the same, for the order and receipt index entries their in-flight guard reads (`acceptUnreadable`; `restore --accept-unreadable=N`) |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
+| `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through) / more than 20 000 entries |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
 | `unsupported_os` | not Windows |
@@ -572,8 +616,9 @@ the WinRM path is unchanged:
 - **Image folders** are outside those folders and outside any `AppData` (`image_folder_forbidden`): `/api/file` serves
   what is in them.
 - **A folder documents are written into** (`documents`, `receipts`, `orders`) is one only the administrators can write
-  to (`folder_writable`; never `allowWritable`), and the daemon writes into no typed folder others can write to
-  (`503 FOLDER_WRITABLE`) — plan 087 review M1.
+  to when the command adds or moves it (`folder_writable`; never `allowWritable`; review R1a), and the daemon writes into
+  no typed folder others can write to (`503 FOLDER_WRITABLE`) — plan 087 review M1. The ERP's own accounts are trusted
+  by name (`documents`' `trustedWriters`), and `folder-acl` locks a folder down without a human on the box (R1b, R1c).
 
 Every path a command takes behind the link is a plain path on a local drive with no `.`/`..`/empty part and none of
 cmd.exe's characters, and — since the system-folder rules compare text — none Windows resolves to another folder

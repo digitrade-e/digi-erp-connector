@@ -294,3 +294,19 @@ Digitrade plan 087 (DIG-1563, the answer to July's proposal — Jira comment 175
 - `state` reports `counters` and `folders`.
 - Downgrade below v1.0.30 is forbidden once `documents` is set or a ruled order was taken (lenient YAML ignores the
   block; the strict index decode refuses the `rule` field).
+
+## 2026-11-16 — plan 087 security reviews: two rounds of fixes on PR #16
+
+First review (M1, m1–m13): only administrators may write to a document folder (`dataacl.FolderWriters`; commands
+refuse, the daemon refuses typed folders behind the link); no relative counter store path; no device-name keys; a
+repeat is answered by its frozen rule before the box's keys are checked; `counters range` keeps in-flight entries;
+any folder change waits for in-flight work; `GET /api/counters` error codes; no production counter into a test
+folder; no test/production nesting, no stem ending in a digit; unreadable entries refuse the counters command; the
+downgrade danger documented; the counters route cached; restore runs the guards; link-mode path spellings.
+
+Second review (R1–R5, R7, R8; R6 is a follow-up): `folder_writable` only for a folder a command adds or moves (R1a);
+`documents.trustedWriters` — the ERP's own accounts, resolved on the box, never counted (R1b); the `folder-acl` command
+— a lock-down by handle with a sha256-addressed pre-image and a restore that takes only that (R1c); the test flags
+frozen in the rule (R2); the daemon's folder guard reads ACLs in the background and again (R3); object, callback and
+conditional allow entries count as writers (R4); the cache generation moves after the store (R5); the in-flight guards
+refuse unreadable entries (R7); `documentRule.temporary` also as text (R8).

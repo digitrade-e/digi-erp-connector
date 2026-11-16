@@ -179,6 +179,22 @@ again, and diff. Anything other than a timestamp differing is a regression worth
 investigating. This is how each production change on the b4l box was validated —
 see `../.claude/docs/03-implementation-log.md`.
 
+## Document folders: trusted writers and lock-down (plan 087, v1.0.30)
+
+Every folder the connector writes orders and receipts into must be one only the administrators — and the ERP's own
+importer or scheduler account — can write to. `state`'s `writableFolders` lists the ones that are not. The order, all
+through digi-mcp:
+
+1. **Trust the ERP's account**: `documents` with `trustedWriters: ["DOMAIN\\wizsched"]` (the box resolves it; a user
+   account only).
+2. **Lock each folder down**: `folder-acl-check`, then `folder-acl` `op: lockdown` with the folder's name. Keep the
+   answered `preimage`: `op: restore` with it puts the ACLs back.
+3. **Check**: `state`'s `writableFolders` is empty or shows only `trusted` accounts; server.log says `FOLDER ALLOWED`
+   for a typed folder that was refused.
+
+Behind the link a typed folder others can write to gets nothing written (`503 FOLDER_WRITABLE`); the folders from
+before plan 087 are only warned about. [troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to).
+
 ## Rolling back
 
 In order of preference:
