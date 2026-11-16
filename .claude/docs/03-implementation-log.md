@@ -375,3 +375,16 @@ and digi-mcp stay pinned at `fcd0277`):
   only when it names the box's id.
 - N5: D12 asks the relay's `/readyz` (200 only while its registry answers), not `/healthz`.
 - N10: a deferred ticket keeps its checked setup; the next attempt at the same release and digest takes it.
+
+## 2026-11-16 — plan 088: main (v1.0.30) merged in; plan 087's fourth review's minors (R4-1, R4-3, R4-4)
+
+- origin/main (fb93e4f, plan 087, v1.0.30) merged into `feat/088-auto-update` with a merge commit — no rebase:
+  linkproto `fcd0277`, which relay 0.3.0 (in production) and digi-mcp pin, stays reachable and `pkg/linkproto` is
+  byte-identical to it. Conflicts were docs only (both kept). `formatfloor.RollbackFloor` stays `1.0.30`: v1.0.30
+  introduced the counter and order-index formats, and plan 088 changes no format a v1.0.30 daemon reads.
+- R4-1: behind the link `apply`'s `sendOrderDir` takes link mode's path rule, and a `sendOrderDir`, pickup or receipt
+  folder that exists is judged by the path its handle resolves to (`System.FinalPath`, `dataacl.FinalDirPath`).
+- R4-3: a guard re-check that does not finish in 10 s keeps the folder's last answer (no 503 every ten minutes on a
+  slow domain controller); only a folder never read is unknown.
+- R4-4: the importer guard reads the parameter file has.exe is handed (`OrderImporterFiles`, `ReceiptImporterFiles`).
+- D12's comments now say what the relays serve: 0.3.0's `/readyz` checks its registry; 0.2.0's only said draining.
