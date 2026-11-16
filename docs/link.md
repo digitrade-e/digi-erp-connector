@@ -142,8 +142,10 @@ link's own stop: it is released when the link process ends.
 The setup stops the link itself, so the link hands over to a **runner**: a copy of `digi-erp-connector-link.exe` in
 `%ProgramData%\digi-erp-connector\upgrade\<ticket>\`, started detached (it outlives the link and is outside the
 install folder the setup replaces). It waits 10 s for the answer to leave, checks the setup's digest again, runs it
-`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=…`, starts the link again — and the connector, if it was
-running — when a failed setup left them stopped, reads the installed build and writes
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=…`, then puts the services back as they were: the link
+running, the connector running if it ran before (started again when a failed setup left it stopped) — and a connector
+that was stopped before the upgrade stopped again, since the setup starts it whatever it was. A service that is not as
+it was makes the result an error, whatever the setup's exit code. It then reads the installed build and writes
 `%ProgramData%\digi-erp-connector\results\upgrade-<ticket>.json`:
 `{ticket, from, to, exitCode, startedAt, finishedAt, error?, installedVersion, services, setupLogTail?}`. The ticket is
 the first 32 hex digits of the SHA-256 of the envelope's nonce. The ticket's folder keeps `job.json`, `runner.log`

@@ -413,6 +413,7 @@ type runnerRig struct {
 	setup    []byte
 	slept    []time.Duration
 	started  []string
+	stopped  []string
 	services map[string]string
 	log      *testLog
 	ran      int
@@ -441,6 +442,7 @@ func newRunnerRig(t *testing.T, daemonWasRunning bool) *runnerRig {
 		},
 		ServiceState: func(name string) (string, error) { return g.services[name], nil },
 		StartService: func(name string) error { g.started = append(g.started, name); g.services[name] = "running"; return nil },
+		StopService:  func(name string) error { g.stopped = append(g.stopped, name); g.services[name] = "stopped"; return nil },
 		Version:      func(string) string { return "v1.0.30" },
 	}
 	return g
@@ -501,6 +503,61 @@ func TestTheRunnerStartsWhatAFailedSetupLeftStopped(t *testing.T) {
 	_, _ = g.r.Run()
 	if len(g.started) != 0 || g.result(t).Services[DaemonServiceName] != "stopped" {
 		t.Fatalf("started %v", g.started)
+	}
+}
+
+// Review m3: the setup's [Run] starts the daemon whatever it was; one stopped on purpose before the upgrade (a cutover,
+// maintenance) is stopped again, and the result says so.
+func TestTheRunnerKeepsADeliberatelyStoppedDaemonStopped(t *testing.T) {
+	g := newRunnerRig(t, false)
+	g.services[DaemonServiceName] = "stopped"
+	g.r.RunSetup = func(_, logPath string, _ time.Duration) (int, error) {
+		_ = os.WriteFile(logPath, []byte("ok\n"), 0o600)
+		g.services[DaemonServiceName] = "running" // sc.exe start in [Run]
+		return 0, nil
+	}
+	if _, err := g.r.Run(); err != nil {
+		t.Fatal(err)
+	}
+	r := g.result(t)
+	if strings.Join(g.stopped, ",") != DaemonServiceName || r.Services[DaemonServiceName] != "stopped" || r.Error != "" {
+		t.Fatalf("stopped %v, result %+v", g.stopped, r)
+	}
+	if !g.log.has("stopped again") {
+		t.Fatal("not logged")
+	}
+}
+
+// Review m4: a setup that exits 0 while a service that should run does not is a failed upgrade, not a success.
+func TestTheRunnerReportsAServiceThatDoesNotRun(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		service string
+		was     bool
+	}{
+		{"the daemon that ran before", DaemonServiceName, true},
+		{"the link", ServiceName, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := newRunnerRig(t, c.was)
+			if !c.was {
+				g.services[DaemonServiceName] = "stopped"
+			}
+			g.r.RunSetup = func(_, logPath string, _ time.Duration) (int, error) {
+				_ = os.WriteFile(logPath, []byte("ok\n"), 0o600)
+				g.services[c.service] = "stopped" // the new build refuses to start
+				return 0, nil
+			}
+			g.r.StartService = func(name string) error {
+				g.started = append(g.started, name)
+				return errors.New("the service did not start")
+			}
+			_, _ = g.r.Run()
+			r := g.result(t)
+			if r.ExitCode != 0 || !strings.Contains(r.Error, c.service) || r.Services[c.service] != "stopped" || len(r.SetupLogTail) == 0 {
+				t.Fatalf("result %+v", r)
+			}
+		})
 	}
 }
 

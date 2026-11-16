@@ -56,6 +56,8 @@ type UpgradeRunner struct {
 	RunSetup     func(setup, logPath string, timeout time.Duration) (int, error)
 	ServiceState func(name string) (string, error)
 	StartService func(name string) error
+	// StopService stops a service (the daemon a person had stopped before the upgrade, which the setup started).
+	StopService func(name string) error
 	// Version is the installed provision.exe's build ("" when it does not answer).
 	Version func(installDir string) string
 }
@@ -77,6 +79,7 @@ func NewUpgradeRunner(dataDir, ticket string, log Logger) UpgradeRunner {
 			return info.State, err
 		},
 		StartService: autostart.StartWindowsService,
+		StopService:  func(name string) error { return autostart.StopWindowsService(name, autostart.StopTimeout) },
 		Version:      installedVersion,
 	}
 }
@@ -154,17 +157,29 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 	}
 	r.Log.Info(fmt.Sprintf("link upgrade %s: the setup ended with %d", r.Ticket, code))
 
-	// Whatever the setup did, the box must be reachable again: the link always, the daemon if it ran before. The
-	// setup starts both when it succeeds; when it fails after stopping them, nothing else would.
+	// Whatever the setup did, the box ends as it was before (review m3): the link always running, the daemon running if
+	// it ran before — the setup starts both when it succeeds; when it fails after stopping them, nothing else would — and
+	// a daemon a person had stopped (a cutover, maintenance) stopped again, since the setup's [Run] starts it anyway.
 	res.Services = map[string]string{}
+	var notAsBefore []string
 	for _, s := range []struct {
 		name string
 		want bool
 	}{{ServiceName, true}, {DaemonServiceName, job.DaemonWasRunning}} {
 		st, err := r.ServiceState(s.name)
-		if s.want && err == nil && st != "running" && st != "start_pending" && st != "not_installed" {
+		switch {
+		case err != nil:
+		case s.want && st != "running" && st != "not_installed":
+			// StartService also waits out a start_pending one
 			if serr := r.StartService(s.name); serr != nil {
 				r.Log.Error("link upgrade: starting "+s.name, serr)
+			}
+			st, err = r.ServiceState(s.name)
+		case !s.want && st != "stopped" && st != "not_installed" && r.StopService != nil:
+			if serr := r.StopService(s.name); serr != nil {
+				r.Log.Error("link upgrade: stopping "+s.name+" again", serr)
+			} else {
+				r.Log.Info(fmt.Sprintf("link upgrade %s: %s was stopped before the upgrade; the setup started it, so it was stopped again", r.Ticket, s.name))
 			}
 			st, err = r.ServiceState(s.name)
 		}
@@ -172,11 +187,27 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 			st = "unknown: " + err.Error()
 		}
 		res.Services[s.name] = st
+		// Review m4: a setup that exits 0 (its sc.exe start always does) with a service not as it should be is a failure.
+		if (s.want && st != "running") || (!s.want && st != "stopped" && st != "not_installed") {
+			want := "running"
+			if !s.want {
+				want = "stopped"
+			}
+			notAsBefore = append(notAsBefore, fmt.Sprintf("%s is %s, not %s", s.name, st, want))
+		}
 	}
 	res.InstalledVersion = r.Version(job.InstallDir)
 	if res.Error == "" {
 		if v, ok := parseVersion(buildRe, res.InstalledVersion); !ok || v.String() != job.To {
 			res.Error = fmt.Sprintf("the setup ended with 0 but the installed build is %q, not %s", res.InstalledVersion, job.To)
+		}
+	}
+	if len(notAsBefore) > 0 {
+		msg := "after the upgrade " + strings.Join(notAsBefore, "; ") + ": read setup.log, and logs (server, link, events-daemon) once the link answers"
+		if res.Error == "" {
+			res.Error = msg
+		} else {
+			res.Error += "; " + msg
 		}
 	}
 	if res.Error != "" {
