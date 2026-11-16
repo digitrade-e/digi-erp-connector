@@ -44,6 +44,9 @@ type serverApp struct {
 	dbPassStr   string
 	orderQueue  *hasavshevet.OrderQueue
 	queueCancel context.CancelFunc
+	// guardCancel stops the folder guard's background reads (plan 087
+	// review R3).
+	guardCancel context.CancelFunc
 	// receiptWriter is nil when receipts are not configured. Stop closes it,
 	// releasing the receipt data-directory lock for the next process.
 	receiptWriter *hasavshevet.ReceiptWriter
@@ -201,23 +204,28 @@ func (a *serverApp) Start() error {
 		return err
 	}
 	counters := hasavshevet.NewCounterSet(cfg, paths.DataDir())
-	// Who can write to the folders documents go to (plan 087 review M1):
-	// behind the link, typed folders others can write to are refused.
-	refusedFolders, refusedReceipts := checkWriteFolders(cfg, linkedBox(paths.DataDir()), logSvc)
+	// Who can write to the folders documents go to (plan 087 review M1, R3):
+	// read in the background right after the start — never on its critical
+	// path — and, behind the link, a typed folder counts as refused until it
+	// has been read (fail closed).
+	guard := hasavshevet.NewFolderGuard(cfg, linkedBox(paths.DataDir()), folderWritersFn, logSvc)
 	queue := buildOrderQueue(cfg, dbConn, paths.DataDir(), counters, logSvc)
-	queue.RefuseFolders(refusedFolders)
+	queue.UseFolderGuard(guard)
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	queue.Start(queueCtx)
 	a.orderQueue = queue
 	a.queueCancel = queueCancel
 
-	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, refusedReceipts, logSvc)
+	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, guard.ReceiptCheck(cfg), logSvc)
 	if err != nil {
 		logSvc.Error("receipt configuration", err)
 		a.Stop(context.Background())
 		return err
 	}
 	a.receiptWriter = receiptWriter
+	guardCtx, guardCancel := context.WithCancel(context.Background())
+	a.guardCancel = guardCancel
+	go guard.Run(guardCtx)
 
 	queryStorePath := filepath.Join(paths.DataDir(), "queries.json")
 	queryStore, err := queries.NewStore(queryStorePath)
@@ -317,6 +325,9 @@ func (a *serverApp) Stop(ctx context.Context) {
 			}
 		}
 	}
+	if a.guardCancel != nil {
+		a.guardCancel()
+	}
 	if a.receiptWriter != nil {
 		if err := a.receiptWriter.CloseContext(ctx); err != nil && a.logSvc != nil {
 			a.logSvc.Error("the receipt data lock was not released before the stop budget ran out; the OS releases it at exit", err)
@@ -393,9 +404,9 @@ func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, counters
 // recovery on each request and answers an error until it succeeds, and orders
 // and queries are not held hostage to it.
 //
-// refused, when set, is why nothing is written into the receipt folder
-// (checkWriteFolders): receipts answer 503 FOLDER_WRITABLE.
-func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, refused string, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
+// folderCheck, when set, is asked before anything is written into the
+// receipt folder (FolderGuard.ReceiptCheck): a refusal is 503 FOLDER_WRITABLE.
+func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, folderCheck func() error, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
 	if !cfg.ReceiptsConfigured() {
 		return nil, nil
 	}
@@ -406,7 +417,7 @@ func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet
 	if c := counters.Receipts(); c != nil {
 		wc.Counter = c // the set the read routes report
 	}
-	wc.FolderRefused = refused
+	wc.FolderCheck = folderCheck
 	w, err := hasavshevet.NewReceiptWriter(wc, log)
 	if err != nil {
 		return nil, err

@@ -239,7 +239,7 @@ func TestBuildReceiptWriter_RecoversAtStartup(t *testing.T) {
 	plantReserved(t, dataDir, "00000000-0000-4000-8000-000000000001", 1000)
 
 	log := &quietLogger{}
-	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), "", log)
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), nil, log)
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
@@ -269,7 +269,7 @@ func TestBuildReceiptWriter_FailedRecoveryIsNotFatal(t *testing.T) {
 	}
 
 	log := &quietLogger{}
-	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), "", log)
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), nil, log)
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v; want a writer and no error", w, err)
 	}
@@ -280,12 +280,12 @@ func TestBuildReceiptWriter_FailedRecoveryIsNotFatal(t *testing.T) {
 }
 
 func TestBuildReceiptWriter_NotConfiguredAndInvalid(t *testing.T) {
-	if w, err := buildReceiptWriter(config.Config{ERP: config.ERPHasavshevet}, t.TempDir(), nil, "", &quietLogger{}); w != nil || err != nil {
+	if w, err := buildReceiptWriter(config.Config{ERP: config.ERPHasavshevet}, t.TempDir(), nil, nil, &quietLogger{}); w != nil || err != nil {
 		t.Errorf("unconfigured = %v, %v; want nil, nil", w, err)
 	}
 	cfg, _, dataDir := receiptCfg(t)
 	cfg.SendReceiptDir = "herp" // relative
-	if _, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), "", &quietLogger{}); err == nil {
+	if _, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), nil, &quietLogger{}); err == nil {
 		t.Error("a relative sendReceiptDir was accepted")
 	}
 }
@@ -297,7 +297,7 @@ func TestStop_ReleasesTheReceiptDataLock(t *testing.T) {
 	if err := hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(dataDir)).Seed(1000); err != nil {
 		t.Fatal(err)
 	}
-	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), "", &quietLogger{})
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), nil, &quietLogger{})
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
@@ -318,7 +318,7 @@ func TestStop_ReleasesTheReceiptDataLock(t *testing.T) {
 // stop budget leaves the lock to the OS at exit.
 func TestStop_DoesNotHangOnAHeldImportLock(t *testing.T) {
 	cfg, _, dataDir := receiptCfg(t)
-	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), "", &quietLogger{})
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), nil, &quietLogger{})
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}

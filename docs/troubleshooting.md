@@ -178,8 +178,11 @@ leaves SYSTEM and Administrators full control and Users read. Then:
 3. **What is already there.** A file someone created before the lock-down is still theirs. `dir /q` shows each file's
    owner: move aside every `*.doc`, `*.prm`, `*.dll`, `*.exe`, `*.bat` or `*.cmd` neither the connector nor the ERP
    wrote — before the next order.
-4. **Check and restart.** `state`'s `writableFolders` no longer lists it; restart the service (`daemon` restart over
-   the link, or services.msc): the daemon reads the folders' ACLs once, at its start.
+4. **Check.** `state`'s `writableFolders` no longer lists it. The daemon reads the folders' ACLs in the background
+   (review R3): right after its start (until then, behind the link, a typed folder counts as refused), a refused folder
+   again at most once a minute when an order or a receipt needs it, an allowed one every ten minutes — no restart
+   needed (`folder-acl` and `documents` restart it anyway). server.log says `FOLDER ALLOWED` when a refused folder is
+   the administrators' only again.
 
 ## File endpoint returns INVALID_FILE_PATH
 

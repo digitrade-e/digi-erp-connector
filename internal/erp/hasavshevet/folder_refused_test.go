@@ -74,7 +74,7 @@ func TestReceiptWriter_RefusedFolderWritesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeStoreFile(t, h.storePath(), `{"nextReceiptNumber": 1001}`)
-	h.cfg.FolderRefused = `it can be written by BUILTIN\Users`
+	h.cfg.FolderCheck = func() error { return staticRefusals{"herp": `it can be written by BUILTIN\Users`}.Allowed("herp") }
 	w := h.writer() // Recover finishes nothing into the folder
 	if len(h.docs()) != 0 {
 		t.Fatalf("Recover wrote into a refused folder: %v", h.docs())
@@ -90,7 +90,7 @@ func TestReceiptWriter_RefusedFolderWritesNothing(t *testing.T) {
 	}
 
 	// Locked down and restarted: the reserved receipt is finished, then new ones go on.
-	h.cfg.FolderRefused = ""
+	h.cfg.FolderCheck = nil
 	w = h.writer()
 	if len(h.docs()) != 1 {
 		t.Fatalf("Recover did not finish the reserved receipt: %v", h.docs())

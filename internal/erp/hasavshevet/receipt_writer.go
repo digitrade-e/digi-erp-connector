@@ -99,12 +99,14 @@ type ReceiptWriterConfig struct {
 	// typed folder's); "" = KUPAIN_{n}.doc. KUPAIN.prm keeps its name, and
 	// the history copies keep KUPAIN_<n>.doc.
 	NamePattern string
-	// FolderRefused, when set, is why nothing is written into SendReceiptDir:
-	// on a box behind the link, a bound typed folder accounts besides the
-	// administrators can write to (plan 087 review M1). A new receipt and the
-	// finishing of a reserved one are ErrFolderWritable; a repeat of a
-	// written one is still answered; Recover finishes none.
-	FolderRefused string
+	// FolderCheck, when set, is asked before anything is written into
+	// SendReceiptDir: on a box behind the link, the bound typed folder must be
+	// one only the administrators (and trusted writers) can write to (plan
+	// 087 review M1, R3: FolderGuard.ReceiptCheck). While it refuses, a new
+	// receipt and the finishing of a reserved one are ErrFolderWritable, a
+	// repeat of a written one is still answered, and Recover finishes none
+	// (the next Write recovers again, once it is allowed).
+	FolderCheck func() error
 }
 
 // ReceiptResult is what a Write produced or, on a repeat, what the key's first
@@ -274,13 +276,14 @@ func (w *ReceiptWriter) recoverLocked() error {
 		}
 	}
 
+	skipped := false
 	for _, e := range entries {
 		if e.State != receiptReserved {
 			continue
 		}
-		if w.cfg.FolderRefused != "" {
-			w.log.Warn(fmt.Sprintf("receipt %d (key %s) is reserved but not finished: the connector writes nothing into the receipt folder (%s)",
-				e.Number, e.Key, w.cfg.FolderRefused))
+		if err := w.folderRefused(); err != nil {
+			w.log.Warn(fmt.Sprintf("receipt %d (key %s) is reserved but not finished yet: %v", e.Number, e.Key, err))
+			skipped = true
 			continue
 		}
 		if !w.counter.InRange(e.Number) {
@@ -308,7 +311,9 @@ func (w *ReceiptWriter) recoverLocked() error {
 		}
 		w.log.Warn(msg)
 	}
-	w.recovered = true
+	// A reserved receipt left in a refused folder: the next Write recovers
+	// again (and finishes it once the folder is allowed).
+	w.recovered = !skipped
 	return nil
 }
 
@@ -577,13 +582,12 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 	return nil
 }
 
-// folderRefused is ErrFolderWritable when the receipt folder is refused
-// (FolderRefused), else nil.
+// folderRefused is FolderCheck's refusal (ErrFolderWritable), else nil.
 func (w *ReceiptWriter) folderRefused() error {
-	if why := w.cfg.FolderRefused; why != "" {
-		return fmt.Errorf("%w: the receipt folder %s — %s; nothing reserved", ErrFolderWritable, w.cfg.SendReceiptDir, why)
+	if w.cfg.FolderCheck == nil {
+		return nil
 	}
-	return nil
+	return w.cfg.FolderCheck()
 }
 
 // Counter is the counter the writer numbers receipts from.

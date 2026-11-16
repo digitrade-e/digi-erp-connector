@@ -112,11 +112,10 @@ type OrderQueue struct {
 	// sendOrderDir/history/<n> at recovery, then every number reserved since.
 	// The counter must offer more.
 	highest map[string]int64
-	// refusedFolders (guarded by closeMu) are the typed folders this queue
-	// writes nothing into, by key, with why: on a box behind the link, ones
-	// accounts besides the administrators can write to (review M1;
-	// RefuseFolders).
-	refusedFolders map[string]string
+	// guard (guarded by closeMu) says whether a typed folder may be written
+	// into: behind the link, not while accounts besides the administrators
+	// can write to it (review M1, R3; UseFolderGuard). nil: every folder.
+	guard FolderAllower
 	// gen counts what moves a counter here — reservations, recoveries — for
 	// the read route's cache (review m13; Generation).
 	gen atomic.Uint64
@@ -188,23 +187,26 @@ func (q *OrderQueue) Generation() uint64 {
 	return q.gen.Load()
 }
 
-// RefuseFolders makes the queue refuse every new order, and every re-queue,
-// into the typed folders named (key → why): ErrFolderWritable, nothing
-// reserved, nothing written. A repeat of an order already written is still
-// answered. The daemon calls it at its start (review M1).
-func (q *OrderQueue) RefuseFolders(why map[string]string) {
+// UseFolderGuard makes the queue ask g before every new order, and every
+// re-queue, into a typed folder: a refusal is ErrFolderWritable, nothing
+// reserved, nothing written; a repeat of an order already written is still
+// answered. The daemon gives it its FolderGuard (review M1, R3).
+func (q *OrderQueue) UseFolderGuard(g FolderAllower) {
 	q.closeMu.Lock()
 	defer q.closeMu.Unlock()
-	q.refusedFolders = why
+	q.guard = g
 }
 
-// folderRefused is RefuseFolders' refusal for an order into folder, or nil.
-// Caller holds closeMu.
+// RefuseFolders is UseFolderGuard with fixed refusals (key → why).
+func (q *OrderQueue) RefuseFolders(why map[string]string) { q.UseFolderGuard(staticRefusals(why)) }
+
+// folderRefused is the guard's refusal for an order into folder, or nil.
+// Caller holds closeMu; the guard never waits on a read.
 func (q *OrderQueue) folderRefused(folder string) error {
-	if why, ok := q.refusedFolders[folder]; ok {
-		return fmt.Errorf("%w: folder %s — %s; nothing reserved", ErrFolderWritable, folder, why)
+	if q.guard == nil {
+		return nil
 	}
-	return nil
+	return q.guard.Allowed(folder)
 }
 
 // orderCounters is the queue's counter set.
