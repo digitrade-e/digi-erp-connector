@@ -558,3 +558,88 @@ func TestCounters_UnreadableIndexEntriesRefuse(t *testing.T) {
 	}), false)
 	wantRefusal(t, err, CodeIndexUnreadable)
 }
+
+// Review m9: restore runs the counters and documents commands' guards. It
+// put config.yaml back after the idle check alone: it could drop a folder
+// unfinished orders are frozen on, bring back a range below the counter's
+// last number (COUNTER_EXHAUSTED for every order, no command lowers it), or
+// put a kind back on today's store, whose recovery would jump into the test
+// range.
+func TestRestore_RunsTheCountersAndDocumentsGuards(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	env := testEnv(sys, fdb)
+	writeOrderCounter(t, orders, 1_000_295)
+	steps := []CountersInput{
+		countersIn("create", "b2b", func(in *CountersInput) {
+			in.ChangeSet = "cs-restore-c1"
+			in.Kind, in.Store, in.Min, in.Max = "orders", config.CounterStoreLastOrderNumber, i64(1_000_000), i64(1_999_999)
+		}),
+		countersIn("range", "b2b", func(in *CountersInput) {
+			in.ChangeSet = "cs-restore-c2"
+			in.Min, in.Max = i64(1_000_000), i64(2_999_999)
+		}),
+		countersIn("create", "b2b_test", func(in *CountersInput) {
+			in.ChangeSet = "cs-restore-c3"
+			in.Kind, in.Test, in.Min, in.Max = "orders", true, i64(9_000_000), i64(9_099_999)
+		}),
+	}
+	for _, in := range steps {
+		if _, err := ApplyCounters(context.Background(), env, in, false); err != nil {
+			t.Fatalf("%s: %v", in.ChangeSet, err)
+		}
+	}
+	herp := mkdir(t, "herp")
+	if _, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.ChangeSet = "cs-restore-d1"
+		in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
+	}), false); err != nil {
+		t.Fatal(err)
+	}
+
+	// An order frozen for herp is not finished: restoring the folder away waits.
+	ix := hasavshevet.OrderIndexDir(sys.dir)
+	if err := os.MkdirAll(ix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(ix, "e.json")
+	if err := os.WriteFile(entry, []byte(`{"key":"k","number":2500000,"state":"retryable","reservedAt":"x","rule":{"counter":"b2b","folder":"herp","temporary":false,"fileName":"IMOVEIN_2500000.doc"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, beforeBytes := readConfig(t, sys.dir)
+	_, err := Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-restore-d1"})
+	wantRefusal(t, err, CodeFolderInFlight)
+	if _, b := readConfig(t, sys.dir); !bytes.Equal(b, beforeBytes) {
+		t.Fatal("a refused restore changed config.yaml")
+	}
+
+	// b2b issued up to 2 500 000, and that order (no rule) waits for a resend:
+	// the old range would leave it out. (cs-restore-c2's pre-image predates
+	// herp too; with nothing frozen for herp that part is fine.)
+	writeOrderCounter(t, orders, 2_500_000)
+	if err := os.WriteFile(entry, []byte(`{"key":"k","number":2500000,"state":"retryable","reservedAt":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-restore-c2"})
+	wantRefusal(t, err, CodeCounterInFlight)
+	_ = os.Remove(entry)
+	_, err = Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-restore-c2"})
+	if r := wantRefusal(t, err, CodeCounterRange); !strings.Contains(r.Message, "last number 2500000") {
+		t.Errorf("refusal %+v", r)
+	}
+
+	// The documents change goes back fine now, and so does dropping the test counter.
+	for _, cs := range []string{"cs-restore-d1", "cs-restore-c3"} {
+		if _, err := Restore(context.Background(), env, RestoreInput{ChangeSet: cs}); err != nil {
+			t.Fatalf("restore %s: %v", cs, err)
+		}
+	}
+	// b2b_test issued 9 000 005: with no orders counter left, today's store
+	// would recover past it — into the test range.
+	if err := os.MkdirAll(filepath.Join(orders, "history", "9000005"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Restore(context.Background(), env, RestoreInput{ChangeSet: "cs-restore-c1"})
+	if r := wantRefusal(t, err, CodeCounterRange); !strings.Contains(r.Message, "today's store") {
+		t.Errorf("refusal %+v", r)
+	}
+}

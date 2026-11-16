@@ -403,9 +403,12 @@ too); `1 ≤ min ≤ max ≤ 999 999 999`.
 queue, the restart, the proof, the rollback). Ranges never overlap on one box — test and production, orders and
 receipts, retired ones included (`config_refused`): an order's job id, status, history folder and re-queue check are
 keyed by its number alone. `--check` answers `check.counter`: `{key, last, highestIssued, setLast?, inFlight}`.
-`restore` of a `create`/`range`/`retire` puts `config.yaml` back and leaves every store where it is; a restored
-range that no longer holds the last number makes that counter refuse (503 `COUNTER_EXHAUSTED`) — fail closed, never
-a number twice. `receipt-seed` stays for a box without counters; with counters, `counters create` adopts or creates
+`restore` of a `create`/`range`/`retire` puts `config.yaml` back and leaves every store where it is, after the same
+guards as the command (review m9): a restored range that would leave out an unfinished entry is `counter_in_flight`;
+one that would exclude the counter's last number or a number already issued is `counter_range` (it would answer every
+document 503 `COUNTER_EXHAUSTED`, and nothing lowers a counter); and a restore that leaves a kind with no counter —
+back on today's store — is `counter_range` when that kind's counters issued numbers above the store (its recovery
+over 1–999 999 999 would jump into their ranges: retire them instead). `receipt-seed` stays for a box without counters; with counters, `counters create` adopts or creates
 the receipt store.
 
 ## `documents`: typed folders and the receipts binding (plan 087)
@@ -441,7 +444,7 @@ receipt folder, its name pattern or test flag, the receipt counter — does not 
 (`receipts_in_flight`: Recover finishes it into the folder in use, under its pattern; a file already written under
 the old name would be written again under the new one). The `receipts` command makes the same check when it moves
 `sendReceiptDir`. Config-command flow; `restore` puts
-`config.yaml` back. Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
+`config.yaml` back, after the same in-flight guards (`folder_in_flight`, `receipts_in_flight`; review m9). Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
 `documents` (and refuses index entries holding a frozen rule), its recovery pushes the production counters into the
 test ranges, and its GUI save drops the block —
 [troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).

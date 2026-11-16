@@ -359,6 +359,83 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 	return err
 }
 
+// countersRestorable refuses a restore from cur to tgt that would strand
+// what the counters hold (review m9), as the counters command would refuse
+// the same change: a counter's range that leaves out an unfinished entry
+// (counter_in_flight), its store's last number or a number already issued in
+// it (counter_range: every document it numbers would be 503
+// COUNTER_EXHAUSTED, and no command lowers a counter); and a kind that goes
+// back to today's store — no counter of that kind left — after its counters
+// issued numbers above that store: its recovery runs over 1-999 999 999 and
+// would move it past them, into their ranges (the downgrade's trap). Any
+// other counter dropped is harmless: its numbers stay in the index and the
+// history, a re-queue needs no counter (m3), and a reserved receipt's counter
+// is the receipt binding's guard (documentsIdle).
+func (a *applier) countersRestorable(cur, tgt config.Config) error {
+	curSet := hasavshevet.NewCounterSet(cur, a.dir)
+	for _, k := range cur.CounterKeys() {
+		cc := cur.Documents.Counters[k]
+		tc, ok := tgt.Documents.Counters[k]
+		if !ok || (tc.Min == cc.Min && tc.Max == cc.Max) {
+			continue
+		}
+		c, ok := curSet.Get(k)
+		if !ok {
+			continue
+		}
+		last, r := counterLast(c)
+		if r != nil {
+			return r
+		}
+		scan, err := hasavshevet.ScanIssued(cc.Kind, a.dir, strings.TrimSpace(cur.SendOrderDir), cc.Min, cc.Max)
+		if err != nil {
+			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", cc.Kind, err)
+		}
+		outside := scan.LowestInFlight
+		if outside >= tc.Min {
+			outside = scan.HighestInFlight
+		}
+		switch {
+		case scan.InFlight > 0 && (scan.LowestInFlight < tc.Min || scan.HighestInFlight > tc.Max):
+			return refuse(CodeCounterInFlight, "let it finish first (a repeat of its key, the next start; docs/troubleshooting.md), then restore",
+				"the restored range %d-%d of counter %s would leave out %s %d, which is not finished", tc.Min, tc.Max, k, strings.TrimSuffix(cc.Kind, "s"), outside)
+		case last >= 0 && (last < tc.Min-1 || last > tc.Max):
+			return refuse(CodeCounterRange, "keep the range: a restore never moves a counter back, and this one would refuse every document",
+				"the restored range %d-%d of counter %s would exclude its last number %d", tc.Min, tc.Max, k, last)
+		case scan.Highest > tc.Max:
+			return refuse(CodeCounterRange, "keep the range: a restore never moves a counter back",
+				"the restored range %d-%d of counter %s ends below number %d, already issued", tc.Min, tc.Max, k, scan.Highest)
+		}
+	}
+	for _, kind := range []string{config.DocumentKindOrders, config.DocumentKindReceipts} {
+		on := tgt.OrdersConfigured()
+		if kind == config.DocumentKindReceipts {
+			on = tgt.ReceiptsConfigured()
+		}
+		if !on || cur.ImplicitCounter(kind) || !tgt.ImplicitCounter(kind) {
+			continue
+		}
+		implicit := hasavshevet.NewCounterSet(tgt, a.dir).OfKind(kind)
+		if len(implicit) != 1 || !implicit[0].Implicit {
+			continue
+		}
+		last, r := counterLast(implicit[0])
+		if r != nil {
+			return r
+		}
+		scan, err := hasavshevet.ScanIssued(kind, a.dir, strings.TrimSpace(tgt.SendOrderDir), 1, config.MaxDocumentNumber)
+		if err != nil {
+			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the %s index and history: %v", kind, err)
+		}
+		if scan.Highest > max(last, 0) {
+			return refuse(CodeCounterRange, "retire the counters instead of restoring them away (counters retire), or restore a later change set",
+				"the restored config.yaml numbers %s from today's store again (no %s counter is left): its recovery runs over 1-%d and would move it from %d past %d, a number its counters issued",
+				kind, kind, config.MaxDocumentNumber, max(last, 0), scan.Highest)
+		}
+	}
+	return nil
+}
+
 // raiseCounter sets a counter's store to last while the service is stopped,
 // having read it again: it must still be what the check read (before, -1 for
 // no store), or another writer moved it.

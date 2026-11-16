@@ -3,11 +3,31 @@ package provision
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
+
+// preimageConfig is the config.yaml a pre-image holds, parsed; ok is false
+// when it holds none (it removes config.yaml, or has no file at all).
+func preimageConfig(p preimage) (cfg config.Config, ok bool, err error) {
+	for _, f := range p.m.Files {
+		if f.Path != configFile || !f.Present {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(p.dir, "files", configFile))
+		if err != nil {
+			return cfg, false, fmt.Errorf("read the pre-image of %s: %w", configFile, err)
+		}
+		if cfg, err = config.Parse(b); err != nil {
+			return cfg, false, fmt.Errorf("the pre-image of %s does not parse: %w", configFile, err)
+		}
+		return cfg, true, nil
+	}
+	return cfg, false, nil
+}
 
 // RestoreInput names the change set whose pre-image Restore puts back.
 type RestoreInput struct {
@@ -67,6 +87,23 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	if files {
 		if err := a.idle(ctx, "before the restore"); err != nil {
 			return res, err
+		}
+	}
+	// Plan 087 review m9: a restore that changes the documents block runs the
+	// counters and documents commands' guards first, so it can neither strand
+	// unfinished work nor leave a counter that refuses every document.
+	if restored, ok, err := preimageConfig(p); err != nil {
+		return res, refuse(CodePreimageMissing, "restore by hand from the folder", "%v", err)
+	} else if ok {
+		if a.curBytes == nil {
+			a.warn("config.yaml did not read: the counters and documents guards were not run (--assume-idle)")
+		} else {
+			if err := a.documentsIdle(a.cur, restored); err != nil {
+				return res, err
+			}
+			if err := a.countersRestorable(a.cur, restored); err != nil {
+				return res, err
+			}
 		}
 	}
 	// The DB secret in use now: a login both configs use keeps it
