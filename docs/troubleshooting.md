@@ -246,7 +246,7 @@ fix the entry by the steps above.
 
 | `why` | Meaning, and the way on |
 |---|---|
-| `no_policy` | No policy names this box: none was published for every box or for a list holding its id, or the box holds none since its `link\policy.json` was lost (the relay delivers again on its next connection, hourly at the latest). The tenant and ring the relay states play no part. |
+| `no_policy` | No policy names this box: none was published for every box or for a list holding its id. A lost `link\policy.json` (a reinstall) is not a reason: the box holds what its seq floors keep. The tenant and ring the relay states play no part. |
 | `policy_hold` | The deciding policy holds (`hold`, or no target) — a box list's hold outranks every box's target — or a hold issued at or after the deciding target brakes it, at any scope (`braked` names the target it overrides). A box list issued after that hold moves its boxes again. |
 | `policy_expired` | The deciding policy expired (or the box's clock is behind its issue time): it holds for its scope and never falls back to a less specific policy. Publish a new one for that scope (a box list naming the box, to return it to the fleet's target). |
 | `policy_revoked` | The deciding policy was signed by a team key now below the box's epoch floor: it holds for its scope until a policy signed by a current key replaces it. |
@@ -255,7 +255,7 @@ fix the entry by the steps above.
 | `upgrading` | A ticket is running: `last.ticket`, and `upgrade-result` with it. |
 | `stopped` | This target ended unhealthy under this policy (`rolled_back`, `unhealthy`, `unhealthy_no_rollback`, `rollback_below_floor`, `unhealthy_link_inconclusive`), or failed three times; `last` has the health checks and the rollback. A newer policy (a higher seq, even for the same release) tries again. |
 | `auto_upgrade_off`, `admin_off` | `link.yaml` turns it off (`autoUpgrade: false`, `admin: false`). |
-| `state_unreadable` | `link.yaml` names a key the link does not know (a misspelt `autoUpgrade`?), or `link\policy.json` / `link\autoupgrade.json` does not read. `error` names the file. An unreadable `policy.json` is started over by the next delivery, judged against the seq floors kept in the secrets store; while those floors cannot be read (or none was ever kept) the box refuses every delivery and holds — fix by hand, on Digitrade's request. |
+| `state_unreadable` | `link.yaml` names a key the link does not know (a misspelt `autoUpgrade`?), `link\autoupgrade.json` does not read, or the seq floors in the secrets store do not read (or `link\policy.json` does not read and no floors were ever kept): the box refuses every delivery and holds — fix by hand, on Digitrade's request. `error` names the file. A `policy.json` that does not read, with the floors readable, is no reason: the floors and the policies kept with them stand in, and the next delivery writes the file back. |
 
 A policy refused on delivery is in `refused` with its code: `seq_not_newer` (the box holds this scope key at that seq
 or a higher one — publish a newer seq: box lists share one counter), `wrong_scope` (not every box, and no list holding
@@ -273,5 +273,5 @@ below 1.0.25 on a box with a pickup folder, never below `format-floor`).
 |---|---|
 | `unhealthy_no_rollback` | No signed digest names the setup of the build replaced (a policy's `rollbacks` lacked it, or the command had no `rollback`), or the signed one disagrees with the digest this box recorded when it installed that build. digi-mcp fills `rollbacks` from its pins: pin the build the box ran. |
 | `rollback_below_floor` | The build replaced is below `DataDir\format-floor` (the new build changed a file format the old one cannot read), below the runner's compiled floor, or the floor cannot be read. A `format-floor` that does not hold a release number (`1.0.30`) is left as it is by every start and blocks every rollback: put back the highest release that has run on the box, by hand. |
-| `unhealthy_link_inconclusive` | Only the new link failed, and the relay's `/healthz` did not answer from the box either: the relay, or the way to it (the proxy), was down — not proven the build. Check `link-status` once the relay is back; the box is likely fine. |
+| `unhealthy_link_inconclusive` | Only the new link failed, and the relay's `/readyz` did not answer 200 from the box: the relay, its registry, or the way to it (the proxy) was down — not proven the build (a relay from before `/readyz` answers 404, so with it no link-only failure rolls back). Check `link-status` once the relay is back; the box is likely fine. |
 | `unhealthy` | The rollback ran and did not end healthy, its checks refused its setup (a download, a digest), or the server restarted during the rollback (or twice in the health window): read `rollback`, `runner.log` and `setup.log` in `upgrade\<ticket>\`. |

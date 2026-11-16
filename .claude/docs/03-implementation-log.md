@@ -294,10 +294,22 @@ could undo holds, that a later hold did not brake a more specific target, that a
   seq ≤ 2³¹−1, lifetime ≤ 90 days, a window ≥ healthMinutes + 30 min (D13, m16, m17), new outcome and why codes.
 - The runner: rolls back only to a signed digest (B1), never below `DataDir\format-floor` (D11, new
   `internal/formatfloor`, raised by the daemon and the link at start), and keeps the new build on a link-only failure
-  while the relay's `/healthz` is down (D12); checks the order queue again right before the setup (m6); ends windows
+  while the relay is not ready (D12); checks the order queue again right before the setup (m6); ends windows
   through the handle it checked (m5); resumes the health check once after a restart (m7, `health.json`).
 - The link: the relay's statements are information only (M1); deliveries coalesced, writes and kicks only on a
   change (m2); seq floors in the secrets store, never pruned, judge every policy (m3, m4); a retired key's floor no
   longer binds (m1); stops and failures tallied apart from the attempts (m10); `knownSetupSHA` at the epoch floor (m11).
 - Not here: M4, m13–m15 are digi-mcp's; the relay's 90-day cap comes with its linkproto re-pin; m8 (a CI contract
   test for the health probe's fields) and m12 (binding a policy to a relay) are open.
+
+## 2026-11-16 — plan 088: the second security review's fixes (N1, N5, N10)
+
+The re-review of `1aed12f` found every round-1 finding fixed and one new MAJOR; `pkg/linkproto` is unchanged (the relay
+and digi-mcp stay pinned at `fcd0277`):
+
+- N1: the DPAPI floor record keeps, per scope key, the signed policy that set the floor (its exact bytes); `loadHeld`
+  makes the floors the authority and `policy.json` their mirror, so a reinstall (which deletes `link\`) loses no
+  expired list hold and no expired brake — the relay never delivers an expired policy again. A kept list comes back
+  only when it names the box's id.
+- N5: D12 asks the relay's `/readyz` (200 only while its registry answers), not `/healthz`.
+- N10: a deferred ticket keeps its checked setup; the next attempt at the same release and digest takes it.

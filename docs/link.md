@@ -237,22 +237,27 @@ key. The format below is the one after the security review (plan 088 §2b, D8–
   emergency brake for a box list still targeting a bad release. An **expired** policy holds for its scope: it never
   falls through to a less specific one, so an emergency hold does not lapse into a rollout. A held policy whose key is
   now below the epoch floor holds for its scope too (`policy_revoked`).
-- **Scopes and anti-replay (D3, D13; reviews m1, m3, m4).** Each policy carries a `seq` (1 to 2³¹−1). The box keeps one
-  floor per scope key — `all`, and `boxes` for every box list, so digi-mcp numbers box lists from one counter — as
-  `{seq, the policy's SHA-256, the key's epoch}` in its secrets store, apart from `link\policy.json` and never pruned. It
-  refuses a lower seq, or other bytes at the same seq; the same policy delivered again changes nothing. A deleted or
-  lost `policy.json` holds the box until the relay delivers again, never below the floors; a floor set by a key now
-  below the epoch floor no longer binds (a stolen key cannot freeze a scope past its rotation). A policy lives at most
-  90 days.
+- **Scopes and anti-replay (D3, D13; reviews m1, m3, m4, N1).** Each policy carries a `seq` (1 to 2³¹−1). The box keeps
+  one floor per scope key — `all`, and `boxes` for every box list, so digi-mcp numbers box lists from one counter — as
+  `{seq, the policy's SHA-256, the key's epoch}` **and the signed policy that set it** (its exact bytes) in its secrets
+  store, apart from `link\policy.json` and never pruned. It refuses a lower seq, or other bytes at the same seq; the same
+  policy delivered again changes nothing. The floors are the authority and `policy.json` their mirror: a reinstall (the
+  uninstaller deletes `link\`) or a lost file changes nothing the box holds — an expired list hold, or an expired brake,
+  which the relay never delivers again, still holds (review N1). A kept list comes back only when it names the box's
+  id: a box paired again under another id follows every box's policy (the box-list floor still binds its seq). A floor
+  set by a key now below the epoch floor no longer binds (a stolen key cannot freeze a scope past its rotation). A
+  policy lives at most 90 days.
 - **No rollback below the format floor (D11, review M3).** Every build raises `DataDir\format-floor` to its compiled
   `RollbackFloor` when it starts (v1.0.31: `1.0.30`; never lowered; the daemon does not start when it must raise it
   and cannot) — the oldest release that reads every file format the builds on this box wrote. The runner never rolls
   back below it, nor below its own compiled floor, nor while it cannot read it (`rollback_below_floor`). A build that
   changes a persisted format sets `RollbackFloor` to its own version in the same change.
-- **A link-only failure is not a verdict while the relay is down (D12).** When only the new link failed the health
-  check, the runner asks the relay's `/healthz` from the box (link.yaml's relay, through its proxy): it answers — our
-  side is broken, the rollback runs; it does not — the new build stays (`unhealthy_link_inconclusive`). A relay outage
-  during a fleet window no longer rolls the fleet back.
+- **A link-only failure is not a verdict while the relay is not ready (D12, review N5).** When only the new link failed
+  the health check, the runner asks the relay's **`/readyz`** from the box (link.yaml's relay, through its proxy) — 200
+  only while the relay's registry answers, so the relay could admit the box; `/healthz` says nothing about that. It
+  answers 200 — our side is broken, the rollback runs; anything else (503, no answer, a relay from before `/readyz`
+  answering 404) — the new build stays (`unhealthy_link_inconclusive`). A relay or registry outage during a fleet
+  window no longer rolls the fleet back.
 
 The policy, as signed (`pkg/linkproto` `UpgradePolicy`, shared with the relay and digi-mcp):
 
@@ -306,15 +311,16 @@ fleet, sign a list naming it with the fleet's target.
 
 Right before the setup the runner asks the order queue once more (review m6): with orders queued it waits up to 5
 minutes, then defers — the setup is not run, nothing changes, outcome `deferred` — unless the command said
-`assumeIdle`. After the setup it waits up to `healthMinutes` for one healthy round: the installed build is the target
+`assumeIdle`. The deferred ticket keeps its checked setup, and the next attempt at the same release and digest takes it
+(once the release's `SHA256SUMS` line is fetched again and it still hashes to the digest) instead of downloading it
+again (review N10). After the setup it waits up to `healthMinutes` for one healthy round: the installed build is the target
 (or the build it replaced, when the setup left that), both services are as they were before, the daemon proves itself
 the way provision's `state` does (it logs in with `config.yaml`'s credential and answers `/api/ping` with the installed
 build; a daemon stopped before is not asked), and the installed build's link is connected to the relay
 (`link\session.json`: its build, a liveness answer since the setup started and within 3 minutes).
 
 Not healthy: the new build stays, and a person decides, when
-- only the link failed and the relay's `/healthz` does not answer from the box either (`unhealthy_link_inconclusive`,
-  D12);
+- only the link failed and the relay's `/readyz` does not answer 200 from the box (`unhealthy_link_inconclusive`, D12);
 - no signed digest names the setup of the build replaced, or the one that names it disagrees with the digest this box
   recorded (`unhealthy_no_rollback`, D8);
 - the build replaced is below `DataDir\format-floor` (or the runner's own compiled floor), or the floor cannot be read
@@ -353,9 +359,10 @@ one by them.
   next window and the next check, a "not now" (`waiting`), and the last automatic upgrade with its outcome, health and
   rollback. The tenant and ring the relay states are shown as information. `digi-erp-connector-link.exe status` prints
   the switch.
-- Files in the data directory: `link\policy.json` (what the box holds — one that cannot be read holds the box, and the
-  next delivery starts it over against the seq floors), the seq floors (`secrets\link_policy_floors.bin`, DPAPI; a
-  reinstall and a new pairing keep them), `format-floor`, `link\autoupgrade.json` (the scheduler's memory, its tally
+- Files in the data directory: `link\policy.json` (a mirror of what the box holds — one that is lost or cannot be read
+  changes nothing, and the next delivery writes it back), the seq floors and the policies that set them
+  (`secrets\link_policy_floors.bin`, DPAPI, at most two policies; a reinstall and a new pairing keep them),
+  `format-floor`, `link\autoupgrade.json` (the scheduler's memory, its tally
   and its last view), `link\session.json`, and the tickets' `upgrade\` (with `health.json` while a health check runs)
   and `results\` as above.
 
