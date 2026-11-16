@@ -42,17 +42,24 @@ import (
 //     DataDir\folder-acl\<sha256>.json — the sha256 of its bytes — answered
 //     as the folder's preimage.
 //   - op restore {folder, preimage} puts back only a pre-image this box
-//     recorded for that folder at its configured path, never an SDDL: a
-//     stolen team key can only tighten a configured folder or put back an
-//     ACL it had before.
+//     recorded for that folder at its configured path, never an SDDL.
+//   - The bound, literally (review T2): a stolen team key can only lower
+//     rights on a configured document folder's tree — never raise one, never
+//     add an entry, never touch a folder code runs from (T1) or a place a
+//     document folder may not be (T3) — or put back an ACL that tree had.
 //   - --check reads and writes nothing: per folder, every principal with an
 //     allow entry anywhere in the tree, the strongest rights it has anywhere
 //     before and after and on how many entries they change (review T4), the
 //     owners handed to Administrators, and how many entries change.
-//   - Refused: a reparse point or hard link (folder_reparse), more entries
-//     than the bound (folder_too_large), unfinished work in the folder
-//     (folder_in_flight, as the documents command), the data directory or a
-//     system folder (folder_forbidden).
+//   - Refused: a reparse point or hard link beneath, a junction, link or
+//     mount point on the configured path, or a folder whose handle resolves
+//     to another path (folder_reparse; T3); more entries than the bound
+//     (folder_too_large); unfinished work in the folder (folder_in_flight, as
+//     the documents command); a drive's root, the system, profile and
+//     ProgramData folders, any AppData, the install folder or the data
+//     directory, or a folder holding one (folder_forbidden; T3); a folder
+//     holding the importer's files or executables (folder_has_executables;
+//     T1). Where an importer runs no trusted writer is kept (T1).
 //   - Afterwards the service is restarted (the queue asked first) and
 //     proved: the daemon reads the folders' new ACLs at its start.
 
