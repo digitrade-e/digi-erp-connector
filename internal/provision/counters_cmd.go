@@ -403,6 +403,12 @@ func (a *applier) counterStartFrom(ctx context.Context, in CountersInput) error 
 		a.res.Check = &CheckResult{Config: "unchanged", Counter: chk, Restart: a.running}
 		return nil
 	}
+	// A store of its own lives in DataDir\counters: only under the
+	// protected DACL (as receipt-seed's store).
+	if err := a.env.Sys.ProtectDataDir(); err != nil {
+		return refuse(CodeWriteFailed, `see "The service will not start" in docs/troubleshooting.md`,
+			"the data directory could not be protected, so nothing was written: %v", err)
+	}
 	if !a.running {
 		return a.raiseCounter(c, setLast, last)
 	}
