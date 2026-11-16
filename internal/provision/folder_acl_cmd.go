@@ -321,15 +321,32 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 	if err := a.folderACLIdle(paths, in.AcceptUnreadable); err != nil {
 		return err
 	}
-	var trusted []string
-	for _, w := range a.cur.Documents.TrustedWriters {
-		trusted = append(trusted, w.SID)
+	trustedFor := map[string][]string{}
+	for _, n := range in.Folders {
+		// Review T1: never where the connector runs code from — the importer's
+		// files — and no trusted writer where an importer runs.
+		for _, f := range a.cur.ImporterFiles() {
+			if inside(f, paths[n]) {
+				return refuse(CodeFolderHasExecutables, "keep the importer's files (has.exe, its BAT and parameter files) out of the folders documents are written into",
+					"folder %s (%s) holds the importer's file %s", n, paths[n], f)
+			}
+		}
+		if !a.cur.ExecutesIn(paths[n]) {
+			for _, w := range a.cur.Documents.TrustedWriters {
+				trustedFor[n] = append(trustedFor[n], w.SID)
+			}
+		}
 	}
 	plans := make([]dataacl.LockdownPlan, len(in.Folders))
+	exts := executableExtensions()
 	for i, n := range in.Folders {
-		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trusted, nil)
+		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trustedFor[n], exts)
 		if err != nil {
 			return lockdownRefusal(n, paths[n], err)
+		}
+		if len(plan.Executables) > 0 {
+			return refuse(CodeFolderHasExecutables, "move the programs, scripts and libraries out of the folder: a lock-down never tightens a folder code is run from",
+				"folder %s (%s) holds files Windows runs: %s", n, paths[n], strings.Join(plan.Executables, ", "))
 		}
 		plans[i] = plan
 		out := FolderACLFolder{Name: n, Path: paths[n], Entries: len(plan.Entries), EntriesChanged: plan.EntriesChanged,
@@ -362,7 +379,7 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "record the pre-image of folder %s: %v", n, err)
 		}
 		a.res.FolderACL.Folders[i].Preimage = sha
-		written, err := a.env.Sys.ApplyFolderLockdown(paths[n], trusted, plans[i])
+		written, err := a.env.Sys.ApplyFolderLockdown(paths[n], trustedFor[n], plans[i])
 		a.res.FolderACL.Folders[i].Written = written
 		if err != nil {
 			r := lockdownRefusal(n, paths[n], err)
@@ -372,6 +389,25 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 		a.step("folder-acl", true, fmt.Sprintf("%s locked down (%d entries); restore with preimage %s", n, written, sha))
 	}
 	return a.restartForFolders(ctx)
+}
+
+// executableExtensions are the file extensions a lock-down refuses (review
+// T1): PATHEXT's, never fewer than Windows' default PATHEXT; .dll and .ps1;
+// and the other program images (.scr, .cpl, .ocx, .sys, .drv). Never .php:
+// a PHP site's pages are data to the ERP's folders.
+func executableExtensions() map[string]bool {
+	out := map[string]bool{".dll": true, ".ps1": true, ".scr": true, ".cpl": true, ".ocx": true, ".sys": true, ".drv": true}
+	pathext := ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;" + os.Getenv("PATHEXT")
+	for _, e := range strings.Split(pathext, ";") {
+		if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+			if !strings.HasPrefix(e, ".") {
+				e = "." + e
+			}
+			out[e] = true
+		}
+	}
+	delete(out, ".php")
+	return out
 }
 
 // recordFolderACL writes a lockdown's pre-image under the data directory and

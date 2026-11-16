@@ -184,3 +184,65 @@ func TestFolderACL_Refusals(t *testing.T) {
 		t.Errorf("an unknown field: %d %s", code, out)
 	}
 }
+
+// Review T1: folder-acl never locks down a folder code runs from — one that
+// holds the importer's files or executables (PATHEXT, .dll, .ps1; never
+// .php) — and trusts no one in a folder where an importer runs.
+func TestFolderACL_ImporterFoldersAndExecutables(t *testing.T) {
+	sys, env, orders, herp := aclBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.Documents.TrustedWriters = []config.TrustedWriter{{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}}
+	cfg.HasExePath = touch(t, filepath.Join(herp, "has.exe"))
+	writeConfig(t, sys.dir, cfg)
+	_, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true)
+	if r := wantRefusal(t, err, CodeFolderHasExecutables); !strings.Contains(r.Message, "has.exe") {
+		t.Errorf("refusal %+v", r)
+	}
+
+	// has.exe elsewhere: sendOrderDir is its working directory — no trusted writer there.
+	cfg.HasExePath = touch(t, filepath.Join(mkdir(t, "Hash7"), "has.exe"))
+	writeConfig(t, sys.dir, cfg)
+	if _, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"sendOrderDir"} }), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(sys.lastTrusted) != 0 {
+		t.Errorf("trusted writers kept for has.exe's working directory %s: %v", orders, sys.lastTrusted)
+	}
+	if !sys.lastExecExts[".dll"] || !sys.lastExecExts[".ps1"] || !sys.lastExecExts[".exe"] || sys.lastExecExts[".php"] {
+		t.Errorf("executable extensions %v", sys.lastExecExts)
+	}
+	// herp (no importer runs there): the trusted writer is kept.
+	if _, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(sys.lastTrusted) != 1 {
+		t.Errorf("trusted writers for herp: %v", sys.lastTrusted)
+	}
+	// An executable found by the walk.
+	sys.executables = map[string][]string{herp: {`lib\wtsapi32.dll`}}
+	_, err = ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true)
+	if r := wantRefusal(t, err, CodeFolderHasExecutables); !strings.Contains(r.Message, "wtsapi32.dll") {
+		t.Errorf("refusal %+v", r)
+	}
+}
+
+// Review T1: a trusted writer counts as a writer where an importer runs —
+// the documents command refuses it, state lists it under writers.
+func TestTrustedWriterCountsWhereAnImporterRuns(t *testing.T) {
+	sys, env, _, _ := aclBox(t)
+	kupain := mkdir(t, "kupain")
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.Documents.TrustedWriters = []config.TrustedWriter{{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}}
+	cfg.HasExePath = touch(t, filepath.Join(mkdir(t, "Hash7"), "has.exe"))
+	cfg.HasReceiptParamFile = touch(t, filepath.Join(mkdir(t, "Hash7p"), "kupain.prm"))
+	writeConfig(t, sys.dir, cfg)
+	sys.accounts = map[string]dataacl.Account{`bfl\wizsched`: {SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`, Type: dataacl.AccountUser}}
+	sys.writers = map[string][]string{kupain: {`BFL\wizsched`}}
+	_, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.Folders = map[string]*FolderInput{"herp_receipts": {Kind: "receipts", Path: kupain, NamePattern: "KUPAIN_{n}.doc"}}
+		in.Receipts = &DocumentsReceiptsInput{Folder: strp("herp_receipts"), Counter: strp("receipts")}
+	}), false)
+	if r := wantRefusal(t, err, CodeFolderWritable); !strings.Contains(r.Message, `BFL\wizsched`) {
+		t.Errorf("the bound receipt folder where has.exe runs: %+v", r)
+	}
+}

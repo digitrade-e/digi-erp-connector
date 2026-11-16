@@ -14,6 +14,11 @@ import (
 // (hasavshevet.FolderGuard, plan 087 review M1/R3).
 var folderWritersFn = dataacl.FolderWriters
 
+// importerWritersFn reads who besides the administrators can change an
+// importer file — the file, its folder, every folder above (dataacl.Writers;
+// review T1); tests replace it.
+var importerWritersFn = dataacl.Writers
+
 // linkedBox reports whether the box is behind the link: link.yaml in the
 // data directory names a box or a pairing code — provision.LinkMode's rule
 // (internal/link's file, read here without the link package).

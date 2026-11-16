@@ -146,7 +146,9 @@ documents:
 
 `documents.trustedWriters: [{sid, name}]` (review R1b; set by the `documents` command, which resolves names on the
 box): at most 8 accounts never counted as writers of a document folder — each an `S-1-5-21-…` account SID with a RID
-of 1000 or more, never a well-known or built-in one.
+of 1000 or more, never a well-known or built-in one. **Except where an importer runs** (review T1): `sendOrderDir` when
+the connector runs an order importer, the receipt folder when it runs a receipt importer, and the folders of has.exe,
+the BATs and the parameter files (`Config.ImporterFolders`) — there a trusted writer counts like anyone else.
 
 Refused (`config.ValidateDocuments`, from `ValidateOrders`: the daemon, `CheckConfig`, the GUI save): keys not
 `[a-z][a-z0-9_]{0,31}`, or a Windows device name (`con`, `prn`, `aux`, `nul`, `com0`–`9`, `lpt0`–`9`); a kind other than `orders`/`receipts`; a range outside 1–999 999 999; **overlapping ranges —

@@ -58,7 +58,7 @@ func (a *applier) checkFolderWriters(what, path string, allow bool) error {
 	if err != nil {
 		return refuse(CodeFolderWritable, "run it elevated (as an administrator)", "read who can write to %s (%s): %v", what, path, err)
 	}
-	who, _ := splitTrusted(all, a.tgt.TrustedSIDs())
+	who, _ := splitTrusted(all, a.tgt.TrustedSIDsFor(path)) // none where an importer runs (review T1)
 	if len(who) == 0 {
 		return nil
 	}
@@ -87,7 +87,7 @@ func (a *applier) reportWritableFolders(cfg config.Config) {
 			continue
 		}
 		all, err := a.env.Sys.FolderWriters(f.Path)
-		who, _ := splitTrusted(all, cfg.TrustedSIDs())
+		who, _ := splitTrusted(all, cfg.TrustedSIDsFor(f.Path))
 		switch {
 		case err != nil:
 			a.res.WritableFolders = append(a.res.WritableFolders, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})

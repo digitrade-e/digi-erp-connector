@@ -116,6 +116,9 @@ type OrderQueue struct {
 	// into: behind the link, not while accounts besides the administrators
 	// can write to it (review M1, R3; UseFolderGuard). nil: every folder.
 	guard FolderAllower
+	// importerGuard (guarded by closeMu) says whether the order importer may
+	// run (review T1; UseImporterGuard). nil: always.
+	importerGuard FolderAllower
 	// gen counts what moves a counter here — reservations, recoveries — for
 	// the read route's cache (review m13; Generation).
 	gen atomic.Uint64
@@ -195,6 +198,28 @@ func (q *OrderQueue) UseFolderGuard(g FolderAllower) {
 	q.closeMu.Lock()
 	defer q.closeMu.Unlock()
 	q.guard = g
+}
+
+// UseImporterGuard makes the queue ask g (KeyOrderImporter) before a new
+// order without a rule is reserved, before it is re-queued, and the worker
+// before its files are written: behind the link an importer others can
+// change is not run (review T1).
+func (q *OrderQueue) UseImporterGuard(g FolderAllower) {
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	q.importerGuard = g
+	if q.sender != nil {
+		q.sender.importerCheck = func() error { return g.Allowed(KeyOrderImporter) }
+	}
+}
+
+// importerRefused is the importer guard's refusal for an order without a
+// rule, or nil. Caller holds closeMu.
+func (q *OrderQueue) importerRefused(req OrderRequest) error {
+	if q.importerGuard == nil || req.Rule != nil || q.sender == nil || q.sender.cfg.OrderImporter() == "" {
+		return nil
+	}
+	return q.importerGuard.Allowed(KeyOrderImporter)
 }
 
 // RefuseFolders is UseFolderGuard with fixed refusals (key → why).
@@ -592,6 +617,11 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 				ErrDocumentRuleConflict, key, e.Number, e.Rule.describe(), describeRule(req.Rule))
 		}
 		if e.State == orderRetryable && !q.jobActive(e.Number) {
+			if e.Rule == nil {
+				if err := q.importerRefused(req); err != nil {
+					return Acceptance{JobID: strconv.FormatInt(e.Number, 10)}, err
+				}
+			}
 			if e.Rule != nil {
 				if err := q.folderRefused(e.Rule.Folder); err != nil {
 					return Acceptance{JobID: strconv.FormatInt(e.Number, 10)}, err
@@ -625,6 +655,9 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 		if err := q.folderRefused(req.Rule.Folder); err != nil {
 			return Acceptance{}, err
 		}
+	}
+	if err := q.importerRefused(req); err != nil {
+		return Acceptance{}, err
 	}
 	if !q.recovered[c.Key] {
 		if err := q.recoverCountersLocked([]*Counter{c}); err != nil {

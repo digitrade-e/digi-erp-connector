@@ -93,6 +93,9 @@ const (
 	// entry in the folder (never followed or rewritten through) / more entries than a lock-down walks.
 	CodeFolderReparse  = "folder_reparse"
 	CodeFolderTooLarge = "folder_too_large"
+	// CodeFolderHasExecutables: folder-acl (review T1) — the folder holds the importer's files, or files Windows runs
+	// (PATHEXT's extensions, .dll, .ps1): a lock-down never tightens a folder code is run from.
+	CodeFolderHasExecutables = "folder_has_executables"
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

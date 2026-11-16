@@ -107,6 +107,12 @@ type ReceiptWriterConfig struct {
 	// repeat of a written one is still answered, and Recover finishes none
 	// (the next Write recovers again, once it is allowed).
 	FolderCheck func() error
+	// ImporterCheck, when set, is asked before a receipt that runs the
+	// model (b) importer is reserved or finished: behind the link an importer
+	// others can change is not run (plan 087 review T1;
+	// FolderGuard KeyReceiptImporter). A refusal is ErrImporterWritable,
+	// nothing reserved.
+	ImporterCheck func() error
 }
 
 // ReceiptResult is what a Write produced or, on a repeat, what the key's first
@@ -582,12 +588,19 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 	return nil
 }
 
-// folderRefused is FolderCheck's refusal (ErrFolderWritable), else nil.
+// folderRefused is FolderCheck's refusal (ErrFolderWritable) — or, when a
+// model (b) importer would run, ImporterCheck's (ErrImporterWritable) — else
+// nil.
 func (w *ReceiptWriter) folderRefused() error {
-	if w.cfg.FolderCheck == nil {
-		return nil
+	if w.cfg.FolderCheck != nil {
+		if err := w.cfg.FolderCheck(); err != nil {
+			return err
+		}
 	}
-	return w.cfg.FolderCheck()
+	if w.cfg.ImporterCheck != nil && w.importer() != importerNone {
+		return w.cfg.ImporterCheck()
+	}
+	return nil
 }
 
 // Counter is the counter the writer numbers receipts from.

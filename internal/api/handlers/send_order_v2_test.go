@@ -564,3 +564,17 @@ func TestSendOrderV2_TemporaryAsText(t *testing.T) {
 		t.Errorf("repeat with temporary \"0\": %d %s, want 409", w.Code, w.Body)
 	}
 }
+
+// Review T1: an importer refused behind the link is 503 IMPORTER_WRITABLE.
+func TestImporterWritableIs503(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeSendOrderError(w, fmt.Errorf("%w: the orders importer", hasavshevet.ErrImporterWritable))
+	if w.Code != http.StatusServiceUnavailable || decodeBody(t, w)["code"] != "IMPORTER_WRITABLE" {
+		t.Fatalf("order: %d %s", w.Code, w.Body)
+	}
+	rw := httptest.NewRecorder()
+	writeReceiptError(rw, nil, "k", fmt.Errorf("%w: the receipts importer", hasavshevet.ErrImporterWritable))
+	if rw.Code != http.StatusServiceUnavailable || decodeBody(t, rw)["code"] != "IMPORTER_WRITABLE" {
+		t.Fatalf("receipt: %d %s", rw.Code, rw.Body)
+	}
+}

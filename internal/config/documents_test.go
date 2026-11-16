@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -498,5 +499,38 @@ func TestValidateDocuments_TrustedWriters(t *testing.T) {
 	}
 	if err := cfg.ValidateOrders(); err == nil {
 		t.Errorf("%d trusted writers accepted", MaxTrustedWriters+1)
+	}
+}
+
+// Plan 087 review T1: the folders an importer runs in or from — trusted
+// writers count there.
+func TestImporterFolders(t *testing.T) {
+	root := t.TempDir()
+	at := func(p ...string) string { return filepath.Join(append([]string{root}, p...)...) }
+	c := Config{ERP: ERPHasavshevet, SendOrderDir: at("orders"), HasExePath: at("Hash7", "has.exe"), HasParamFile: "digi.prm",
+		Documents: DocumentsConfig{Folders: map[string]FolderConfig{"herp_receipts": {Kind: DocumentKindReceipts, Path: at("kupain")}},
+			Receipts: DocumentReceiptsConfig{Folder: "herp_receipts"}},
+		HasReceiptBatFile: at("bats", "kupain.bat")}
+	c.Documents.TrustedWriters = []TrustedWriter{{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}}
+	for _, d := range []string{at("orders"), at("Hash7"), at("kupain"), at("bats")} {
+		if !c.ExecutesIn(d) || len(c.TrustedSIDsFor(d)) != 0 {
+			t.Errorf("%s: an importer runs in or from it, trusted %v", d, c.TrustedSIDsFor(d))
+		}
+	}
+	if c.ExecutesIn(at("herp")) || len(c.TrustedSIDsFor(at("herp"))) != 1 {
+		t.Errorf("herp: no importer runs there")
+	}
+	if got := c.ImporterFiles(); !slices.Contains(got, at("orders", "digi.prm")) || !slices.Contains(got, at("bats", "kupain.bat")) {
+		t.Errorf("importer files %v", got)
+	}
+	// Model (a): the scheduler reads the pickup folder; no importer runs in sendOrderDir.
+	c.SendOrderPickupDir = at("pickup")
+	if c.ExecutesIn(at("orders")) || c.ExecutesIn(at("pickup")) {
+		t.Error("model (a): an importer folder")
+	}
+	// No receipt importer: the receipt folder is the scheduler's.
+	c.HasReceiptBatFile = ""
+	if c.ExecutesIn(at("kupain")) {
+		t.Error("no receipt importer: the receipt folder counted as one")
 	}
 }

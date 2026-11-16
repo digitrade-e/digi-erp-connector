@@ -340,7 +340,11 @@ that others can write to is reported — a `folder_writable:` warning and an ent
 (`{name, path, writers, …}`, as `state`'s) — never refused, as the daemon treats it: a box upgraded with folders never
 locked down keeps taking these commands. `apply` only reports. Behind the link a scheduler account that must write
 there is trusted by name (`documents`' `trustedWriters`), or the folder is locked down by `folder-acl`
-([troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to)).
+([troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to)). **Not where an
+importer runs** (review T1): in `sendOrderDir` when the connector runs an order importer, in the receipt folder when it
+runs a receipt importer, and in the folders of has.exe, the BATs and the parameter files, a trusted writer counts like
+anyone else — it could plant what the importer loads or runs as LocalSystem. `state`'s `writableFolders` marks such a
+folder `executes: true`.
 
 ## `receipt-seed <N>`
 
@@ -482,6 +486,11 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
 - **Named folders only**: a typed folder's key, or the roles `sendOrderDir`, `pickup`, `sendReceiptDir`, resolved from
   `config.yaml` — never a path (`spec_invalid`); one the box does not have is `folder_unknown`; a drive's root, a system
   folder or the data directory, or a folder holding one, is `folder_forbidden`. At most 8 per run.
+- **Never a folder code runs from** (review T1): a folder holding an importer file (has.exe, a BAT, a parameter file)
+  or a file Windows runs — PATHEXT's extensions (never fewer than Windows' defaults), `.dll`, `.ps1`, `.scr`, `.cpl`,
+  `.ocx`, `.sys`, `.drv`; never `.php` — anywhere beneath is `folder_has_executables`. Where an importer runs or reads
+  the document (`sendOrderDir` with has.exe or a BAT, the receipt folder with a receipt importer, the importers'
+  folders), `trustedWriters` count like anyone else: the lock-down caps them at read & execute too.
 - **A lock-down never grants anything, to anyone, on any entry** (review T2). On the folder and on every entry beneath
   — walked **by handle**, never following anything — it masks the DACL the entry already has: an allow entry, explicit
   or inherited, of any type, for SYSTEM, Administrators or TrustedInstaller stays as it is; one for a `trustedWriters`
@@ -570,6 +579,7 @@ actually changed.
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through) / more than 20 000 entries |
+| `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
 | `unsupported_os` | not Windows |

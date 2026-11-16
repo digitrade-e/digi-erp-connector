@@ -208,15 +208,16 @@ func (a *serverApp) Start() error {
 	// read in the background right after the start — never on its critical
 	// path — and, behind the link, a typed folder counts as refused until it
 	// has been read (fail closed).
-	guard := hasavshevet.NewFolderGuard(cfg, linkedBox(paths.DataDir()), folderWritersFn, logSvc)
+	guard := hasavshevet.NewFolderGuard(cfg, linkedBox(paths.DataDir()), folderWritersFn, importerWritersFn, logSvc)
 	queue := buildOrderQueue(cfg, dbConn, paths.DataDir(), counters, logSvc)
 	queue.UseFolderGuard(guard)
+	queue.UseImporterGuard(guard) // review T1: the importer is read before each run
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	queue.Start(queueCtx)
 	a.orderQueue = queue
 	a.queueCancel = queueCancel
 
-	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, guard.ReceiptCheck(cfg), logSvc)
+	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, guard.ReceiptCheck(cfg), func() error { return guard.Allowed(hasavshevet.KeyReceiptImporter) }, logSvc)
 	if err != nil {
 		logSvc.Error("receipt configuration", err)
 		a.Stop(context.Background())
@@ -406,7 +407,7 @@ func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, counters
 //
 // folderCheck, when set, is asked before anything is written into the
 // receipt folder (FolderGuard.ReceiptCheck): a refusal is 503 FOLDER_WRITABLE.
-func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, folderCheck func() error, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
+func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, folderCheck, importerCheck func() error, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
 	if !cfg.ReceiptsConfigured() {
 		return nil, nil
 	}
@@ -417,7 +418,7 @@ func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet
 	if c := counters.Receipts(); c != nil {
 		wc.Counter = c // the set the read routes report
 	}
-	wc.FolderCheck = folderCheck
+	wc.FolderCheck, wc.ImporterCheck = folderCheck, importerCheck
 	w, err := hasavshevet.NewReceiptWriter(wc, log)
 	if err != nil {
 		return nil, err

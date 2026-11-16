@@ -193,7 +193,8 @@ through digi-mcp:
    for a typed folder that was refused.
 
 Behind the link a typed folder others can write to gets nothing written (`503 FOLDER_WRITABLE`); the folders from
-before plan 087 are only warned about. [troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to).
+before plan 087 are only warned about. An importer others can change — has.exe or a BAT, its folder or one above,
+`trustedWriters` included — is not run behind the link (`503 IMPORTER_WRITABLE`, log `IMPORTER REFUSED`; review T1). [troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to).
 
 ## Rolling back
 

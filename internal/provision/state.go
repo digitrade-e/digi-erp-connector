@@ -631,7 +631,7 @@ func writableFolders(sys System, cfg *config.Config) []StateWritableFolder {
 	}
 	for _, f := range cfg.WriteFolders() {
 		all, err := sys.FolderWriters(f.Path)
-		who, trusted := splitTrusted(all, cfg.TrustedSIDs())
+		who, trusted := splitTrusted(all, cfg.TrustedSIDsFor(f.Path)) // none where an importer runs (review T1)
 		switch {
 		case err != nil:
 			out = append(out, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})

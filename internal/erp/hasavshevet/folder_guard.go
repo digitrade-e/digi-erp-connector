@@ -3,6 +3,7 @@ package hasavshevet
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,12 @@ import (
 //     folder-acl) restarts the service, which starts a fresh guard.
 // Reads run in the background: Allowed never waits on one.
 
+// The guard's keys for the importers (review T1): read before each run.
+const (
+	KeyOrderImporter   = "importer:orders"
+	KeyReceiptImporter = "importer:receipts"
+)
+
 // The guard's re-check intervals.
 const (
 	FolderRecheckRefused = time.Minute
@@ -57,8 +64,11 @@ const (
 )
 
 type guardedFolder struct {
-	f        config.WriteFolder
-	enforced bool // behind the link and typed: refused while writable or unknown
+	f    config.WriteFolder
+	file bool // an importer's file: read with the file walk (Writers), no trusted writer
+
+	trusted  map[string]bool // documents.trustedWriters, none where an importer runs (review T1)
+	enforced bool            // behind the link and typed: refused while writable or unknown
 	state    guardState
 	why      string
 	checked  time.Time
@@ -67,10 +77,10 @@ type guardedFolder struct {
 
 // FolderGuard is the daemon's view of the document folders' writers.
 type FolderGuard struct {
-	writers func(dir string) ([]dataacl.Writer, error)
-	trusted map[string]bool
-	log     logger.LoggerService
-	now     func() time.Time
+	writers     func(dir string) ([]dataacl.Writer, error)
+	fileWriters func(path string) ([]string, error)
+	log         logger.LoggerService
+	now         func() time.Time
 
 	mu      sync.Mutex
 	folders map[string]*guardedFolder // by typed key, or by name for the pre-087 folders
@@ -81,14 +91,26 @@ type FolderGuard struct {
 // NewFolderGuard guards cfg's document folders (config.WriteFolders); linked
 // says the box is behind the link. writers is dataacl.FolderWriters (tests
 // pass a fake). Nothing is read until Run (or a test's checkAll).
-func NewFolderGuard(cfg config.Config, linked bool, writers func(string) ([]dataacl.Writer, error), log logger.LoggerService) *FolderGuard {
-	g := &FolderGuard{writers: writers, trusted: cfg.TrustedSIDs(), log: log, now: time.Now, folders: map[string]*guardedFolder{}}
+//
+// fileWriters (dataacl.Writers) reads an importer file's writers — the file,
+// its folder, every folder above — for the importer entries
+// (KeyOrderImporter, KeyReceiptImporter; review T1): behind the link an
+// importer others can write to is not run; no trusted writer is exempt.
+func NewFolderGuard(cfg config.Config, linked bool, writers func(string) ([]dataacl.Writer, error), fileWriters func(string) ([]string, error), log logger.LoggerService) *FolderGuard {
+	g := &FolderGuard{writers: writers, fileWriters: fileWriters, log: log, now: time.Now, folders: map[string]*guardedFolder{}}
+	for key, p := range map[string]string{KeyOrderImporter: cfg.OrderImporter(), KeyReceiptImporter: cfg.ReceiptImporter()} {
+		if p != "" && fileWriters != nil {
+			g.folders[key] = &guardedFolder{f: config.WriteFolder{Name: "the " + strings.TrimPrefix(key, "importer:") + " importer", Path: p}, file: true, enforced: linked}
+			g.order = append(g.order, key)
+		}
+	}
+	sort.Strings(g.order)
 	for _, f := range cfg.WriteFolders() {
 		key := f.Key
 		if !f.Typed {
 			key = f.Name
 		}
-		g.folders[key] = &guardedFolder{f: f, enforced: linked && f.Typed}
+		g.folders[key] = &guardedFolder{f: f, trusted: cfg.TrustedSIDsFor(f.Path), enforced: linked && f.Typed}
 		g.order = append(g.order, key)
 	}
 	return g
@@ -115,6 +137,9 @@ func (g *FolderGuard) Allowed(key string) error {
 	}
 	if f.state == guardRefused && !f.checking && g.now().Sub(f.checked) >= FolderRecheckRefused {
 		g.startCheckLocked(key)
+	}
+	if f.file {
+		return fmt.Errorf("%w: %s (%s) — %s; not run", ErrImporterWritable, f.f.Name, f.f.Path, why)
 	}
 	return fmt.Errorf("%w: folder %s (%s) — %s; nothing reserved", ErrFolderWritable, key, f.f.Path, why)
 }
@@ -197,18 +222,24 @@ func (g *FolderGuard) startCheckLocked(key string) {
 func (g *FolderGuard) check(key string) {
 	g.mu.Lock()
 	f := g.folders[key]
-	path, name, enforced, before := f.f.Path, f.f.Name, f.enforced, f.state
+	path, name, enforced, before, trusted, file := f.f.Path, f.f.Name, f.enforced, f.state, f.trusted, f.file
 	g.mu.Unlock()
 
 	start := g.now()
-	all, err := g.writers(path)
-	took := g.now().Sub(start)
 	var who []string
-	for _, w := range all {
-		if !g.trusted[w.SID] {
-			who = append(who, w.Name)
+	var err error
+	if file {
+		who, err = g.fileWriters(path) // an importer: nobody exempt
+	} else {
+		var all []dataacl.Writer
+		all, err = g.writers(path)
+		for _, w := range all {
+			if !trusted[w.SID] {
+				who = append(who, w.Name)
+			}
 		}
 	}
+	took := g.now().Sub(start)
 	state, why := guardAllowed, ""
 	switch {
 	case err != nil:
@@ -231,6 +262,11 @@ func (g *FolderGuard) check(key string) {
 	case state == guardAllowed && before == guardRefused:
 		g.log.Info(fmt.Sprintf("FOLDER ALLOWED: %s (%s) is the administrators' only again: documents are written there", name, path))
 	case state == guardAllowed:
+	case enforced && file:
+		g.log.Error(fmt.Sprintf("IMPORTER REFUSED: %s (%s): %s, and this box is behind the link: it is not run (orders and receipts that need it answer 503 IMPORTER_WRITABLE, "+
+			"a queued order stays retryable) until only the administrators can change it and its folders; read again at most once a minute when it is needed.", name, path, why), nil)
+	case file:
+		g.log.Warn(fmt.Sprintf("IMPORTER WRITABLE: %s (%s): %s — the connector runs it as LocalSystem; let only the administrators change it and its folders.", name, path, why))
 	case enforced:
 		g.log.Error(fmt.Sprintf("FOLDER REFUSED: %s (%s): %s, and this box is behind the link: nothing is written there (503 FOLDER_WRITABLE) "+
 			"until only the administrators can write to it — lock it down (the folder-acl command) or trust the ERP's account (documents' trustedWriters); "+

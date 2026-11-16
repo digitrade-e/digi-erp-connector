@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -274,6 +275,128 @@ type WriteFolder struct {
 	// Receipts: receipts are written here (documents.receipts.folder's
 	// folder, or sendReceiptDir).
 	Receipts bool `json:"receipts,omitempty"`
+	// Executes (plan 087 review T1): the connector runs an importer here or
+	// from here — has.exe's working directory (sendOrderDir for orders, the
+	// receipt folder for receipts), or the folder of has.exe, a BAT or a
+	// parameter file. documents.trustedWriters are never exempt in such a
+	// folder: a trusted account that can write there can plant what the
+	// importer loads or runs as LocalSystem.
+	Executes bool `json:"executes,omitempty"`
+}
+
+// ImporterFolders are the folders the connector runs an importer in or
+// from (review T1): where the importer reads the document — sendOrderDir
+// when an order importer runs (has.exe's working directory; a BAT's importer
+// reads the order there too), the receipt folder when a receipt importer
+// runs (has.exe's working directory) — and the folders holding has.exe, the
+// BATs (cmd.exe's working directory) and the parameter files.
+func (c Config) ImporterFolders() []string {
+	var out []string
+	add := func(p string) {
+		if p = strings.TrimSpace(p); p != "" && filepath.IsAbs(p) {
+			out = append(out, p)
+		}
+	}
+	if c.OrderImporter() != "" {
+		add(c.SendOrderDir)
+	}
+	if c.ReceiptImporter() != "" {
+		add(c.ReceiptDir())
+	}
+	for _, f := range c.ImporterFiles() {
+		add(filepath.Dir(f))
+	}
+	return out
+}
+
+// OrderImporter is the file the connector runs after an order (model b): the
+// BAT, else has.exe; "" when none runs (model a, or no importer).
+func (c Config) OrderImporter() string {
+	if !c.OrdersConfigured() || c.OrdersPickup() {
+		return ""
+	}
+	if p := strings.TrimSpace(c.HasBatFile); p != "" {
+		return p
+	}
+	return strings.TrimSpace(c.HasExePath)
+}
+
+// ReceiptImporter is the file the connector runs after a receipt (model b):
+// the receipt BAT, else has.exe with the receipt parameter file; "" when
+// none runs.
+func (c Config) ReceiptImporter() string {
+	if !c.ReceiptsConfigured() {
+		return ""
+	}
+	if p := strings.TrimSpace(c.HasReceiptBatFile); p != "" {
+		return p
+	}
+	if strings.TrimSpace(c.HasReceiptParamFile) != "" {
+		return strings.TrimSpace(c.HasExePath)
+	}
+	return ""
+}
+
+// ImporterFiles are the importer files the connector runs or hands to
+// has.exe — for each importer that runs (OrderImporter, ReceiptImporter):
+// its BAT, or has.exe and its parameter file (a relative one is in has.exe's
+// working directory: sendOrderDir, the receipt folder). Files configured but
+// not run are not listed: a model (a) box's pickup folder, which the ERP's
+// scheduler must write to, is never taken for an importer's.
+func (c Config) ImporterFiles() []string {
+	var out []string
+	add := func(p, dir string) {
+		if p = strings.TrimSpace(p); p == "" {
+			return
+		}
+		if !filepath.IsAbs(p) { // has.exe reads a relative parameter file in its working directory
+			if dir = strings.TrimSpace(dir); dir == "" {
+				return
+			}
+			p = filepath.Join(dir, p)
+		}
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	if c.OrderImporter() != "" {
+		if bat := strings.TrimSpace(c.HasBatFile); bat != "" {
+			add(bat, "")
+		} else {
+			add(c.HasExePath, "")
+			add(c.HasParamFile, c.SendOrderDir)
+		}
+	}
+	if c.ReceiptImporter() != "" {
+		if bat := strings.TrimSpace(c.HasReceiptBatFile); bat != "" {
+			add(bat, "")
+		} else {
+			add(c.HasExePath, "")
+			add(c.HasReceiptParamFile, c.ReceiptDir())
+		}
+	}
+	return out
+}
+
+// ExecutesIn reports whether the connector runs an importer in or from dir
+// (ImporterFolders).
+func (c Config) ExecutesIn(dir string) bool {
+	fold := runtime.GOOS == "windows"
+	for _, p := range c.ImporterFolders() {
+		if sameDir(p, dir, fold) {
+			return true
+		}
+	}
+	return false
+}
+
+// TrustedSIDsFor is TrustedSIDs for folder dir: none where the connector
+// runs an importer (ExecutesIn; review T1).
+func (c Config) TrustedSIDsFor(dir string) map[string]bool {
+	if c.ExecutesIn(dir) {
+		return map[string]bool{}
+	}
+	return c.TrustedSIDs()
 }
 
 // WriteFolders lists every folder the connector writes documents into:
@@ -281,6 +404,14 @@ type WriteFolder struct {
 // has.exe runs) and the pickup folder when orders are configured, every typed
 // folder, and sendReceiptDir when receipts go there (no bound typed folder).
 func (c Config) WriteFolders() []WriteFolder {
+	out := c.writeFolders()
+	for i := range out {
+		out[i].Executes = c.ExecutesIn(out[i].Path)
+	}
+	return out
+}
+
+func (c Config) writeFolders() []WriteFolder {
 	var out []WriteFolder
 	if c.OrdersConfigured() {
 		out = append(out, WriteFolder{Name: "sendOrderDir", Path: strings.TrimSpace(c.SendOrderDir)})

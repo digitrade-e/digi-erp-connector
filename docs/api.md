@@ -103,6 +103,9 @@ Today's body plus an optional `documentRule` — which counter numbers the order
 - The counter's next number outside its range → `503 COUNTER_EXHAUSTED`; its store missing → `503 COUNTER_MISSING`.
 - Behind the link, a folder accounts besides the administrators can write to → `503 FOLDER_WRITABLE`, nothing
   reserved (the daemon checks at its start; a re-queue into it waits the same way).
+- Behind the link, an order without a rule whose importer (has.exe or the BAT — the file, its folder or one above) can
+  be changed by accounts besides the administrators → `503 IMPORTER_WRITABLE`, nothing reserved; an order the worker
+  meets it on stays retryable (review T1).
 - A resend of a retryable order whose folder's test flag changed since its reservation → `503 FOLDER_TEST_CHANGED`,
   nothing written; it stays retryable until the flag is back (review R2).
 - A connector older than v1.0.30 answers the route `404 NOT_FOUND` (nothing written). `/api/sendOrder` ignores
@@ -141,7 +144,7 @@ strictly: a missing or `null` key, an unknown field, a wrong type, a duplicate k
 or a key in the wrong case is a 400. Only a 400 is final for the backend; it
 retries anything else with the same key. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
-`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` / `FOLDER_WRITABLE` (503), `RECEIPT_CONFIG_INVALID` /
+`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` / `FOLDER_WRITABLE` / `IMPORTER_WRITABLE` (503), `RECEIPT_CONFIG_INVALID` /
 `RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
 `RECEIPT_WRITE_FAILED` (500). Full contract, field
 table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
@@ -194,6 +197,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `COUNTER_MISSING` | 503 | Plan 087: the counter's store does not exist where it fails closed (a counter of its own, or `lastOrderNumber.json` once counters are configured). Never 1 again; restore it or set it (`counters start-from` with `expectLast: -1`). |
 | `FOLDER_TEST_CHANGED` | 503 | Plan 087 review R2: the resend of a retryable order whose folder's test flag is no longer the one frozen at its reservation. Nothing written; the order stays retryable; resend once the flag is back (`state`'s `orders.folderTestChanged`). |
 | `FOLDER_WRITABLE` | 503 | Plan 087 review M1: behind the link, the order's typed folder (or the bound receipt folder) can be written by accounts besides the administrators, so the connector writes nothing there. Nothing reserved; resend with the same key once the folder is locked down and the service restarted ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). |
+| `IMPORTER_WRITABLE` | 503 | Plan 087 review T1: behind the link, the importer the order or receipt would run (has.exe or a BAT: the file, its folder or a folder above) can be changed by accounts besides the administrators — `trustedWriters` included — so the connector runs nothing and reserves nothing. Read before each run (the daemon's guard; a refused one again at most once a minute when needed). A queued order stays retryable. |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |

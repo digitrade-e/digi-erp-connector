@@ -62,8 +62,18 @@ func (b *guardBox) writers(dir string) ([]dataacl.Writer, error) {
 	return b.who[base], b.errs[base]
 }
 
+func (b *guardBox) fileWriters(path string) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for _, w := range b.who[filepath.Base(path)] {
+		out = append(out, w.Name)
+	}
+	return out, b.errs[filepath.Base(path)]
+}
+
 func (b *guardBox) guard(linked bool) *FolderGuard {
-	g := NewFolderGuard(b.cfg, linked, b.writers, b.log)
+	g := NewFolderGuard(b.cfg, linked, b.writers, b.fileWriters, b.log)
 	g.now = func() time.Time { b.mu.Lock(); defer b.mu.Unlock(); return b.now }
 	return g
 }
@@ -153,5 +163,36 @@ func TestFolderGuard(t *testing.T) {
 	off.checkAll()
 	if err := off.Allowed("herp_test"); err != nil {
 		t.Fatalf("off the link: %v", err)
+	}
+}
+
+// Review T1: a trusted writer counts where an importer runs (here the bound
+// receipt folder, has.exe's working directory in model b), and the importer
+// itself is read before each run with nobody exempt: behind the link a
+// writable one is not run.
+func TestFolderGuard_ImporterAndItsFolders(t *testing.T) {
+	b := newGuardBox(t)
+	b.cfg.HasExePath = filepath.Join(filepath.Dir(b.cfg.SendOrderDir), "Hash7", "has.exe")
+	b.cfg.HasReceiptParamFile = filepath.Join(filepath.Dir(b.cfg.SendOrderDir), "Hash7", "kupain.prm")
+	b.cfg.SendOrderPickupDir, b.cfg.SendOrderFormat = "", ""
+	b.who = map[string][]dataacl.Writer{"kupain": {schedulerW}, "has.exe": {schedulerW}}
+	g := b.guard(true)
+	g.checkAll()
+	if err := g.Allowed("herp_receipts"); !errors.Is(err, ErrFolderWritable) {
+		t.Errorf("the bound receipt folder where has.exe runs, written by a trusted account: %v, want refused", err)
+	}
+	for _, k := range []string{KeyOrderImporter, KeyReceiptImporter} {
+		if err := g.Allowed(k); !errors.Is(err, ErrImporterWritable) {
+			t.Errorf("%s written by the trusted account: %v, want IMPORTER_WRITABLE", k, err)
+		}
+	}
+	if !b.log.errored("IMPORTER REFUSED") {
+		t.Errorf("errors %v", b.log.errors)
+	}
+	// Off the link: run, with a warning.
+	off := b.guard(false)
+	off.checkAll()
+	if err := off.Allowed(KeyOrderImporter); err != nil {
+		t.Errorf("off the link: %v", err)
 	}
 }

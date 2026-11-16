@@ -52,6 +52,14 @@ var ErrCounterRetired = errors.New("counter retired")
 // ErrCounterLower is RaiseTo asked to move a counter back.
 var ErrCounterLower = errors.New("a counter never moves back")
 
+// ErrImporterWritable means the importer (has.exe or a BAT) — the file, its
+// folder or a folder above it — can be changed by accounts besides the
+// administrators, on a box behind the link: the connector does not run it
+// (plan 087 review T1; the daemon reads it before each run, through the
+// guard). Nothing is written or reserved; the routes answer it 503
+// IMPORTER_WRITABLE, and an order the worker meets it on stays retryable.
+var ErrImporterWritable = errors.New("IMPORTER_WRITABLE")
+
 // ErrFolderWritable means the document's folder is one accounts besides the
 // administrators can write to, on a box behind the link, so the connector
 // does not write into it (plan 087 review M1; the daemon checks at its

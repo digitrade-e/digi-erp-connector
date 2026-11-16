@@ -138,6 +138,10 @@ type Sender struct {
 	// Test seams for the importers; nil = runBatFile / runImporter.
 	runBat    func(ctx context.Context, batPath string) (int, string, error)
 	runHasExe func(ctx context.Context, hasExePath, paramFile, workDir string) (int, string, error)
+	// importerCheck, when set, is asked before a model (b) order's files are
+	// written: the importer must not be one others can change (plan 087
+	// review T1; the daemon's guard). A refusal leaves the order retryable.
+	importerCheck func() error
 }
 
 // NewSender creates a Sender. db and numberStore must be non-nil.
@@ -196,6 +200,16 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 			return nil, notWritten(fmt.Errorf("%w: order %d into folder %s: %s", ErrFolderTestChanged, orderNum, dest.Folder, why))
 		}
 		folder = &f
+	}
+
+	// Review T1: the importer a model (b) order runs is read first — before a
+	// number is taken or any file written, so a refusal leaves the order
+	// retryable.
+	if folder == nil && s.importerCheck != nil && s.cfg.OrderImporter() != "" {
+		if err := s.importerCheck(); err != nil {
+			s.log.Warn(fmt.Sprintf("order not written (number %d kept): %v", orderNum, err))
+			return nil, notWritten(err)
+		}
 	}
 
 	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field

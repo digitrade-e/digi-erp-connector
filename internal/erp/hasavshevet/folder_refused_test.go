@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
 
 // Plan 087 review M1: behind the link the daemon writes nothing into a typed
@@ -131,5 +134,59 @@ func TestGeneration_MovesAfterTheStore(t *testing.T) {
 	mustWrite(t, w, receiptFor(testKey(1)))
 	if atIndex != g0 || w.Generation() == g0 {
 		t.Fatalf("receipt: generation %d at the index save (before %d), %d after", atIndex, g0, w.Generation())
+	}
+}
+
+// importerRefusal is a guard that refuses the importers (review T1).
+type importerRefusal struct{}
+
+func (importerRefusal) Allowed(key string) error {
+	if strings.HasPrefix(key, "importer:") {
+		return fmt.Errorf("%w: %s can be changed by BFL\\wizsched", ErrImporterWritable, key)
+	}
+	return nil
+}
+
+// Review T1: behind the link an importer others can change is not run. The
+// worker reads it before any file of a model (b) order is written (the order
+// stays retryable); Accept refuses a rule-less order before reserving; a
+// receipt that would run the receipt importer is refused before reserving.
+func TestImporterRefused_NothingRunsNothingIsReserved(t *testing.T) {
+	h := newOrderHarness(t)
+	cfg := config.Config{ERP: config.ERPHasavshevet, SendOrderDir: h.sendDir, HasExePath: `C:\Hash7\has.exe`}
+	s := NewSender(nil, cfg, NewOrderNumberStore(filepath.Join(h.sendDir, "lastOrderNumber.json")), h.log)
+	ran := 0
+	s.runHasExe = func(context.Context, string, string, string) (int, string, error) { ran++; return 0, "", nil }
+	s.importerCheck = func() error { return importerRefusal{}.Allowed(KeyOrderImporter) }
+	_, err := s.processOrder(context.Background(), keyedOrder("k"), 5, nil)
+	if !errors.Is(err, ErrImporterWritable) || !errors.Is(err, ErrOrderNotWritten) || ran != 0 {
+		t.Fatalf("worker: %v (ran %d): want IMPORTER_WRITABLE, not written, not run", err, ran)
+	}
+	if _, err := os.Stat(filepath.Join(h.sendDir, "IMOVEIN.doc")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("IMOVEIN.doc was written")
+	}
+
+	q := NewOrderQueue(s, h.log)
+	q.UseKeyIndex(h.dataDir)
+	q.UseImporterGuard(importerRefusal{})
+	if err := q.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Accept(keyedOrder("k2")); !errors.Is(err, ErrImporterWritable) {
+		t.Fatalf("Accept: %v, want IMPORTER_WRITABLE", err)
+	}
+	if _, found, _ := (orderIndex{dir: OrderIndexDir(h.dataDir)}).load("k2"); found {
+		t.Error("an entry was reserved")
+	}
+
+	r := newReceiptHarness(t, 1000)
+	r.cfg.HasReceiptBatFile = `C:\Hash7\kupain.bat`
+	r.cfg.ImporterCheck = func() error { return importerRefusal{}.Allowed(KeyReceiptImporter) }
+	w := r.writer()
+	if _, err := w.Write(context.Background(), receiptFor(testKey(1))); !errors.Is(err, ErrImporterWritable) {
+		t.Fatalf("receipt: %v, want IMPORTER_WRITABLE", err)
+	}
+	if r.nextNumber() != 1000 || len(r.indexFiles()) != 0 {
+		t.Error("a receipt number was reserved")
 	}
 }
