@@ -105,6 +105,16 @@ func (a *applier) runService(in ServiceInput) error {
 				return refuse(CodeDependencyMissing, "name a SQL Server service installed on this machine (discover lists sql.instances[].service)",
 					"%s is not a service on this machine: the connector would not start after the next reboot", d)
 			}
+			// Review m1: a Disabled dependency fails the connector's next start (SCM dependency failure, which
+			// recovery does not retry), and this command restarts nothing, so it would never see it.
+			if strings.EqualFold(st.StartType, "disabled") {
+				return refuse(CodeDependencyDisabled, "set that SQL Server service's start type to Automatic first, or name the instance the database is on",
+					"%s is disabled: the connector would not start at its next start or reboot", d)
+			}
+			if st.State != "running" {
+				a.warn("%s is %s (start type %s): the service manager starts it with the connector, and the connector does not start if it cannot",
+					d, st.State, st.StartType)
+			}
 		}
 	}
 	depsChange := deps && !sameFold(want, a.svc.Dependencies)

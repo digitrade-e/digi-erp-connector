@@ -59,6 +59,7 @@ const (
 // Plan 086 B1's codes.
 const (
 	CodeDependencyMissing  = "dependency_missing"   // service: a dependency that is not a service on this machine
+	CodeDependencyDisabled = "dependency_disabled"  // service: a dependency whose start type is Disabled (review m1)
 	CodeReceiptStoreExists = "receipt_store_exists" // receipt-seed: the store exists (a seed is written once)
 	CodeReceiptSeedLow     = "receipt_seed_low"     // receipt-seed: at or below a receipt already written
 	CodeReceiptDirMissing  = "receipt_dir_missing"  // receipts: sendReceiptDir is not a folder here

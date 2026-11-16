@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 )
 
 // bflBox is the box of plan 083 §19: the service depends on MSSQLSERVER while
@@ -121,6 +123,10 @@ func TestApplyService_Refusals(t *testing.T) {
 		{"version", ServiceInput{Version: 3, ChangeSet: "cs-service-001", Recovery: true}, nil, CodeSpecInvalid},
 		{"an instance not on this machine", serviceInput([]string{"MSSQL$WIZSOFT"}, true), nil, CodeDependencyMissing},
 		{"service missing", serviceInput([]string{"MSSQL$WIZSOFT2017"}, false), func(s *fakeSys) { s.svc.Installed = false }, CodeServiceMissing},
+		// review m1: a Disabled dependency would stop the connector at the next start or reboot, unseen by this command
+		{"a disabled dependency", serviceInput([]string{"MSSQL$WIZSOFT2017"}, true), func(s *fakeSys) {
+			s.depState = map[string]autostart.ServiceInfo{"MSSQL$WIZSOFT2017": {Installed: true, State: "stopped", StartType: "disabled"}}
+		}, CodeDependencyDisabled},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +140,22 @@ func TestApplyService_Refusals(t *testing.T) {
 				t.Errorf("work was done before the refusal: calls %v, %+v", sys.calls, res)
 			}
 		})
+	}
+}
+
+// A dependency that is installed but not running (Manual, stopped) is accepted with a warning: the service manager
+// starts it with the connector.
+func TestApplyService_WarnsOfAStoppedDependency(t *testing.T) {
+	sys, fdb := bflBox(t)
+	sys.depState = map[string]autostart.ServiceInfo{"MSSQL$WIZSOFT2017": {Installed: true, State: "stopped", StartType: "manual"}}
+	for _, check := range []bool{true, false} {
+		res, err := ApplyService(context.Background(), testEnv(sys, fdb), serviceInput([]string{"MSSQL$WIZSOFT2017"}, false), check)
+		if err != nil {
+			t.Fatalf("check %v: %v", check, err)
+		}
+		if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "MSSQL$WIZSOFT2017 is stopped") }) {
+			t.Errorf("check %v: warnings %v", check, res.Warnings)
+		}
 	}
 }
 

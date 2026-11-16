@@ -109,6 +109,8 @@ type fakeSys struct {
 	daemonDBPass string
 	// failSecretOnce makes the next SecretSet of that key fail.
 	failSecretOnce string
+	// depState overrides an instance's service (its start type, its state).
+	depState map[string]autostart.ServiceInfo
 }
 
 func newFakeSys(t *testing.T, d *fakeDaemon) *fakeSys {
@@ -161,7 +163,10 @@ func (s *fakeSys) Service(name string) (autostart.ServiceInfo, error) {
 	}
 	for _, in := range s.instances {
 		if in.Service == name {
-			return autostart.ServiceInfo{Installed: true, State: "running", ProcessID: 900}, nil
+			if st, ok := s.depState[name]; ok {
+				return st, nil
+			}
+			return autostart.ServiceInfo{Installed: true, State: "running", StartType: "auto", ProcessID: 900}, nil
 		}
 	}
 	return autostart.ServiceInfo{}, nil

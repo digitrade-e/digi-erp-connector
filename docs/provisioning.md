@@ -282,8 +282,10 @@ names none, and fails it when it names one; without it, a config with no databas
 
 `dependOn` is the whole list of SQL Server services the daemon depends on (`MSSQLSERVER` or `MSSQL$<instance>`, at
 most 8; `[]` removes them all; left out keeps the list); `recovery: true` sets the restart-on-failure actions. Every
-dependency must be a service installed on this machine (`dependency_missing`): one that is not would stop the
-daemon starting at the next boot. The change set's pre-image keeps the dependencies before (`restore` puts them
+dependency must be a service installed on this machine (`dependency_missing`) and not Disabled
+(`dependency_disabled`): either would stop the daemon starting at the next start or boot, which this command never
+sees. One that is installed but not running (a Manual instance, stopped) is accepted with a warning: the service
+manager starts it with the connector. The change set's pre-image keeps the dependencies before (`restore` puts them
 back); the recovery actions are not in a pre-image. No restart: the service manager reads both at the next start.
 
 ## `firewall-remove`: closing the old inbound rules
@@ -369,6 +371,7 @@ actually changed.
 | `image_folder_forbidden` | behind the link, an image folder in a system folder or a user's `AppData` |
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
 | `dependency_missing` | `service`: a dependency that is not a service on this machine |
+| `dependency_disabled` | `service`: a dependency whose start type is Disabled |
 | `receipt_dir_missing` | `receipts`: `sendReceiptDir` is not a folder on this machine |
 | `receipt_store_exists`, `receipt_seed_low` | `receipt-seed`: the store exists already / N is at or below a receipt already written |
 | `unsupported_os` | not Windows |
