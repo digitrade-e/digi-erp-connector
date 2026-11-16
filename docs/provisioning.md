@@ -387,10 +387,14 @@ handle (`dataacl.OpenRead`): a reparse point, a multiply-linked file or a file w
 directory is refused (`log_unreadable`), never followed. `events-daemon` / `events-link` read the Application Event
 Log of `digi-erp-connectord` / `digi-erp-connector-link` (Get-WinEvent, fixed script). A line without a time of its
 own (a continuation) has the time of the line above it. Every line is redacted before it is measured: every form of
-this box's own secrets (`config.yaml`'s API password and signing secret, the database passwords in the secret store),
-`Authorization` and bearer values, JWTs, `password`/`secret`/`token`/`api_key`/`pairCode` values in `k=v`, `k: v`,
-`"k":"v"` and T-SQL `PASSWORD = N'…'` forms, a connection string's `Password=…;`, a URL's password, DPAPI blobs.
-Lines are cut at 4 KiB; at most 64 MiB is read backwards per answer.
+this box's own secrets (`config.yaml`'s API password and signing secret, the database passwords in the secret store
+— as given, URL-escaped, JSON-escaped, T-SQL-doubled), `Authorization` and bearer values, JWTs, the value of any key
+holding `password`/`passwd`/`pwd`/`secret`/`token`/`api_key`/`pairCode` (`dbPassword`, `DB_PASSWORD`, `X-Api-Key`,
+`secretKey` too) in `k=v`, `k: v`, `"k":"v"` and T-SQL `PASSWORD = N'…'` forms — a quoted value to its real end
+(`''` and `\"` inside it), an unquoted one to the next `;` or `&` or the end of the line, so a password with spaces
+goes whole — sqlcmd's `-P`, a URL's password (up to the last `@`), DPAPI blobs. A line longer than 256 KiB is not
+shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; at most 64 MiB is read backwards per
+answer.
 
 **`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
 the credential in `config.yaml` (an error says so when the daemon runs another one). `missingKeys` are the keys the

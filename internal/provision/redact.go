@@ -15,7 +15,9 @@ const Redacted = "[redacted]"
 
 // redactForms is every form a secret can take in text that reached us: as
 // given, and as a URL escapes it — in the userinfo of a DSN (what a driver's
-// parse error quotes), in a path, in a query. Longest first, so a form that
+// parse error quotes), in a path, in a query; as JSON escapes it (with and
+// without the HTML escapes, non-ASCII as \u, and JSON inside JSON), and as
+// T-SQL doubles its quotes (review m2). Longest first, so a form that
 // contains another is not left half replaced.
 func redactForms(secrets []string) []string {
 	seen := map[string]bool{}
@@ -34,9 +36,28 @@ func redactForms(secrets []string) []string {
 		add(strings.TrimPrefix(url.UserPassword("x", s).String(), "x:"))
 		add(url.PathEscape(s))
 		add(url.QueryEscape(s))
+		add(strings.ReplaceAll(s, "'", "''"))
+		for _, html := range []bool{true, false} {
+			j := jsonEscape(s, html)
+			add(j)
+			add(string(asciiOnly([]byte(j))))
+			add(jsonEscape(j, html))
+		}
 	}
 	sort.Slice(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
 	return forms
+}
+
+// jsonEscape is s as it appears inside a JSON string, without the quotes.
+func jsonEscape(s string, html bool) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(html)
+	if err := enc.Encode(s); err != nil {
+		return s
+	}
+	out := strings.TrimSuffix(buf.String(), "\n")
+	return strings.TrimSuffix(strings.TrimPrefix(out, `"`), `"`)
 }
 
 // Redact replaces every form of every secret in s with Redacted.

@@ -256,6 +256,78 @@ func TestLogs_EventLog(t *testing.T) {
 	}
 }
 
+// Review m2: what the patterns missed. Each line's secret must not survive, and the parts that are not secret should.
+func TestRedactLogLine_ReviewGaps(t *testing.T) {
+	box := `Bo"x\Pa's<s>&ש` // the box's own secret, with every character an escaper changes
+	jsonForm, _ := json.Marshal(box)
+	for _, c := range []struct {
+		name, line, secret, keep string
+	}{
+		{"a connection string password with spaces", "dsn Server=x;Password=my pass word;Database=erp", "pass word", "Database=erp"},
+		{"camelCase key", "cfg dbPassword=S3cret-db1 next", "S3cret-db1", "cfg"},
+		{"upper snake key", "env DB_PASSWORD=S3cret-db2", "S3cret-db2", "env"},
+		{"a new_password", `{"new_password":"S3cret-db3","user":"x"}`, "S3cret-db3", "new_password"},
+		{"OLD_PASSWORD", "OLD_PASSWORD: S3cret-db4", "S3cret-db4", "OLD_PASSWORD"},
+		{"secretKey", "secretKey=S3cret-db5", "S3cret-db5", "secretKey"},
+		{"X-Api-Key header", "GET /x X-Api-Key: S3cret-db6", "S3cret-db6", "GET /x"},
+		{"a yaml path", "auth.password: S3cret-db7", "S3cret-db7", "auth."},
+		{"T-SQL doubled quote", "ALTER LOGIN x WITH PASSWORD = N'ab''S3cret-db8'", "S3cret-db8", "ALTER LOGIN"},
+		{"JSON escaped quote", `body {"password":"ab\"S3cret-db9"}`, "S3cret-db9", "body"},
+		{"JSON inside JSON", `msg "{\"password\":\"S3cret-dbA\"}"`, "S3cret-dbA", "msg"},
+		{"sqlcmd -P", `sqlcmd -S . -U sa -P S3cret-dbB -Q "select 1"`, "S3cret-dbB", "-U sa"},
+		{"sqlcmd -P quoted", `sqlcmd -U sa -P "S3cret dbC" -d erp`, "dbC", "-U sa"},
+		{"a proxy URL with an unescaped @", "proxyconnect http://svc:p@ss-S3cretD@proxy.b4l.local:3128: refused", "S3cretD", "proxy.b4l.local:3128"},
+		{"an ODBC brace value", "PWD={ab}}S3cretE};UID=sa", "S3cretE", "UID=sa"},
+		{"the box's secret JSON-escaped", `body {"x":` + string(jsonForm) + `}`, "Pa", "body"},
+		{"the box's secret JSON-escaped without HTML escapes", `body {"x":"Bo\"x\\Pa's<s>&ש"}`, "Pa", "body"},
+		{"the box's secret T-SQL doubled", "PASSWORD = N'" + strings.ReplaceAll(box, "'", "''") + "'", "Pa", "PASSWORD"},
+		{"the box's secret T-SQL doubled, no key", "exec x 'Bo\"x\\Pa''s<s>&ש'", "Pa''s", "exec x"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := redactLogLine(c.line, []string{box})
+			if strings.Contains(got, c.secret) || !strings.Contains(got, Redacted) {
+				t.Fatalf("leaked: %q -> %q", c.line, got)
+			}
+			if !strings.Contains(got, c.keep) {
+				t.Fatalf("took too much: %q -> %q", c.line, got)
+			}
+		})
+	}
+	// routes and plain words stay
+	for _, line := range []string{"rejected /auth/token: user=digi-hub", "GET /api/sendOrder 202", "the token store is ready"} {
+		if got := redactLogLine(line, nil); got != line {
+			t.Errorf("%q -> %q", line, got)
+		}
+	}
+}
+
+// Review m2: a line longer than maxCarry reached the redaction in pieces, and a secret across the cut escaped the
+// literal match. Such a line is not shown at all.
+func TestReverseLinesNeverShowsAPieceOfAnOverlongLine(t *testing.T) {
+	secret := "S3cret-across-the-cut"
+	long := strings.Repeat("a", 3*reverseChunk) + secret + strings.Repeat("b", maxCarry)
+	p := filepath.Join(t.TempDir(), "f")
+	_ = os.WriteFile(p, []byte("first\n"+long+"\nlast\n"), 0o600)
+	f, _ := os.Open(p)
+	defer f.Close()
+	fi, _ := f.Stat()
+	r := &reverseLines{f: f, pos: fi.Size()}
+	var got []string
+	for {
+		l, ok, err := r.next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		got = append(got, l)
+	}
+	if len(got) != 3 || got[0] != "last" || got[1] != overlongLine || got[2] != "first" {
+		t.Fatalf("got %d lines: %.80q", len(got), got)
+	}
+}
+
 func TestReverseLines(t *testing.T) {
 	for _, c := range []struct{ name, text, want string }{
 		{"empty", "", ""},

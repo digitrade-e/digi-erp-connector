@@ -106,8 +106,10 @@ relay, the box id and whether commands are on; `fingerprint` prints it again.
 
 **`logs` and `state` cross the relay signed, not sealed** (plan 086 D1): the same trust as the data path. Nothing
 secret leaves this server: every log line is redacted here first (this box's own API password, signing secret and
-database passwords in every form, `Authorization`/bearer values, JWTs, `password=`/`secret`/`token` values, a
-connection string's `Password=…;`, a URL's password, DPAPI blobs), and `state` reports no secret at all. Logs are read
+database passwords in every form — URL-, JSON- and T-SQL-escaped included — `Authorization`/bearer values, JWTs, the
+value of any `…password…`/`…secret…`/`…token…`/`…api-key…` key to its end, a connection string's `Password=…;`,
+sqlcmd's `-P`, a URL's password, DPAPI blobs; a line over 256 KiB is not shown), and `state` reports no secret at
+all. Logs are read
 by handle only: a link, a hard link or a file outside the data directory in a log's place is refused, never followed.
 
 **The data path follows the daemon.** The link reads the daemon's address, TLS and certificate from `config.yaml`

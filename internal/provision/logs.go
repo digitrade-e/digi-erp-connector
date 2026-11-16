@@ -375,12 +375,17 @@ type reverseLines struct {
 	ready [][]byte // whole lines, the newest last
 	read  int64
 	first bool // the file's last line has been seen (a trailing newline makes no empty line)
+	cut   bool // the carry overflowed: the line it belongs to was replaced by overlongLine, its head is dropped
 }
 
 const (
 	reverseChunk = 64 << 10
-	maxCarry     = 256 << 10 // a line longer than this is cut where the chunk began
+	maxCarry     = 256 << 10 // a line longer than this is not shown (overlongLine)
 )
+
+// overlongLine stands for a line longer than maxCarry (review m2): it would reach the redaction in pieces, and a
+// secret across a cut would escape the literal match, so no piece of it is shown.
+const overlongLine = "[a line longer than 256 KiB: not shown]"
 
 func (r *reverseLines) next() (string, bool, error) {
 	for len(r.ready) == 0 {
@@ -390,6 +395,10 @@ func (r *reverseLines) next() (string, bool, error) {
 			}
 			line := r.carry
 			r.carry = nil
+			if r.cut { // the head of an overlong line, which overlongLine already stands for
+				r.cut = false
+				return "", false, nil
+			}
 			return trimCR(line), true, nil
 		}
 		n := int64(reverseChunk)
@@ -414,9 +423,17 @@ func (r *reverseLines) next() (string, bool, error) {
 				r.carry = nil
 			}
 		}
+		if r.cut && len(whole) > 0 {
+			// the newest whole line holds the old carry: the head of the overlong line
+			whole = whole[:len(whole)-1]
+			r.cut = false
+		}
 		r.ready = append(r.ready, whole...)
 		if len(r.carry) > maxCarry {
-			r.ready = append([][]byte{r.carry}, r.ready...)
+			if !r.cut {
+				r.ready = append([][]byte{[]byte(overlongLine)}, r.ready...)
+			}
+			r.cut = true
 			r.carry = []byte{}
 		}
 	}
@@ -460,7 +477,11 @@ func boxSecrets(env Env) []string {
 
 // The secret-shaped parts of a log line (plan 086 D1): an Authorization header's value, a bearer token, a JWT, the
 // value of a password / secret / token key in any of the usual spellings (key=value, key: value, "key":"value",
-// a connection string's Password=...;, T-SQL's PASSWORD = N'...'), a URL's password, and DPAPI blobs (base64 or hex).
+// a connection string's Password=...;, T-SQL's PASSWORD = N'...'), sqlcmd's -P, a URL's password, and DPAPI blobs
+// (base64 or hex). Review m2: a key is any word holding one of the names (dbPassword, DB_PASSWORD, new_password,
+// X-Api-Key, secretKey); a quoted value runs to its real end (T-SQL's ” and JSON's \" stay inside it); an unquoted one
+// runs to the next ; or & or the end of the line — a password with spaces is redacted whole, at the price of more text
+// than the value now and then.
 var logRedactions = []struct {
 	re   *regexp.Regexp
 	with string
@@ -469,8 +490,12 @@ var logRedactions = []struct {
 	{regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9\-._~+/]+=*`), `${1} ` + Redacted},
 	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`), Redacted},
 	// the key stands alone: "/auth/token: user=x" names a route, not a token
-	{regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_/.-])((?:password|passwd|pwd|secret|token|access_token|refresh_token|api[_-]?key|client[_-]?secret|authpassword|pairCode)["']?\s*[:=]\s*)(N?'[^']*'|"[^"]*"|\{[^}]*\}|[^\s,;&}"']+)`), `${1}${2}` + Redacted},
-	{regexp.MustCompile(`(://[^/\s:@]+:)[^@\s/]+@`), `${1}` + Redacted + `@`},
+	{regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_/-])([A-Za-z0-9_-]*(?:password|passwd|pwd|secret|token|api[_-]?key|pairCode)[A-Za-z0-9_-]*\\?["']?\s*[:=]\s*)` +
+		`(N?'(?:[^']|'')*(?:'|$)|"(?:[^"\\]|\\.)*(?:"|$)|\{(?:[^}]|\}\})*(?:\}|$)|[^;&\r\n]+)`), `${1}${2}` + Redacted},
+	// sqlcmd / bcp / osql: -P <password>
+	{regexp.MustCompile(`(\s-P\s+)("(?:[^"\\]|\\.)*(?:"|$)|'(?:[^']|'')*(?:'|$)|\S+)`), `${1}` + Redacted},
+	// a URL's password up to the last @ of the authority: an unescaped @ inside it leaves nothing behind
+	{regexp.MustCompile(`(://[^/\s:@]+:)[^\s/]*@`), `${1}` + Redacted + `@`},
 	{regexp.MustCompile(`AQAAANCMnd8BFdERjHoAwE/Cl\+sBAAAA[A-Za-z0-9+/=]*`), Redacted},
 	{regexp.MustCompile(`(?i)01000000d08c9ddf0115d1118c7a00c04fc297eb[0-9a-f]*`), Redacted},
 }
