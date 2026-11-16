@@ -349,7 +349,10 @@ The rule is read on **`POST /api/v2/sendOrder` only**. An older connector answer
 name), and `/api/sendOrder` ignores the key as before. No rule = exactly today's output (the DIG-1295 precedent).
 
 Before anything is reserved (else `400 VALIDATION_ERROR`, `details.field` `documentRule/<key>`): the object's keys
-are exactly `v`, `temporary`, `folder`, `counter` (case-sensitive, each once); `v` the number `1`; `folder` an orders
+are exactly `v`, `temporary`, `folder`, `counter` (case-sensitive, each once); `v` the number `1`; `temporary` a
+JSON boolean or the string `"true"`/`"false"` (any case), `"1"`/`"0"` (review R8: the B2B casts only INT, FLOAT and
+BOOLEAN outbound values, and ERP-manager's boolean constant type is BOOL — normalised at decode, so `"true"` and
+`true` are the same frozen rule); `folder` an orders
 folder and `counter` an orders counter configured on the box; a **test counter only into a test folder** (a test
 number must never reach the production books) and **a test folder only from a test counter** (review m10: a
 production number there is a real order the books never import, and a gap in the production series); `temporary: true` only on a folder with a temporary prefix; a retired

@@ -83,8 +83,10 @@ Today's body plus an optional `documentRule` — which counter numbers the order
 ```
 
 - No rule (absent or `null`) = exactly `/api/sendOrder`'s answer and output.
-- Strict: an unknown, duplicate or wrong-case key, a value of the wrong type (`temporary` a JSON boolean, `folder` /
-  `counter` non-empty strings), `v` other than the number `1` → `400 VALIDATION_ERROR`, `details.field`
+- Strict: an unknown, duplicate or wrong-case key, a value of the wrong type (`folder` / `counter` non-empty strings;
+  `temporary` a JSON boolean, or — review R8, as the B2B sends ERP-manager's BOOL constants — exactly the string
+  `"true"` or `"false"` in any case, `"1"` or `"0"`, normalised so a repeat in the other spelling is the same rule),
+  `v` other than the number `1` → `400 VALIDATION_ERROR`, `details.field`
   `documentRule/<key>`. An unknown folder or counter, one of the wrong kind, a test counter into a folder that is not
   a test folder or a production counter into a test folder (`documentRule/counter`, review m10), `temporary: true` on
   a folder without a temporary prefix, a retired counter → 400 the same way (for a new order: a repeat is answered by

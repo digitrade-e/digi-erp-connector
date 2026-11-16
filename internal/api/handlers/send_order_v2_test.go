@@ -182,7 +182,7 @@ func TestSendOrderV2_Refusals(t *testing.T) {
 		{"folder missing", `{"v":1,"counter":"b2b"}`, 400, "documentRule/folder"},
 		{"folder a number", `{"v":1,"folder":5,"counter":"b2b"}`, 400, "documentRule/folder"},
 		{"counter empty", `{"v":1,"folder":"herp","counter":""}`, 400, "documentRule/counter"},
-		{"temporary a string", `{"v":1,"folder":"herp","counter":"b2b","temporary":"false"}`, 400, "documentRule/temporary"},
+		{"temporary another string", `{"v":1,"folder":"herp","counter":"b2b","temporary":"yes"}`, 400, "documentRule/temporary"},
 		{"unknown folder", `{"v":1,"folder":"nope","counter":"b2b"}`, 400, "documentRule/folder"},
 		{"folder as a path", `{"v":1,"folder":"C:\\xampp\\htdocs\\herp","counter":"b2b"}`, 400, "documentRule/folder"},
 		{"receipts folder", `{"v":1,"folder":"herp_receipts","counter":"b2b"}`, 400, "documentRule/folder"},
@@ -508,5 +508,59 @@ func TestSendOrderError_FolderTestChanged(t *testing.T) {
 	writeSendOrderError(w, fmt.Errorf("%w: order 9000000 into folder herp_test", hasavshevet.ErrFolderTestChanged))
 	if w.Code != http.StatusServiceUnavailable || decodeBody(t, w)["code"] != "FOLDER_TEST_CHANGED" {
 		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}
+
+// Review R8: documentRule.temporary also comes as text — the B2B casts only
+// INT, FLOAT and BOOLEAN outbound values, and ERP-manager's boolean constant
+// type is BOOL, so a constant line arrives as "true"/"false". Accepted: a
+// JSON boolean, or exactly "true"/"false" (any case), "1", "0"; normalised,
+// so a repeat in the other spelling is the same rule. Anything else is 400,
+// nothing reserved.
+func TestSendOrderV2_TemporaryAsText(t *testing.T) {
+	for raw, want := range map[string]string{
+		`true`: "TMP_IMOVEIN_1000123.doc", `"true"`: "TMP_IMOVEIN_1000123.doc", `"TRUE"`: "TMP_IMOVEIN_1000123.doc",
+		`"True"`: "TMP_IMOVEIN_1000123.doc", `"1"`: "TMP_IMOVEIN_1000123.doc",
+		`false`: "IMOVEIN_1000123.doc", `"false"`: "IMOVEIN_1000123.doc", `"FALSE"`: "IMOVEIN_1000123.doc", `"0"`: "IMOVEIN_1000123.doc",
+		`null`: "IMOVEIN_1000123.doc",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			b := newV2Box(t)
+			w := postJSON(t, NewSendOrderV2Handler(b.queue, b.cfg), "/api/v2/sendOrder",
+				orderWithRule(t, "tmp", `{"v":1,"folder":"herp","counter":"b2b","temporary":`+raw+`}`))
+			if m := decodeBody(t, w); w.Code != http.StatusAccepted || m["fileName"] != want {
+				t.Fatalf("temporary %s: %d %s, want %s", raw, w.Code, w.Body, want)
+			}
+		})
+	}
+	for _, raw := range []string{`"yes"`, `""`, `"2"`, `"t"`, `" true"`, `"true "`, `1`, `0`, `"01"`, `{}`, `["true"]`} {
+		t.Run("refused "+raw, func(t *testing.T) {
+			b := newV2Box(t)
+			w := postJSON(t, NewSendOrderV2Handler(b.queue, b.cfg), "/api/v2/sendOrder",
+				orderWithRule(t, "tmp", `{"v":1,"folder":"herp","counter":"b2b","temporary":`+raw+`}`))
+			if details, _ := decodeBody(t, w)["details"].(map[string]any); w.Code != http.StatusBadRequest || details["field"] != "documentRule/temporary" {
+				t.Fatalf("temporary %s: %d %s", raw, w.Code, w.Body)
+			}
+			if c, _ := b.set.Get("b2b"); c != nil {
+				if last, _ := c.Last(); last != 1_000_122 {
+					t.Errorf("b2b moved to %d", last)
+				}
+			}
+		})
+	}
+	// A repeat in the other spelling is the same rule; the other value is not.
+	b := newV2Box(t)
+	h := NewSendOrderV2Handler(b.queue, b.cfg)
+	if w := postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "rep", `{"v":1,"folder":"herp","counter":"b2b","temporary":"true"}`)); w.Code != http.StatusAccepted {
+		t.Fatalf("first: %d %s", w.Code, w.Body)
+	}
+	for _, raw := range []string{`true`, `"1"`, `"TRUE"`} {
+		w := postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "rep", `{"v":1,"folder":"herp","counter":"b2b","temporary":`+raw+`}`))
+		if m := decodeBody(t, w); w.Code != http.StatusAccepted || m["replay"] != true {
+			t.Errorf("repeat with temporary %s: %d %s, want a replay", raw, w.Code, w.Body)
+		}
+	}
+	if w := postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "rep", `{"v":1,"folder":"herp","counter":"b2b","temporary":"0"}`)); w.Code != http.StatusConflict {
+		t.Errorf("repeat with temporary \"0\": %d %s, want 409", w.Code, w.Body)
 	}
 }

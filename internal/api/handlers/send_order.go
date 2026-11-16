@@ -256,8 +256,8 @@ func newSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool, v
 
 // parseDocumentRule reads the documentRule object (plan 087): nil for absent
 // or null; otherwise every key known, given once and in its case, v the
-// number 1, folder and counter non-empty strings, temporary a boolean (absent
-// or null = false). A *FieldError names "documentRule" or
+// number 1, folder and counter non-empty strings, temporary a boolean or its
+// text (parseTemporary; absent or null = false). A *FieldError names "documentRule" or
 // "documentRule/<key>"; a value is never echoed.
 func parseDocumentRule(raw json.RawMessage) (*hasavshevet.DocumentRule, *hasavshevet.FieldError) {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -295,14 +295,38 @@ func parseDocumentRule(raw json.RawMessage) (*hasavshevet.DocumentRule, *hasavsh
 			return nil, &hasavshevet.FieldError{Field: "documentRule/" + f.name, Reason: "is required: a key configured on this connector, as a string"}
 		}
 	}
-	switch string(in.Temporary) {
-	case "", "null", "false":
-	case "true":
-		rule.Temporary = true
-	default:
-		return nil, &hasavshevet.FieldError{Field: "documentRule/temporary", Reason: "must be true or false"}
+	t, ok := parseTemporary(in.Temporary)
+	if !ok {
+		return nil, &hasavshevet.FieldError{Field: "documentRule/temporary", Reason: `must be true or false (a JSON boolean, or one of the strings "true", "false", "1", "0")`}
 	}
+	rule.Temporary = t
 	return rule, nil
+}
+
+// parseTemporary reads documentRule.temporary (review R8): absent or null is
+// false; a JSON boolean; or — because the B2B casts only INT, FLOAT and
+// BOOLEAN outbound values, and ERP-manager's boolean constant type is BOOL —
+// a string that is exactly "true" or "false" in any case, "1" or "0". It is
+// normalised here: the frozen rule keeps the boolean, so "true" and true are
+// the same rule on a repeat. Anything else is refused, never guessed.
+func parseTemporary(raw json.RawMessage) (temporary, ok bool) {
+	switch string(raw) {
+	case "", "null", "false":
+		return false, true
+	case "true":
+		return true, true
+	}
+	var s string
+	if raw[0] != '"' || json.Unmarshal(raw, &s) != nil {
+		return false, false
+	}
+	switch {
+	case strings.EqualFold(s, "true") || s == "1":
+		return true, true
+	case strings.EqualFold(s, "false") || s == "0":
+		return false, true
+	}
+	return false, false
 }
 
 // applyDocumentFields parses the optional document fields of the wire request
