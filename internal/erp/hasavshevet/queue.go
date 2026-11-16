@@ -527,7 +527,8 @@ func (q *OrderQueue) Accept(req OrderRequest) (Acceptance, error) {
 		return q.acceptUnkeyedLocked(req)
 	}
 	acc, err := q.acceptKeyedLocked(req)
-	if err != nil && !errors.Is(err, ErrQueueFull) {
+	var fe *FieldError
+	if err != nil && !errors.Is(err, ErrQueueFull) && !errors.As(err, &fe) { // a 400 is the request's, not the box's
 		q.log.Error(fmt.Sprintf("sendOrder historyId=%q not accepted", req.HistoryID), err)
 	}
 	return acc, err
@@ -536,6 +537,9 @@ func (q *OrderQueue) Accept(req OrderRequest) (Acceptance, error) {
 func (q *OrderQueue) acceptUnkeyedLocked(req OrderRequest) (Acceptance, error) {
 	if req.Rule != nil {
 		return Acceptance{}, errors.New("an order with a documentRule needs the order index (historyId is its key)")
+	}
+	if err := q.validateNew(req); err != nil {
+		return Acceptance{}, err
 	}
 	if len(q.ch) >= cap(q.ch) {
 		return Acceptance{}, fmt.Errorf("%w (capacity %d)", ErrQueueFull, defaultQueueSize)
@@ -552,11 +556,12 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 	if key == "" {
 		return Acceptance{}, errors.New("historyId is required: it is the order's idempotency key")
 	}
-	c, err := q.counterForRequest(req)
-	if err != nil {
-		return Acceptance{}, err
-	}
 
+	// The index first (review m3): a repeat is answered against what was
+	// frozen at its reservation — the rule's keys need not exist on the box
+	// any more (a folder removed with nothing in flight, a restore, the
+	// implicit "orders" key adopted under another name): it replays, re-queues
+	// or answers 409, never a 400 that reads as "order refused".
 	e, found, err := q.index.load(key)
 	if err != nil {
 		return Acceptance{}, err
@@ -580,6 +585,15 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 		return q.replay(e, req), nil
 	}
 
+	// A new reservation: only now are the rule and the layout checked
+	// against the box, and the counter read.
+	if err := q.validateNew(req); err != nil {
+		return Acceptance{}, err
+	}
+	c, err := q.counterForRequest(req)
+	if err != nil {
+		return Acceptance{}, err
+	}
 	if c.Retired {
 		return Acceptance{}, fmt.Errorf("%w: counter %s issues no new number", ErrCounterRetired, c.Key)
 	}
@@ -656,6 +670,30 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 	}
 	acc.Rule = e.Rule.applied(n)
 	return acc, nil
+}
+
+// validateNew checks a new order against the box before anything is
+// reserved (review m3: a repeat never is): its documentRule's keys
+// (ResolveRule) and the layout its destination writes (ValidateLayout). Every
+// refusal is a *FieldError — the route's 400 VALIDATION_ERROR with
+// details.field.
+func (q *OrderQueue) validateNew(req OrderRequest) error {
+	if req.Rule != nil {
+		if q.sender == nil {
+			return fmt.Errorf("%w: the queue has no sender to resolve it against", ErrDocumentRuleInvalid)
+		}
+		if err := ResolveRule(q.sender.cfg, *req.Rule); err != nil {
+			return err
+		}
+	}
+	if err := q.ValidateLayout(req); err != nil {
+		var fe *FieldError
+		if !errors.As(err, &fe) {
+			return &FieldError{Field: "body", Reason: err.Error()}
+		}
+		return err
+	}
+	return nil
 }
 
 // counterForRequest is the counter that numbers req: the one its rule names,

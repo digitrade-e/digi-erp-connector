@@ -92,7 +92,10 @@ Today's body plus an optional `documentRule` — which counter numbers the order
   the file name in the folder (the folder's pattern; `temporary` applies its prefix) and the folder's key. On a
   replay, the rule frozen at reservation.
 - A repeat of a `historyId` with another rule (or none, through `/api/sendOrder`) → `409 DOCUMENT_RULE_CONFLICT`,
-  nothing written: the rule is fixed when the number is reserved.
+  nothing written: the rule is fixed when the number is reserved. A repeat is looked up **before** the rule's keys are
+  checked: a known key replays (or re-queues, or answers 409) by its frozen rule even when its folder or counter key
+  no longer exists on the box; the keys-and-layout 400s are for new orders only (both routes: a v1 repeat no longer
+  meets today's layout check either).
 - The counter's next number outside its range → `503 COUNTER_EXHAUSTED`; its store missing → `503 COUNTER_MISSING`.
 - Behind the link, a folder accounts besides the administrators can write to → `503 FOLDER_WRITABLE`, nothing
   reserved (the daemon checks at its start; a re-queue into it waits the same way).

@@ -40,8 +40,9 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 
 // NewSendOrderV2Handler is POST /api/v2/sendOrder (plan 087, DIG-1563):
 // today's sendOrder plus an optional documentRule — which counter numbers the
-// order and which typed folder it goes to, by key — resolved against cfg's
-// documents block before anything is reserved. No rule = exactly
+// order and which typed folder it goes to, by key — resolved against the
+// box's documents block before anything is reserved (a repeat of a known
+// historyId is answered against its frozen rule instead: review m3). No rule = exactly
 // /api/sendOrder's answer and output. A connector older than v1.0.30 answers
 // this route 404 (nothing written), so a caller never has its rule dropped.
 //
@@ -200,33 +201,20 @@ func newSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool, v
 			return
 		}
 
-		// The documentRule (plan 087, v2 only): parsed strictly and resolved
-		// against the box before anything is reserved.
+		// The documentRule (plan 087, v2 only): parsed strictly here. Its keys
+		// — and the layout this connector writes (sendOrderFormat legacy,
+		// DIG-1297, or the rule's folder's layout), which may be narrower than
+		// a number: refused, never cut — are checked against the box by
+		// Accept, and only for a new order (review m3): a repeat of a known
+		// historyId is answered against the rule frozen at its reservation,
+		// even when the folder or counter key is gone.
 		if v2 != nil {
 			rule, fe := parseDocumentRule(req.DocumentRule)
-			if fe == nil && rule != nil {
-				if err := hasavshevet.ResolveRule(*v2, *rule); err != nil {
-					fe = asFieldError(err, "documentRule")
-				}
-			}
 			if fe != nil {
 				respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
 				return
 			}
 			orderReq.Rule = rule
-		}
-
-		// The layout this connector writes (sendOrderFormat legacy, DIG-1297,
-		// or the rule's folder's layout) may be narrower than a number:
-		// refused here too, never cut.
-		if err := queue.ValidateLayout(orderReq); err != nil {
-			field := "body"
-			var fe *hasavshevet.FieldError
-			if errors.As(err, &fe) {
-				field = fe.Field
-			}
-			respond.Error(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR", map[string]any{"field": field})
-			return
 		}
 
 		// Customer details supplied with the order skip the [dbo].[Accounts]
@@ -316,15 +304,6 @@ func parseDocumentRule(raw json.RawMessage) (*hasavshevet.DocumentRule, *hasavsh
 	return rule, nil
 }
 
-// asFieldError is err as a *FieldError, or one naming field with err's text.
-func asFieldError(err error, field string) *hasavshevet.FieldError {
-	var fe *hasavshevet.FieldError
-	if errors.As(err, &fe) {
-		return fe
-	}
-	return &hasavshevet.FieldError{Field: field, Reason: err.Error()}
-}
-
 // applyDocumentFields parses the optional document fields of the wire request
 // into orderReq and validates them against the IMOVEIN widths. Each may be a
 // JSON number or a string; absent and null keep today's value. Anything else
@@ -404,9 +383,14 @@ func asciiDigits(s string) bool {
 }
 
 // writeSendOrderError maps an Accept error to a status. Messages are fixed
-// text: the errors name files under the data directory (the queue logs them).
+// text: the errors name files under the data directory (the queue logs them)
+// — except a *FieldError, the request's own fault (its rule's keys, a number
+// the layout cannot hold), which names a field and never a value.
 func writeSendOrderError(w http.ResponseWriter, err error) {
+	var fe *hasavshevet.FieldError
 	switch {
+	case errors.As(err, &fe):
+		respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
 	case errors.Is(err, hasavshevet.ErrOrderIndexUnreadable):
 		// Only ever this key's own entry: recovery skips other damaged files.
 		respond.Error(w, http.StatusInternalServerError,

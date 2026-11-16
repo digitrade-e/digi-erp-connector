@@ -331,3 +331,62 @@ func TestSendOrderV2_RefusedFolderIs503(t *testing.T) {
 		t.Fatalf("receipt: %d %s", rw.Code, rw.Body)
 	}
 }
+
+// Review m3: a repeat of a known historyId is answered against the rule
+// frozen at its reservation, even when its folder or counter key no longer
+// exists on the box — a 400 would read as "order refused" for an order that
+// was written. Only a new order is checked against the box's keys.
+func TestSendOrderV2_RepeatAfterItsKeysAreGone(t *testing.T) {
+	b := newV2Box(t)
+	h := NewSendOrderV2Handler(b.queue, b.cfg)
+	for _, tc := range []struct{ key, rule string }{
+		{"cart-herp", `{"v":1,"folder":"herp","counter":"b2b"}`},
+		{"cart-test", `{"v":1,"folder":"herp_test","counter":"b2b_test"}`},
+	} {
+		if w := postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, tc.key, tc.rule)); w.Code != http.StatusAccepted {
+			t.Fatalf("%s: %d %s", tc.key, w.Code, w.Body)
+		}
+	}
+
+	// The documents command removed herp (nothing in flight for it), a restore
+	// dropped b2b_test; the service restarted on that config.
+	cfg := b.cfg
+	cfg.Documents = b.cfg.Documents.Clone()
+	delete(cfg.Documents.Folders, "herp")
+	delete(cfg.Documents.Counters, "b2b_test")
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatal(err)
+	}
+	set := hasavshevet.NewCounterSet(cfg, b.dataDir)
+	q := hasavshevet.NewOrderQueue(hasavshevet.NewSender(nil, cfg, set.OrderNumberStore(), &noopLogger{}), &noopLogger{})
+	q.UseCounters(set)
+	q.UseKeyIndex(b.dataDir)
+	if err := q.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	h = NewSendOrderV2Handler(q, cfg)
+
+	w := postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "cart-herp", `{"v":1,"folder":"herp","counter":"b2b"}`))
+	if m := decodeBody(t, w); w.Code != http.StatusAccepted || m["replay"] != true || m["fileName"] != "IMOVEIN_1000123.doc" || m["folder"] != "herp" {
+		t.Fatalf("repeat after its folder is gone: %d %s", w.Code, w.Body)
+	}
+	w = postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "cart-test", `{"v":1,"folder":"herp_test","counter":"b2b_test"}`))
+	if m := decodeBody(t, w); w.Code != http.StatusAccepted || m["replay"] != true || m["counter"] != "b2b_test" {
+		t.Fatalf("repeat after its counter is gone: %d %s", w.Code, w.Body)
+	}
+	// Another rule on a known key is still 409, even naming keys the box lacks.
+	w = postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "cart-herp", `{"v":1,"folder":"nope","counter":"b2b"}`))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("another rule: %d %s", w.Code, w.Body)
+	}
+	// A new order naming the folder that is gone: 400, nothing reserved.
+	w = postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "cart-new", `{"v":1,"folder":"herp","counter":"b2b"}`))
+	if details, _ := decodeBody(t, w)["details"].(map[string]any); w.Code != http.StatusBadRequest || details["field"] != "documentRule/folder" {
+		t.Fatalf("new order into a folder that is gone: %d %s", w.Code, w.Body)
+	}
+	if c, _ := set.Get("b2b"); c != nil {
+		if last, _ := c.Last(); last != 1_000_123 {
+			t.Errorf("b2b moved to %d", last)
+		}
+	}
+}

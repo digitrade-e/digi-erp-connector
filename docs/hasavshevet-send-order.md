@@ -355,6 +355,13 @@ number must never reach the production books); `temporary: true` only on a folde
 counter issues nothing. The folder's layout (`official`/`legacy`) replaces `sendOrderFormat` for that order, its
 legacy-fit check included.
 
+**A repeat is checked against what was frozen, not against the box** (review m3): the `historyId` is looked up in the
+order index first, and a known key replays, re-queues (retryable) or answers 409 by the rule frozen at its
+reservation — even when its folder or counter key is gone (a folder removed with nothing in flight, a `restore`, the
+implicit `orders` key adopted under another name). Only a **new** order has its rule's keys and its layout checked
+(the malformed-rule checks above apply to every request). A re-queued order whose folder key is gone is refused by
+the worker and stays retryable until the folder is back.
+
 **Frozen at reservation.** Under the queue's lock the counter's next number is taken (`503 COUNTER_EXHAUSTED` outside
 its range, nothing reserved), and the index entry stores the rule with the resolved file name:
 `"rule":{"counter":"b2b","folder":"herp","temporary":true,"fileName":"TMP_IMOVEIN_1000123.doc"}`. Every re-queue and

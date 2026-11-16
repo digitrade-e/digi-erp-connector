@@ -396,3 +396,44 @@ func TestOrderIndex_RuleIsValidatedOnRead(t *testing.T) {
 		}
 	}
 }
+
+// Review m3: a retryable order whose folder and counter keys are gone (a
+// restore, a hand edit) is re-queued against its frozen rule — the worker
+// refuses it, so it stays retryable until the folder is back — instead of a
+// 400 that strands it.
+func TestQueue_RetryableRepeatAfterItsFolderIsGone(t *testing.T) {
+	h := newCountersHarness(t)
+	folder := h.cfg.Documents.Folders["herp"].Path
+	if err := os.RemoveAll(folder); err != nil { // the share is not there: nothing written
+		t.Fatal(err)
+	}
+	q := h.queue(true)
+	acc, err := q.Accept(ruled("r1", "shopify", "herp", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, q, acc.JobID, JobStatusFailed)
+	h.stop(q)
+	if h.entry("r1").State != orderRetryable {
+		t.Fatalf("state %s, want retryable", h.entry("r1").State)
+	}
+
+	// The service restarts on a config without herp and shopify.
+	cfg := h.cfg
+	cfg.Documents = h.cfg.Documents.Clone()
+	delete(cfg.Documents.Folders, "herp")
+	delete(cfg.Documents.Counters, "shopify")
+	h.cfg = cfg
+	q = h.queue(true)
+	again, err := q.Accept(ruled("r1", "shopify", "herp", false))
+	if err != nil || !again.Replay || again.JobID != acc.JobID || again.Status != JobStatusQueued {
+		t.Fatalf("repeat: %+v %v; want a re-queue under %s", again, err, acc.JobID)
+	}
+	r := waitForStatus(t, q, acc.JobID, JobStatusFailed)
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "no longer an orders folder") || h.entry("r1").State != orderRetryable {
+		t.Fatalf("the worker: %v, state %s; want refused, still retryable", r.Err, h.entry("r1").State)
+	}
+	if n, err := NewCounterFile(CounterStorePath(h.dataDir, "shopify"), config.DocumentKindOrders).Peek(); err != nil || n != 5_000_001 {
+		t.Errorf("shopify's store: next %d, %v — the repeat took a number", n, err)
+	}
+}
