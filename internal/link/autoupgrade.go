@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
@@ -68,6 +69,55 @@ type autoFile struct {
 	Attempts []autoAttempt      `json:"attempts"`
 	Waiting  *AutoWait          `json:"waiting,omitempty"`
 	View     *AutoUpgradeStatus `json:"view,omitempty"`
+	// Tally is what stopped or failed under each policy and target (review m10): kept apart from the newest
+	// maxAutoAttempts attempts, so a rolled-back target, or two failed tickets, never age out of the box's memory.
+	Tally []autoTally `json:"tally,omitempty"`
+}
+
+// autoTally is one (policy, target)'s record: failed tickets, and whether a ticket stopped it.
+type autoTally struct {
+	Scope   linkproto.PolicyScope `json:"scope"`
+	Seq     int64                 `json:"seq"`
+	To      string                `json:"to"`
+	Failed  int                   `json:"failed,omitempty"`
+	Stopped string                `json:"stopped,omitempty"` // the outcome that stopped it
+	At      time.Time             `json:"at"`
+}
+
+// maxAutoTally bounds the tally: one entry per signed (policy, target) a ticket ended under — a relay cannot add any.
+const maxAutoTally = 64
+
+// stops reports whether an outcome stops its target under its policy.
+func stops(outcome string) bool {
+	switch outcome {
+	case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack, linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor,
+		linkproto.OutcomeLinkInconclusive:
+		return true
+	}
+	return false
+}
+
+// tallyOutcome records a ticket's final outcome under its policy and target.
+func (af *autoFile) tallyOutcome(a autoAttempt, now time.Time) {
+	failed := a.Outcome == linkproto.OutcomeFailed || a.Outcome == linkproto.OutcomeLost
+	if !failed && !stops(a.Outcome) {
+		return
+	}
+	at := slices.IndexFunc(af.Tally, func(t autoTally) bool { return t.Scope.Key() == a.Scope.Key() && t.Seq == a.Seq && t.To == a.To })
+	if at < 0 {
+		af.Tally = append(af.Tally, autoTally{Scope: a.Scope.Ref(), Seq: a.Seq, To: a.To})
+		at = len(af.Tally) - 1
+	}
+	t := &af.Tally[at]
+	t.At = now.UTC()
+	if failed {
+		t.Failed++
+	} else if t.Stopped == "" {
+		t.Stopped = a.Outcome
+	}
+	if len(af.Tally) > maxAutoTally {
+		af.Tally = af.Tally[len(af.Tally)-maxAutoTally:]
+	}
 }
 
 // AutoUpgradeStatus is the auto-update part of link-status and of provision's state (plan 088).
@@ -149,6 +199,7 @@ type autoInputs struct {
 	build    string
 	now      time.Time // the box's local time
 	attempts []autoAttempt
+	tally    []autoTally
 	pending  bool        // an upgrade ticket (a command's or the scheduler's) is running
 	stated   statedPlace // what the relay last stated: shown, never weighed
 }
@@ -264,12 +315,17 @@ func decideAuto(in autoInputs) autoView {
 		if a.Outcome != linkproto.OutcomeDeferred { // a setup deferred for orders is "not now": the window stays open
 			last = a
 		}
-		switch a.Outcome {
-		case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack, linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor,
-			linkproto.OutcomeLinkInconclusive:
+		switch {
+		case stops(a.Outcome):
 			stopped = true
-		case linkproto.OutcomeFailed, linkproto.OutcomeLost:
+		case a.Outcome == linkproto.OutcomeFailed, a.Outcome == linkproto.OutcomeLost:
 			failed++
+		}
+	}
+	for _, t := range in.tally { // review m10: what aged out of the attempts is still here
+		if t.Scope.Key() == eff.Scope.Key() && t.Seq == eff.Seq && t.To == target.String() {
+			stopped = stopped || t.Stopped != ""
+			failed = max(failed, t.Failed)
 		}
 	}
 	if stopped || failed >= maxAutoTickets {
@@ -286,7 +342,8 @@ func decideAuto(in autoInputs) autoView {
 }
 
 func (l *Link) autoInputs(now time.Time, af autoFile, afErr error) autoInputs {
-	in := autoInputs{team: l.cfg.Team, build: l.cfg.Build, now: now, attempts: af.Attempts, afErr: afErr, stated: l.statedNow()}
+	in := autoInputs{team: l.cfg.Team, build: l.cfg.Build, now: now, attempts: af.Attempts, tally: af.Tally, afErr: afErr,
+		stated: l.statedNow()}
 	in.state, in.stateErr = l.cfg.Store.LoadState()
 	in.minEpoch, in.epochErr = l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
 	l.cfg.Store.policyMu.Lock()
@@ -455,6 +512,7 @@ func (l *Link) refreshOutcomes(af *autoFile, now time.Time, log bool) bool {
 		}
 		if out, _ := ticketOutcome(l.upgradeDataDir(), a.Ticket, now); out != a.Outcome {
 			a.Outcome, changed = out, true
+			af.tallyOutcome(*a, now)
 			if log {
 				l.cfg.Log.Info(fmt.Sprintf("link: auto-update ticket %s (%s -> %s) ended: %s", a.Ticket, a.From, a.To, out))
 			}

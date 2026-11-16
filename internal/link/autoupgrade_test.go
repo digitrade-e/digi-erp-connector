@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -497,5 +498,71 @@ func TestADeferredTicketIsNotNow(t *testing.T) {
 	}
 	if af := a.auto(t); af.View.Effective.Why == linkproto.WhyStopped {
 		t.Fatalf("deferred tickets stopped the target: %+v", af.View.Effective)
+	}
+}
+
+// pushAttempts adds n refused attempts under (scope, seq, to) in an old window, the way nights of failed downloads
+// would, and lets saveAuto keep only the newest maxAutoAttempts.
+func (a *autoRig) pushAttempts(t *testing.T, n int, sc linkproto.PolicyScope, seq int64, to string) {
+	t.Helper()
+	af := a.auto(t)
+	for range n {
+		af.Attempts = append(af.Attempts, autoAttempt{At: boxTime(1, 2, 0), Scope: sc.Ref(), Seq: seq, From: "1.0.29", To: to,
+			WindowStart: boxTime(1, 2, 0), Outcome: linkproto.OutcomeRefused, Refusal: &UpgradeRefusal{Code: "download_failed"}})
+	}
+	if err := a.b.store.saveAuto(af); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review m10: a rolled-back target stays stopped under its policy after its attempt aged out of the newest twenty.
+func TestARolledBackTargetIsRememberedPastTheAttempts(t *testing.T) {
+	a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
+	a.deliver(t, "", "", a.policy(1))
+	a.b.link.autoCheck()
+	a.finish(t, UpgradeResult{Ticket: a.lastTicket(), From: "1.0.29", To: "1.0.30", Outcome: linkproto.OutcomeRolledBack,
+		Rollback: &linkproto.UpgradeRollback{To: "1.0.29", OK: true}})
+	a.clk.set(boxTime(4, 2, 10))
+	a.b.link.autoCheck()
+	if af := a.auto(t); af.View.Effective.Why != linkproto.WhyStopped || len(af.Tally) != 1 || af.Tally[0].Stopped != linkproto.OutcomeRolledBack {
+		t.Fatalf("%+v %+v", af.View.Effective, af.Tally)
+	}
+	a.pushAttempts(t, maxAutoAttempts, boxList("bfl-read"), 5, "1.0.31")
+	if af := a.auto(t); slices.ContainsFunc(af.Attempts, func(x autoAttempt) bool { return x.Seq == 1 }) {
+		t.Fatal("the rolled-back attempt did not age out")
+	}
+	a.clk.set(boxTime(5, 2, 10))
+	a.b.link.autoCheck()
+	if af := a.auto(t); a.spawns() != 1 || af.View.Effective.Why != linkproto.WhyStopped {
+		t.Fatalf("the rolled-back target was tried again: spawned %d, %+v", a.spawns(), af.View.Effective)
+	}
+}
+
+// Review m10: three failed tickets stop a target even when the first two aged out of the attempts meanwhile.
+func TestFailuresAreCountedPastTheAttempts(t *testing.T) {
+	a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
+	a.deliver(t, "", "", a.policy(1))
+	fail := func() {
+		a.finish(t, UpgradeResult{Ticket: a.lastTicket(), From: "1.0.29", To: "1.0.30", ExitCode: 7, Error: "the setup ended with 7",
+			Health: &linkproto.UpgradeHealth{OK: true, Minutes: 20}})
+	}
+	a.b.link.autoCheck() // day 3: ticket 1
+	fail()
+	a.clk.set(boxTime(4, 2, 10))
+	a.b.link.autoCheck() // day 4: ticket 2
+	fail()
+	a.clk.set(boxTime(4, 3, 0))
+	a.b.link.autoCheck() // the same window: its outcome is tallied, no attempt
+	if af := a.auto(t); a.spawns() != 2 || len(af.Tally) != 1 || af.Tally[0].Failed != 2 {
+		t.Fatalf("spawned %d, tally %+v", a.spawns(), af.Tally)
+	}
+	a.pushAttempts(t, maxAutoAttempts, everyBox(), 1, "1.0.30") // nights of refused attempts: the two failures age out
+	a.clk.set(boxTime(5, 2, 10))
+	a.b.link.autoCheck() // day 5: ticket 3
+	fail()
+	a.clk.set(boxTime(6, 2, 10))
+	a.b.link.autoCheck()
+	if af := a.auto(t); a.spawns() != 3 || af.View.Effective.Why != linkproto.WhyStopped {
+		t.Fatalf("a fourth ticket: spawned %d, %+v, tally %+v", a.spawns(), af.View.Effective, af.Tally)
 	}
 }
