@@ -446,8 +446,8 @@ func TestTheSetupWaitsForAnIdleQueue(t *testing.T) {
 	if waited < setupIdleWait {
 		t.Fatalf("waited %s", waited)
 	}
-	if _, err := os.Stat(filepath.Join(g.tdir, setupFile("1.0.32"))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("the deferred setup was kept")
+	if got, err := fileSHA256(filepath.Join(g.tdir, setupFile("1.0.32"))); err != nil || got != sha(g.setup) {
+		t.Fatalf("the deferred setup was not kept for the next attempt (review N10): %q %v", got, err)
 	}
 	// assumeIdle: not asked again
 	busy = 1 << 30

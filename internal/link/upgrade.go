@@ -360,8 +360,11 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 		return UpgradeAnswer{}, upgradeRefuse("sha256_mismatch", "pin the setup's digest from the release's SHA256SUMS",
 			"the envelope pins %s but release v%s's SHA256SUMS lists %s for %s", sha, to, listed, setup)
 	}
-	got, err := download(ctx, l.cfg.HTTPClient, base+setup, filepath.Join(tdir, setup))
-	if err != nil {
+	got := ""
+	if from := reuseSetup(dir, to, sha, tdir); from != "" {
+		got = sha
+		l.cfg.Log.Info(fmt.Sprintf("link: the setup of %s that deferred ticket %s downloaded is taken again, checked: no second download", to, from))
+	} else if got, err = download(ctx, l.cfg.HTTPClient, base+setup, filepath.Join(tdir, setup)); err != nil {
 		return UpgradeAnswer{}, err
 	}
 	if got != sha {
@@ -410,6 +413,41 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 	}
 	accepted = true
 	return UpgradeAnswer{Accepted: true, Ticket: ticket, From: from.String(), To: to.String()}, nil
+}
+
+// reuseSetup moves into tdir the setup a deferred ticket for the same target left in its folder (review N10: a setup
+// deferred for queued orders is not downloaded again at every attempt). The ticket's result must say deferred, to
+// this version, with this digest, and the file must hash to it now; the release's SHA256SUMS line was fetched again
+// just before, and the runner hashes the setup once more before it runs it. It returns the ticket whose setup was
+// taken, "" when none was (then the setup is downloaded as ever). A ticket's folder lives until pruneUpgrades drops it.
+func reuseSetup(dataDir string, to version, sha, tdir string) string {
+	root := filepath.Join(dataDir, upgradeDirs.tickets)
+	entries, _ := os.ReadDir(root)
+	type cand struct {
+		ticket string
+		at     time.Time
+	}
+	var cands []cand
+	for _, e := range entries {
+		if !e.IsDir() || !ticketRe.MatchString(e.Name()) || filepath.Join(root, e.Name()) == tdir {
+			continue
+		}
+		if res, err := readResult(dataDir, e.Name()); err == nil && res.Outcome == linkproto.OutcomeDeferred && res.To == to.String() && res.SHA256 == sha {
+			cands = append(cands, cand{e.Name(), res.FinishedAt})
+		}
+	}
+	slices.SortFunc(cands, func(a, b cand) int { return b.at.Compare(a.at) })
+	name := setupFile(to.String())
+	for _, c := range cands {
+		src := filepath.Join(root, c.ticket, name)
+		if got, err := fileSHA256(src); err != nil || got != sha {
+			continue
+		}
+		if err := os.Rename(src, filepath.Join(tdir, name)); err == nil {
+			return c.ticket
+		}
+	}
+	return ""
 }
 
 // orderQueueIdle asks provision's state whether the daemon holds accepted orders (a restart loses them). daemonRunning

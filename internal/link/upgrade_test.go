@@ -786,3 +786,60 @@ func TestTheLinkResumesATicketCutShortAfterItsSetup(t *testing.T) {
 		})
 	}
 }
+
+// Review N10: a ticket deferred for queued orders keeps its checked setup, and the next attempt at the same target and
+// digest takes it instead of downloading it again — after the release's SHA256SUMS line is fetched again, and only when
+// the file still hashes to the digest.
+func TestADeferredTicketsSetupIsNotDownloadedAgain(t *testing.T) {
+	deferred := func(g *upgradeRig, ticket string, body []byte, to, digest string) string {
+		tdir := filepath.Join(g.dir, "upgrade", ticket)
+		_ = os.MkdirAll(tdir, 0o700)
+		_ = os.WriteFile(filepath.Join(tdir, setupFile(to)), body, 0o600)
+		res, _ := json.Marshal(UpgradeResult{Ticket: ticket, From: "1.0.29", To: to, SHA256: digest, Outcome: linkproto.OutcomeDeferred,
+			FinishedAt: time.Now(), Error: "orders_pending: 1 order(s) queued right before the setup"})
+		_ = os.MkdirAll(filepath.Join(g.dir, "results"), 0o700)
+		_ = os.WriteFile(resultPath(g.dir, ticket), res, 0o600)
+		return tdir
+	}
+	setupPath := "v1.0.30/" + setupFile("1.0.30")
+	// the same target and digest: taken, not downloaded
+	g := newUpgradeRig(t, "v1.0.29")
+	old := deferred(g, strings.Repeat("d1", 16), g.setup, "1.0.30", sha(g.setup))
+	ans, _, ticket := g.upgrade(t, g.spec("1.0.30", sha(g.setup)))
+	if !ans.Accepted || g.rel.hit(setupPath) != 0 || g.rel.hit("v1.0.30/SHA256SUMS") != 1 {
+		t.Fatalf("%+v: the setup downloaded %d times, SHA256SUMS %d", ans, g.rel.hit(setupPath), g.rel.hit("v1.0.30/SHA256SUMS"))
+	}
+	if got, err := fileSHA256(filepath.Join(g.dir, "upgrade", ticket, setupFile("1.0.30"))); err != nil || got != sha(g.setup) {
+		t.Fatalf("the new ticket's setup: %q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(old, setupFile("1.0.30"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the setup was copied, not moved: it is on disk twice")
+	}
+	if !g.b.log.has("downloaded is taken again, checked") {
+		t.Fatal("not logged")
+	}
+	// a file that no longer hashes to the digest, another target, another digest, a ticket that was not deferred: download
+	for _, c := range []struct {
+		name string
+		make func(g *upgradeRig)
+	}{
+		{"changed since", func(g *upgradeRig) {
+			deferred(g, strings.Repeat("d2", 16), []byte("MZ something else"), "1.0.30", sha(g.setup))
+		}},
+		{"another digest", func(g *upgradeRig) {
+			deferred(g, strings.Repeat("d3", 16), g.setup, "1.0.30", strings.Repeat("ef", 32))
+		}},
+		{"not deferred", func(g *upgradeRig) {
+			tdir := deferred(g, strings.Repeat("d4", 16), g.setup, "1.0.30", sha(g.setup))
+			res, _ := json.Marshal(UpgradeResult{Ticket: strings.Repeat("d4", 16), To: "1.0.30", SHA256: sha(g.setup), Outcome: linkproto.OutcomeFailed})
+			_ = os.WriteFile(resultPath(g.dir, strings.Repeat("d4", 16)), res, 0o600)
+			_ = tdir
+		}},
+	} {
+		g := newUpgradeRig(t, "v1.0.29")
+		c.make(g)
+		if ans, _, _ := g.upgrade(t, g.spec("1.0.30", sha(g.setup))); !ans.Accepted || g.rel.hit(setupPath) != 1 {
+			t.Errorf("%s: %+v, downloaded %d times", c.name, ans, g.rel.hit(setupPath))
+		}
+	}
+}

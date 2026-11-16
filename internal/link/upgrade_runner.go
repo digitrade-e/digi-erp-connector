@@ -192,7 +192,8 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 			res.Error = fmt.Sprintf("orders_pending: %d order(s) queued right before the setup, still after %s: the setup was not run, "+
 				"and nothing changed (the upgrade goes again at the next check, or with a new command)", n, setupIdleWait)
 			res.Outcome = linkproto.OutcomeDeferred
-			_ = os.Remove(setup)
+			// review N10: the setup stays in the ticket's folder, checked; the next attempt at this target takes it
+			// rather than downloading it again (reuseSetup)
 			return res, r.write(res)
 		}
 	}
