@@ -218,7 +218,8 @@ var (
 
 // Run keeps the box connected until ctx ends.
 func (l *Link) Run(ctx context.Context) error {
-	go l.runAuto(ctx) // plan 088: the auto-update scheduler
+	l.resumeUpgrades() // review m7: a ticket a restart cut short in its health window
+	go l.runAuto(ctx)  // plan 088: the auto-update scheduler
 	backoff := time.Second
 	quietUnpaired := false // "not paired" is logged once, not every 15 s
 	for ctx.Err() == nil {

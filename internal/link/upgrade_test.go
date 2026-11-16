@@ -723,3 +723,66 @@ func TestVersionsAndTickets(t *testing.T) {
 		t.Fatalf("%s %s", a, b)
 	}
 }
+
+// Review m7: when the link starts, it starts again the runner of a ticket a restart cut short after its setup — only
+// when its runner copy is still the file the link made, the ticket has no result and it has a health marker.
+func TestTheLinkResumesATicketCutShortAfterItsSetup(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		tune    func(dir, tdir, ticket string)
+		resumed bool
+	}{
+		{"cut in the health window", nil, true},
+		{"its runner copy changed", func(_, tdir, _ string) {
+			_ = os.WriteFile(filepath.Join(tdir, runnerExe), []byte("MZ something else"), 0o700)
+		}, false},
+		{"it has a result", func(dir, _, ticket string) {
+			_ = os.MkdirAll(filepath.Join(dir, "results"), 0o700)
+			_ = os.WriteFile(resultPath(dir, ticket), []byte(`{}`), 0o600)
+		}, false},
+		{"no health marker", func(_, tdir, _ string) { _ = os.Remove(filepath.Join(tdir, healthMarkerFile)) }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, ticket := t.TempDir(), strings.Repeat("cd", 16)
+			tdir := filepath.Join(dir, "upgrade", ticket)
+			_ = os.MkdirAll(tdir, 0o700)
+			runner := []byte("MZ the runner copy")
+			_ = os.WriteFile(filepath.Join(tdir, runnerExe), runner, 0o700)
+			job, _ := json.Marshal(UpgradeJob{Ticket: ticket, From: "1.0.31", To: "1.0.32", Setup: setupFile("1.0.32"), HealthMinutes: 15,
+				RunnerSHA256: sha(runner)})
+			_ = os.WriteFile(filepath.Join(tdir, jobFile), job, 0o600)
+			_ = os.WriteFile(filepath.Join(tdir, healthMarkerFile), []byte(`{"phase":"health"}`), 0o600)
+			if c.tune != nil {
+				c.tune(dir, tdir, ticket)
+			}
+			sp := &spawned{}
+			_, kr := team(t, 1)
+			b := startBox(t, newRelay(t), State{}, kr, "127.0.0.1:1", func(cfg *Config) {
+				forTests088(cfg)
+				cfg.Upgrade = UpgradeConfig{DataDir: dir, Spawn: sp.spawn}
+			})
+			deadline := time.Now().Add(300 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				sp.mu.Lock()
+				n := len(sp.calls)
+				sp.mu.Unlock()
+				if n > 0 {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			sp.mu.Lock()
+			defer sp.mu.Unlock()
+			want := filepath.Join(tdir, runnerExe) + "|" + tdir + "|upgrade-run|" + ticket
+			if c.resumed && (len(sp.calls) != 1 || strings.Join(sp.calls[0], "|") != want) {
+				t.Fatalf("spawned %v", sp.calls)
+			}
+			if !c.resumed && len(sp.calls) != 0 {
+				t.Fatalf("resumed: %v", sp.calls)
+			}
+			if c.name == "its runner copy changed" && !b.log.has("not resumed") {
+				t.Fatalf("not logged: %v", b.log.lines)
+			}
+		})
+	}
+}

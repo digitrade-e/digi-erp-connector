@@ -173,6 +173,10 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 	}
 	res.From, res.To = job.From, job.To
 	res.SHA256, res.Auto, res.Policy = job.SHA256, job.Auto, job.Policy
+	// Review m7: a restart of the server cut this ticket short after its setup; the link started its runner again.
+	if m, found, err := readHealthMarker(tdir); found {
+		return r.resume(job, tdir, res, m, err)
+	}
 	r.Log.Info(fmt.Sprintf("link upgrade %s: %s -> %s, the setup starts in %s", r.Ticket, job.From, job.To, answerGrace))
 	r.Sleep(answerGrace)
 
@@ -231,34 +235,131 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		res.SetupLogTail = tailLines(logPath, 40, 300)
 	}
 	_ = os.Remove(setup) // tens of MB; the log, the job and the result stay
-	// Plan 088 D5: healthy within healthMinutes, or the build it replaced once more (upgrade_health.go) — when nothing
-	// in §2b keeps the new build in place (noRollback).
 	if setupEnded && job.HealthMinutes > 0 {
-		res.Health = r.checkHealth(job, []string{job.To, job.From}, setupStarted)
-		if !res.Health.OK {
-			msg := fmt.Sprintf("not healthy within %d min after the setup (%s)", job.HealthMinutes, failedChecks(res.Health))
-			if outcome, why := r.noRollback(job, res.Health); outcome != "" {
-				res.Outcome = outcome
-				msg += "; " + why
-				r.Log.Warn(fmt.Sprintf("link upgrade %s: no rollback: %s", r.Ticket, why))
-			} else if res.Rollback = r.rollback(job, tdir, &res); res.Rollback.OK {
-				msg += fmt.Sprintf("; %s, the build it replaced, was installed again and is healthy", res.Rollback.To)
-			} else {
-				msg += fmt.Sprintf("; the rollback to %s failed: %s", res.Rollback.To, res.Rollback.Error)
-			}
-			if res.Error == "" {
-				res.Error = msg
-			} else {
-				res.Error += "; " + msg
-			}
-			if res.SetupLogTail == nil {
-				res.SetupLogTail = tailLines(logPath, 40, 300)
-			}
-		}
+		r.afterSetup(job, tdir, &res, setupStarted, 0)
 	}
+	return r.finish(tdir, res)
+}
+
+// finish writes the result, then lets the health marker go: a ticket with a result is never resumed.
+func (r UpgradeRunner) finish(tdir string, res UpgradeResult) (UpgradeResult, error) {
 	res.FinishedAt = r.Now().UTC()
 	res.Outcome = resultOutcome(res)
-	return res, r.write(res)
+	err := r.write(res)
+	if err == nil {
+		_ = os.Remove(filepath.Join(tdir, healthMarkerFile))
+	}
+	return res, err
+}
+
+// afterSetup is plan 088 D5: healthy within healthMinutes, or the build it replaced once more (upgrade_health.go) — when
+// nothing in §2b keeps the new build in place (noRollback). Its progress is in the ticket's health marker, so a restart
+// of the server in the meantime is resumed (review m7) — the health check, never a cut rollback.
+func (r UpgradeRunner) afterSetup(job UpgradeJob, tdir string, res *UpgradeResult, setupStarted time.Time, resumes int) {
+	r.saveHealthMarker(tdir, healthMarker{Phase: markerHealth, SetupStarted: setupStarted, Resumes: resumes, Result: *res})
+	res.Health = r.checkHealth(job, []string{job.To, job.From}, setupStarted)
+	if res.Health.OK {
+		return
+	}
+	msg := fmt.Sprintf("not healthy within %d min after the setup (%s)", job.HealthMinutes, failedChecks(res.Health))
+	if outcome, why := r.noRollback(job, res.Health); outcome != "" {
+		res.Outcome = outcome
+		msg += "; " + why
+		r.Log.Warn(fmt.Sprintf("link upgrade %s: no rollback: %s", r.Ticket, why))
+	} else {
+		r.saveHealthMarker(tdir, healthMarker{Phase: markerRollback, SetupStarted: setupStarted, Resumes: resumes, Result: *res})
+		if res.Rollback = r.rollback(job, tdir, res); res.Rollback.OK {
+			msg += fmt.Sprintf("; %s, the build it replaced, was installed again and is healthy", res.Rollback.To)
+		} else {
+			msg += fmt.Sprintf("; the rollback to %s failed: %s", res.Rollback.To, res.Rollback.Error)
+		}
+	}
+	if res.Error == "" {
+		res.Error = msg
+	} else {
+		res.Error += "; " + msg
+	}
+	if res.SetupLogTail == nil {
+		res.SetupLogTail = tailLines(filepath.Join(tdir, "setup.log"), 40, 300)
+	}
+}
+
+// The health marker (review m7): DataDir\upgrade\<ticket>\health.json, the runner's progress once the setup ended. A
+// server restarted in the health window (Windows Update in the same night window) loses the runner; the link, at its
+// next start, starts the ticket's runner again (resumeUpgrades), which goes on with the health check — once. A restart
+// during the rollback, or a second one, is not resumed: the result says so, and a person decides.
+const (
+	healthMarkerFile = "health.json"
+	markerHealth     = "health"
+	markerRollback   = "rollback"
+	maxResumes       = 1
+)
+
+type healthMarker struct {
+	Phase        string        `json:"phase"`
+	SetupStarted time.Time     `json:"setupStarted"`
+	Resumes      int           `json:"resumes,omitempty"`
+	Result       UpgradeResult `json:"result"` // as far as it got
+}
+
+func (r UpgradeRunner) saveHealthMarker(tdir string, m healthMarker) {
+	b, _ := json.Marshal(m)
+	if err := atomicfile.Write(filepath.Join(tdir, healthMarkerFile), b, 0o600); err != nil {
+		r.Log.Error("link upgrade: writing the health marker (a restart now would not be resumed)", err)
+	}
+}
+
+// readHealthMarker reads a ticket's health marker: found is true when one is there, even one that does not read.
+func readHealthMarker(tdir string) (healthMarker, bool, error) {
+	b, err := os.ReadFile(filepath.Join(tdir, healthMarkerFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return healthMarker{}, false, nil
+	}
+	if err != nil {
+		return healthMarker{}, true, err
+	}
+	var m healthMarker
+	if err := json.Unmarshal(b, &m); err != nil {
+		return healthMarker{}, true, err
+	}
+	return m, true, nil
+}
+
+// resume goes on with a ticket a restart cut short after its setup: the health check again, with its whole budget,
+// and what follows. Not after a cut rollback, nor a second time.
+func (r UpgradeRunner) resume(job UpgradeJob, tdir string, res UpgradeResult, m healthMarker, err error) (UpgradeResult, error) {
+	if err == nil {
+		res = m.Result
+		res.Ticket, res.From, res.To = r.Ticket, job.From, job.To
+	}
+	why := ""
+	switch {
+	case err != nil:
+		why = "its health marker does not read (" + err.Error() + ")"
+	case m.Phase == markerRollback:
+		why = "the rollback was under way"
+	case m.Phase != markerHealth:
+		why = fmt.Sprintf("the health marker names phase %q", m.Phase)
+	case m.Resumes >= maxResumes:
+		why = "it was resumed once already"
+	}
+	if why != "" {
+		msg := "the server restarted while the runner was at work and " + why + ": the runner does not go on; read state, runner.log and " +
+			"setup.log on the box — a person decides"
+		if res.Error == "" {
+			res.Error = msg
+		} else {
+			res.Error += "; " + msg
+		}
+		res.Outcome = linkproto.OutcomeUnhealthy
+		r.Log.Warn(fmt.Sprintf("link upgrade %s: %s", r.Ticket, msg))
+		return r.finish(tdir, res)
+	}
+	r.Log.Info(fmt.Sprintf("link upgrade %s: the server restarted after the setup; the health check starts again (%d min)", r.Ticket, job.HealthMinutes))
+	if job.HealthMinutes > 0 {
+		r.afterSetup(job, tdir, &res, m.SetupStarted, m.Resumes+1)
+	}
+	return r.finish(tdir, res)
 }
 
 // restoreServices puts the services back as they were before the upgrade, whatever the setup did (review m3): the link

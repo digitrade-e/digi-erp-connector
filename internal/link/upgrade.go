@@ -135,6 +135,9 @@ type UpgradeJob struct {
 	Rollback      *linkproto.RollbackPin `json:"rollback,omitempty"`
 	// AssumeIdle: the command said to go ahead without the order queue (the runner does not check it again).
 	AssumeIdle bool `json:"assumeIdle,omitempty"`
+	// RunnerSHA256 is the runner copy's digest: the link starts it again after a restart in the health window (review
+	// m7) only when it is still that file.
+	RunnerSHA256 string `json:"runnerSha256,omitempty"`
 }
 
 // UpgradeResult is DataDir\results\upgrade-<ticket>.json.
@@ -375,6 +378,10 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 	if err := copyFile(self, runner); err != nil {
 		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "copying the runner: %v", err)
 	}
+	runnerSHA, err := fileSHA256(runner)
+	if err != nil {
+		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "reading the runner copy: %v", err)
+	}
 	health := req.HealthMinutes
 	if health == 0 {
 		health = defaultHealthMinutes
@@ -382,7 +389,7 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 	job := UpgradeJob{Ticket: ticket, From: from.String(), To: to.String(), SHA256: sha, Setup: setup,
 		InstallDir: l.cfg.InstallDir, DaemonWasRunning: daemonRunning, By: req.By, AcceptedAt: l.cfg.Now().UTC(),
 		FromSHA256: l.knownSetupSHA(from.String()), HealthMinutes: health, Auto: req.Policy != nil, Policy: req.Policy,
-		AssumeIdle: req.AssumeIdle}
+		AssumeIdle: req.AssumeIdle, RunnerSHA256: runnerSHA}
 	if req.Rollback != nil {
 		job.Rollback = &linkproto.RollbackPin{Version: from.String(), SHA256: req.Rollback.SHA256}
 	}
@@ -636,7 +643,53 @@ func ticketPending(dataDir, ticket string, now time.Time) (pending, lost bool) {
 	if runnerHoldsLock(dataDir) || now.Sub(fi.ModTime()) < runnerGrace {
 		return true, false
 	}
+	// review m7: a ticket the link is resuming (it touched the health marker) counts as running until its runner holds
+	// the lock
+	if mi, err := os.Stat(filepath.Join(dataDir, upgradeDirs.tickets, ticket, healthMarkerFile)); err == nil && now.Sub(mi.ModTime()) < runnerGrace {
+		return true, false
+	}
 	return false, true
+}
+
+// resumeUpgrades starts again the runner of a ticket a restart of the server cut short after its setup (review m7):
+// a health marker and no result, no runner holding the lock, and the runner copy still the file the link made. One at
+// a time; the runner itself resumes at most once. Called when the link starts.
+func (l *Link) resumeUpgrades() {
+	dir := l.upgradeDataDir()
+	entries, _ := os.ReadDir(filepath.Join(dir, upgradeDirs.tickets))
+	for _, e := range entries {
+		ticket := e.Name()
+		if !e.IsDir() || !ticketRe.MatchString(ticket) {
+			continue
+		}
+		tdir := filepath.Join(dir, upgradeDirs.tickets, ticket)
+		if _, err := os.Stat(filepath.Join(tdir, healthMarkerFile)); err != nil {
+			continue
+		}
+		if _, err := os.Stat(resultPath(dir, ticket)); err == nil || runnerHoldsLock(dir) {
+			continue
+		}
+		job, err := readJob(dir, ticket)
+		runner := filepath.Join(tdir, runnerExe)
+		got, herr := fileSHA256(runner)
+		if err != nil || job.RunnerSHA256 == "" || herr != nil || got != job.RunnerSHA256 {
+			l.cfg.Log.Warn(fmt.Sprintf("link: upgrade %s was cut short after its setup, but its runner copy is not the one the link made "+
+				"(%v, %v): not resumed; upgrade-result answers lost", ticket, err, herr))
+			continue
+		}
+		now := time.Now()
+		_ = os.Chtimes(filepath.Join(tdir, healthMarkerFile), now, now)
+		spawn := l.cfg.Upgrade.Spawn
+		if spawn == nil {
+			spawn = spawnDetached
+		}
+		if err := spawn(runner, []string{"upgrade-run", ticket}, tdir); err != nil {
+			l.cfg.Log.Error("link: resuming upgrade "+ticket, err)
+			continue
+		}
+		l.cfg.Log.Info(fmt.Sprintf("link: upgrade %s was cut short after its setup (the server restarted): its runner goes on with the health check", ticket))
+		return
+	}
 }
 
 // runningTicket finds a ticket still running.
