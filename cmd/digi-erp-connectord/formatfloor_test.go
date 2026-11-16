@@ -47,14 +47,16 @@ func TestTheDaemonRaisesTheFormatFloor(t *testing.T) {
 		t.Fatal("an unreadable floor was overwritten")
 	}
 	// a floor it must raise and cannot write: no start
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("a read-only directory does not stop this user's write")
-	}
-	ro := t.TempDir()
-	_ = os.Chmod(ro, 0o500)
-	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
-	log = &floorLog{}
-	if err := raiseFormatFloor(ro, log); err == nil || len(log.errs) != 1 || !strings.Contains(log.errs[0], "not starting") {
-		t.Fatalf("%v %v", err, log.errs)
-	}
+	t.Run("an unwritable data directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("a read-only directory does not stop this user's write")
+		}
+		ro := t.TempDir()
+		_ = os.Chmod(ro, 0o500)
+		t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
+		log := &floorLog{}
+		if err := raiseFormatFloor(ro, log); err == nil || len(log.errs) != 1 || !strings.Contains(log.errs[0], "not starting") {
+			t.Fatalf("%v %v", err, log.errs)
+		}
+	})
 }
