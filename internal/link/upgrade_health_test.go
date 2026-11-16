@@ -41,7 +41,8 @@ func newHealthRig(t *testing.T, daemonWasRunning bool, edit func(*UpgradeJob)) *
 		linkUp: func(string, time.Time) bool { return true }, probe: healthyProbe}
 	g.old = newFakeRelease(t, "1.0.29", g.oldSetup, sumsFor(setupFile("1.0.29"), g.oldSetup))
 	job := UpgradeJob{Ticket: g.ticket, From: "1.0.29", To: "1.0.30", SHA256: sha(g.setup), Setup: setupFile("1.0.30"),
-		InstallDir: "install", DaemonWasRunning: daemonWasRunning, HealthMinutes: 10, FromSHA256: sha(g.oldSetup)}
+		InstallDir: "install", DaemonWasRunning: daemonWasRunning, HealthMinutes: 10, FromSHA256: sha(g.oldSetup),
+		Rollback: &linkproto.RollbackPin{Version: "1.0.29", SHA256: sha(g.oldSetup)}}
 	if edit != nil {
 		edit(&job)
 	}
@@ -144,7 +145,8 @@ func TestTheRunnerRollsBackAnUnhealthyUpgrade(t *testing.T) {
 		t.Fatalf("rollback %+v", rb)
 	}
 	if !strings.Contains(r.Error, "not healthy within 10 min after the setup (link: not connected to the relay)") ||
-		!strings.Contains(r.Error, "1.0.29, the build it replaced, was installed again and is healthy") || resultOutcome(r) != linkproto.OutcomeRolledBack {
+		!strings.Contains(r.Error, "1.0.29, the build it replaced, was installed again and is healthy") || resultOutcome(r) != linkproto.OutcomeRolledBack ||
+		r.Outcome != linkproto.OutcomeRolledBack {
 		t.Fatalf("error %q", r.Error)
 	}
 	if len(g.setups) != 2 || g.setups[1] != "rollback-"+setupFile("1.0.29")+"="+string(g.oldSetup) || r.RollbackSetupLogTail != nil {
@@ -158,15 +160,15 @@ func TestTheRunnerRollsBackAnUnhealthyUpgrade(t *testing.T) {
 	}
 }
 
-// The rollback installs exactly the build it replaced: its setup must match the release's SHA256SUMS and the digest
-// this box recorded when that build was installed. Otherwise nothing runs.
+// The rollback installs exactly the build it replaced: its setup must match the signed digest (D8) and the release's
+// SHA256SUMS. Otherwise nothing runs.
 func TestTheRollbackChecksItsSetup(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		tune func(*healthRig)
 		want string
 	}{
-		{"not the setup that installed it here", func(g *healthRig) {}, "the one that installed it here: not run"},
+		{"not the signed digest", func(g *healthRig) {}, "not " + strings.Repeat("cd", 32) + ", the signed digest: not run"},
 		{"not the release's SHA256SUMS line", func(g *healthRig) {
 			g.old.mu.Lock()
 			g.old.files["v1.0.29/SHA256SUMS"] = []byte(strings.Repeat("ab", 32) + "  " + setupFile("1.0.29") + "\n")
@@ -180,20 +182,78 @@ func TestTheRollbackChecksItsSetup(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			g := newHealthRig(t, true, func(j *UpgradeJob) {
-				if c.name == "not the setup that installed it here" {
-					j.FromSHA256 = strings.Repeat("cd", 32)
+				if c.name == "not the signed digest" {
+					j.FromSHA256, j.Rollback.SHA256 = "", strings.Repeat("cd", 32)
 				}
 			})
 			c.tune(g)
 			g.linkUp = func(string, time.Time) bool { return false }
 			r := g.run(t)
-			if r.Rollback == nil || r.Rollback.OK || !strings.Contains(r.Rollback.Error, c.want) || g.ran != 1 || resultOutcome(r) != linkproto.OutcomeUnhealthy {
-				t.Fatalf("rollback %+v, ran %d", r.Rollback, g.ran)
+			if r.Rollback == nil || r.Rollback.OK || !strings.Contains(r.Rollback.Error, c.want) || g.ran != 1 || resultOutcome(r) != linkproto.OutcomeUnhealthy ||
+				r.Outcome != linkproto.OutcomeUnhealthy {
+				t.Fatalf("rollback %+v, ran %d, outcome %q", r.Rollback, g.ran, r.Outcome)
 			}
 			if !strings.Contains(r.Error, "the rollback to 1.0.29 failed") {
 				t.Fatalf("error %q", r.Error)
 			}
 		})
+	}
+}
+
+// Review B1 (D8): with no signed digest for the build replaced there is no rollback — not on the digest this box
+// recorded, not on the release's SHA256SUMS alone. The new build stays and a person decides.
+func TestNoRollbackWithoutASignedDigest(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		edit func(*UpgradeJob)
+	}{
+		{"a box installed by hand: nothing recorded, nothing signed", func(j *UpgradeJob) { j.FromSHA256, j.Rollback = "", nil }},
+		{"the recorded digest alone", func(j *UpgradeJob) { j.Rollback = nil }},
+		{"a signed digest of another build", func(j *UpgradeJob) { j.Rollback.Version = "1.0.28" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := newHealthRig(t, true, c.edit)
+			g.linkUp = func(string, time.Time) bool { return false }
+			r := g.run(t)
+			if r.Rollback != nil || g.ran != 1 || g.old.hit("v1.0.29/SHA256SUMS") != 0 || g.old.hit("v1.0.29/"+setupFile("1.0.29")) != 0 {
+				t.Fatalf("a rollback without a signed digest: %+v, ran %d", r.Rollback, g.ran)
+			}
+			if r.Outcome != linkproto.OutcomeNoRollback || resultOutcome(r) != linkproto.OutcomeNoRollback ||
+				!strings.Contains(r.Error, "no signed digest names the setup of 1.0.29") || !g.log.has("no rollback: no signed digest") {
+				t.Fatalf("outcome %q, error %q", r.Outcome, r.Error)
+			}
+		})
+	}
+}
+
+// D8: the digest this box recorded is a cross-check — a signed digest that disagrees with it rolls back nothing.
+func TestTheRecordedDigestIsACrossCheck(t *testing.T) {
+	g := newHealthRig(t, true, func(j *UpgradeJob) { j.FromSHA256 = strings.Repeat("ef", 32) })
+	g.linkUp = func(string, time.Time) bool { return false }
+	r := g.run(t)
+	if r.Rollback != nil || g.ran != 1 || r.Outcome != linkproto.OutcomeNoRollback || !strings.Contains(r.Error, "is not the one that installed it here") {
+		t.Fatalf("rollback %+v, outcome %q, error %q", r.Rollback, r.Outcome, r.Error)
+	}
+}
+
+// Review B1's scenario: whoever sits on the box's way out (a TLS-inspecting proxy, a compromised relay with a swapped
+// asset) serves a setup of its own with a SHA256SUMS that lists it. The signed digest refuses it: it is never run.
+func TestASubstitutedReleaseIsNeverRun(t *testing.T) {
+	g := newHealthRig(t, true, func(j *UpgradeJob) { j.FromSHA256 = "" }) // installed by hand: only the signed pin knows it
+	evil := []byte("MZ not the 1.0.29 setup")
+	g.old.mu.Lock()
+	g.old.files["v1.0.29/"+setupFile("1.0.29")] = evil
+	g.old.files["v1.0.29/SHA256SUMS"] = []byte(sumsFor(setupFile("1.0.29"), evil))
+	g.old.mu.Unlock()
+	g.linkUp = func(string, time.Time) bool { return false }
+	r := g.run(t)
+	if g.ran != 1 || r.Rollback == nil || r.Rollback.OK || r.Outcome != linkproto.OutcomeUnhealthy || !strings.Contains(r.Rollback.Error, "the signed digest: not run") {
+		t.Fatalf("ran %d, rollback %+v, outcome %q", g.ran, r.Rollback, r.Outcome)
+	}
+	for _, s := range g.setups {
+		if strings.Contains(s, string(evil)) {
+			t.Fatal("the substituted setup ran")
+		}
 	}
 }
 
@@ -257,7 +317,7 @@ func TestNoHealthCheckWhileTheSetupRuns(t *testing.T) {
 
 // DIG-1297: never below 1.0.25 on a box with a pickup folder, rollback or not.
 func TestNoRollbackBelowThePickupRelease(t *testing.T) {
-	g := newHealthRig(t, true, func(j *UpgradeJob) { j.From, j.FromSHA256 = "1.0.24", "" })
+	g := newHealthRig(t, true, func(j *UpgradeJob) { j.From, j.FromSHA256, j.Rollback.Version = "1.0.24", "", "1.0.24" })
 	g.r.PickupDir = func() string { return `C:\herp\pickup` }
 	g.linkUp = func(string, time.Time) bool { return false }
 	r := g.run(t)

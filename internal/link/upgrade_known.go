@@ -14,7 +14,8 @@ import (
 )
 
 // The setup digest of the build an upgrade replaces (plan 088 §3: the ticket records "from" with its setup's hash when
-// known), which the runner's one rollback requires besides the release's SHA256SUMS.
+// known). Since the security review (D8) it is a cross-check only: the runner rolls back to a signed digest (the
+// policy's rollbacks, the command's spec), and refuses when this recorded one differs; it never rolls back on it alone.
 
 // releaseOf is a build ("v1.0.31", "1.0.31") as a release number, "" when it is not one.
 func releaseOf(build string) string {
@@ -26,7 +27,7 @@ func releaseOf(build string) string {
 
 // knownSetupSHA is the SHA-256 of the setup that installed version on this box, when the box knows it: a ticket that
 // installed it (its result; its job for a result older than plan 088), a rollback that installed it again, or a policy
-// it holds that targets it. "" when none does: the rollback then rests on the release's SHA256SUMS alone.
+// it holds that targets it. "" when none does.
 func (l *Link) knownSetupSHA(version string) string {
 	dir := l.upgradeDataDir()
 	entries, _ := os.ReadDir(filepath.Join(dir, upgradeDirs.results))

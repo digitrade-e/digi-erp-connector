@@ -88,15 +88,6 @@ func init() {
 	selfCommands[CommandUpgradeResult] = (*Link).upgradeResult
 }
 
-type upgradeInput struct {
-	Version    string `json:"version"`
-	SHA256     string `json:"sha256"`
-	AssumeIdle bool   `json:"assumeIdle,omitempty"`
-	// HealthMinutes is how long the runner waits for the box to be healthy after the setup before it rolls back (plan
-	// 088 D5): 5 to 120, 0 = defaultHealthMinutes.
-	HealthMinutes int `json:"healthMinutes,omitempty"`
-}
-
 // defaultHealthMinutes is a command's health check when it names none (plan 088 D5); a policy names its own.
 const defaultHealthMinutes = 15
 
@@ -133,13 +124,15 @@ type UpgradeJob struct {
 	DaemonWasRunning bool      `json:"daemonWasRunning"`
 	By               string    `json:"by,omitempty"`
 	AcceptedAt       time.Time `json:"acceptedAt"`
-	// Plan 088. FromSHA256 is the setup of the build replaced, when this box knows it (a ticket or a policy installed
-	// it): the rollback requires it. HealthMinutes > 0 turns the health check and the one rollback on (D5). Auto and
-	// Policy: the scheduler started it, following that policy.
-	FromSHA256    string     `json:"fromSha256,omitempty"`
-	HealthMinutes int        `json:"healthMinutes,omitempty"`
-	Auto          bool       `json:"auto,omitempty"`
-	Policy        *PolicyRef `json:"policy,omitempty"`
+	// Plan 088. HealthMinutes > 0 turns the health check and the one rollback on (D5). Auto and Policy: the scheduler
+	// started it, following that policy. Rollback is the signed digest of the build replaced (D8: the policy's or the
+	// command's) — the only setup a rollback runs; nil, no rollback. FromSHA256 is that build's setup as this box
+	// recorded it (a ticket or a policy installed it), when it knows: a cross-check, never a reason to roll back.
+	FromSHA256    string                 `json:"fromSha256,omitempty"`
+	HealthMinutes int                    `json:"healthMinutes,omitempty"`
+	Auto          bool                   `json:"auto,omitempty"`
+	Policy        *PolicyRef             `json:"policy,omitempty"`
+	Rollback      *linkproto.RollbackPin `json:"rollback,omitempty"`
 }
 
 // UpgradeResult is DataDir\results\upgrade-<ticket>.json.
@@ -167,6 +160,9 @@ type UpgradeResult struct {
 	RollbackClosedApps *ClosedApps `json:"rollbackClosedApps,omitempty"`
 	// RollbackSetupLogTail is the end of the rollback's setup log (rollback-setup.log) when the rollback failed.
 	RollbackSetupLogTail []string `json:"rollbackSetupLogTail,omitempty"`
+	// Outcome is the runner's own verdict, one of linkproto's Outcome* codes (plan 088 §2b: some outcomes leave the new
+	// build in place, and only the runner knows why). A result without it is judged by resultOutcome.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 var (
@@ -236,11 +232,11 @@ func (l *Link) upgrade(env linkproto.Envelope, stdin []byte) ([]byte, int) {
 	return answer(ans, 0)
 }
 
-// acceptUpgrade checks a command's input and starts the upgrade (startUpgrade).
+// acceptUpgrade checks a command's input (linkproto.UpgradeSpec) and starts the upgrade (startUpgrade).
 func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswer, error) {
-	var in upgradeInput
+	var in linkproto.UpgradeSpec
 	if err := decodeStrictJSON(stdin, &in); err != nil {
-		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", `send {"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:true,"healthMinutes"?:5-120}`, "the input does not decode: %v", err)
+		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", `send {"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:true,"healthMinutes"?:5-120,"rollback"?:{"version","sha256"}}`, "the input does not decode: %v", err)
 	}
 	to, ok := parseVersion(versionRe, in.Version)
 	if !ok {
@@ -253,8 +249,15 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	if in.HealthMinutes != 0 && (in.HealthMinutes < linkproto.MinHealthMinutes || in.HealthMinutes > linkproto.MaxHealthMinutes) {
 		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", "healthMinutes is 5 to 120, or left out (15)", "healthMinutes %d is out of range", in.HealthMinutes)
 	}
+	if err := in.Check(); err != nil {
+		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", "rollback is the build this box runs now: {\"version\":\"1.0.30\",\"sha256\":\"<its setup's 64 hex>\"}", "%v", err)
+	}
+	var rollback *linkproto.RollbackPin
+	if in.Rollback != nil {
+		rollback = &linkproto.RollbackPin{Version: strings.TrimSpace(in.Rollback.Version), SHA256: strings.ToLower(strings.TrimSpace(in.Rollback.SHA256))}
+	}
 	return l.startUpgrade(upgradeRequest{To: to, SHA256: sha, AssumeIdle: in.AssumeIdle, Ticket: TicketFor(env.Nonce), By: env.By,
-		HealthMinutes: in.HealthMinutes, command: true})
+		HealthMinutes: in.HealthMinutes, Rollback: rollback, command: true})
 }
 
 // upgradeRequest is one upgrade to start: a signed command's, or the scheduler's under a policy (plan 088).
@@ -266,7 +269,10 @@ type upgradeRequest struct {
 	By            string
 	HealthMinutes int        // 0 = defaultHealthMinutes
 	Policy        *PolicyRef // the scheduler's: the policy it follows
-	command       bool       // a command holds one of the two command slots itself
+	// Rollback is the signed digest of the build this box runs (plan 088 D8): the policy's for that build, or the
+	// command's spec. The runner rolls back to nothing else; nil = no automatic rollback.
+	Rollback *linkproto.RollbackPin
+	command  bool // a command holds one of the two command slots itself
 }
 
 // startUpgrade runs every check that can fail before the runner starts, in order, and starts it. The command and the
@@ -280,6 +286,12 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 	if !from.less(to) {
 		return UpgradeAnswer{}, upgradeRefuse("not_newer", "upgrade only to a newer release; a downgrade is a person's job at the server",
 			"%s is not newer than the running %s", to, from)
+	}
+	if rb := req.Rollback; rb != nil {
+		if v, ok := parseVersion(versionRe, rb.Version); !ok || v != from {
+			return UpgradeAnswer{}, upgradeRefuse("rollback_not_running", "name the build this box runs now (state: version), or leave rollback out",
+				"rollback names %q, but this box runs %s: a rollback can only install the build the upgrade replaces", rb.Version, from)
+		}
 	}
 	if l.cfg.Daemon != nil {
 		if cfg, err := l.cfg.Daemon.Load(); err == nil && strings.TrimSpace(cfg.SendOrderPickupDir) != "" && to.less(pickupMinVersion) {
@@ -368,6 +380,9 @@ func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
 	job := UpgradeJob{Ticket: ticket, From: from.String(), To: to.String(), SHA256: sha, Setup: setup,
 		InstallDir: l.cfg.InstallDir, DaemonWasRunning: daemonRunning, By: req.By, AcceptedAt: l.cfg.Now().UTC(),
 		FromSHA256: l.knownSetupSHA(from.String()), HealthMinutes: health, Auto: req.Policy != nil, Policy: req.Policy}
+	if req.Rollback != nil {
+		job.Rollback = &linkproto.RollbackPin{Version: from.String(), SHA256: req.Rollback.SHA256}
+	}
 	b, _ := json.MarshalIndent(job, "", "  ")
 	if err := atomicfile.Write(filepath.Join(tdir, jobFile), b, 0o600); err != nil {
 		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "writing the job: %v", err)

@@ -262,7 +262,7 @@ func decideAuto(in autoInputs) autoView {
 		}
 		last = a
 		switch a.Outcome {
-		case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack:
+		case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack, linkproto.OutcomeNoRollback:
 			stopped = true
 		case linkproto.OutcomeFailed, linkproto.OutcomeLost:
 			failed++
@@ -385,6 +385,9 @@ func (l *Link) autoAttempt(v autoView, af *autoFile, now time.Time) bool {
 	req := upgradeRequest{To: v.target, SHA256: p.Target.SHA256, Ticket: TicketFor("auto/" + linkproto.RandomNonce(16)),
 		By: fmt.Sprintf("auto-update: policy %s #%d approved by %s", p.Scope, p.Seq, p.By), HealthMinutes: p.HealthMinutes,
 		Policy: &PolicyRef{Scope: p.Scope.Ref(), Seq: p.Seq}}
+	if pin, ok := p.RollbackFor(from); ok { // D8: the policy's signed digest of the build this box runs, if it has one
+		req.Rollback = &pin
+	}
 	upgradeMu.Lock()
 	ans, err := l.startUpgrade(req)
 	upgradeMu.Unlock()
@@ -523,9 +526,12 @@ func ticketOutcome(dataDir, ticket string, now time.Time) (string, *UpgradeResul
 	return linkproto.OutcomeLost, nil
 }
 
-// resultOutcome is what a result says, in linkproto's words.
+// resultOutcome is what a result says, in linkproto's words: the runner's own outcome, else (a result written before
+// it named one) what its fields say.
 func resultOutcome(res UpgradeResult) string {
 	switch {
+	case res.Outcome != "":
+		return res.Outcome
 	case res.Rollback != nil && res.Rollback.OK:
 		return linkproto.OutcomeRolledBack
 	case res.Rollback != nil, res.Health != nil && !res.Health.OK:

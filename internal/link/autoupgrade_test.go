@@ -384,3 +384,94 @@ func TestTheUpgradeCommandsHealthMinutes(t *testing.T) {
 		t.Fatalf("%+v %+v (%v)", ans, job, err)
 	}
 }
+
+// D8: a command's spec may carry the signed digest of the build the box runs; the job takes it as the rollback's only
+// authority. One naming another build is refused before anything is downloaded.
+func TestTheUpgradeCommandCarriesASignedRollback(t *testing.T) {
+	pin := strings.Repeat("29", 32)
+	g := newUpgradeRig(t, "v1.0.29")
+	ans, _, ticket := g.upgrade(t, `{"version":"1.0.30","sha256":"`+sha(g.setup)+`","rollback":{"version":"1.0.29","sha256":"`+strings.ToUpper(pin)+`"}}`)
+	var job UpgradeJob
+	b, _ := os.ReadFile(filepath.Join(g.dir, "upgrade", ticket, jobFile))
+	if err := json.Unmarshal(b, &job); err != nil || !ans.Accepted || job.Rollback == nil || job.Rollback.Version != "1.0.29" || job.Rollback.SHA256 != pin {
+		t.Fatalf("%+v %+v (%v)", ans, job, err)
+	}
+	for _, c := range []struct {
+		name, rollback, code string
+	}{
+		{"another build than the running one", `{"version":"1.0.28","sha256":"` + pin + `"}`, "rollback_not_running"},
+		{"not older than the target", `{"version":"1.0.30","sha256":"` + pin + `"}`, "spec_invalid"},
+		{"not a digest", `{"version":"1.0.29","sha256":"x"}`, "spec_invalid"},
+		{"an unknown field in it", `{"version":"1.0.29","sha256":"` + pin + `","url":"https://evil.example/x.exe"}`, "spec_invalid"},
+	} {
+		g := newUpgradeRig(t, "v1.0.29")
+		ans, exit, _ := g.upgrade(t, `{"version":"1.0.30","sha256":"`+sha(g.setup)+`","rollback":`+c.rollback+`}`)
+		if exit != 1 || ans.Refusal == nil || ans.Refusal.Code != c.code || g.rel.hit("v1.0.30/SHA256SUMS") != 0 {
+			t.Errorf("%s: %+v", c.name, ans)
+		}
+	}
+	// without one, the job has none: an unhealthy upgrade keeps the new build (unhealthy_no_rollback)
+	g = newUpgradeRig(t, "v1.0.29")
+	_, _, ticket = g.upgrade(t, g.spec("1.0.30", sha(g.setup)))
+	job = UpgradeJob{}
+	b, _ = os.ReadFile(filepath.Join(g.dir, "upgrade", ticket, jobFile))
+	if err := json.Unmarshal(b, &job); err != nil || job.Rollback != nil {
+		t.Fatalf("%+v (%v)", job, err)
+	}
+}
+
+// D8: the scheduler takes the policy's signed digest of the build the box runs, when the policy carries one.
+func TestTheSchedulerTakesThePolicysRollbackDigest(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		pins []linkproto.RollbackPin
+		want string
+	}{
+		{"pinned", []linkproto.RollbackPin{{Version: "1.0.28", SHA256: strings.Repeat("28", 32)}, {Version: "1.0.29", SHA256: strings.Repeat("29", 32)}}, strings.Repeat("29", 32)},
+		{"not pinned", []linkproto.RollbackPin{{Version: "1.0.28", SHA256: strings.Repeat("28", 32)}}, ""},
+		{"none", nil, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
+			p := a.policy(1)
+			p.Rollbacks = c.pins
+			a.deliver(t, "", "", p)
+			a.b.link.autoCheck()
+			var job UpgradeJob
+			b, _ := os.ReadFile(filepath.Join(a.dir, "upgrade", a.lastTicket(), jobFile))
+			if err := json.Unmarshal(b, &job); err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if job.Rollback != nil {
+				got = job.Rollback.SHA256
+				if job.Rollback.Version != "1.0.29" {
+					t.Fatalf("the pin of %s", job.Rollback.Version)
+				}
+			}
+			if got != c.want {
+				t.Fatalf("rollback %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// An upgrade that ended unhealthy without a rollback stops that target under that policy, as a rolled-back one does.
+func TestAnUnhealthyTargetWithoutARollbackStops(t *testing.T) {
+	a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
+	a.deliver(t, "", "", a.policy(1))
+	a.b.link.autoCheck()
+	a.rs.next(t)
+	a.finish(t, UpgradeResult{Ticket: a.lastTicket(), From: "1.0.29", To: "1.0.30", Outcome: linkproto.OutcomeNoRollback,
+		Error:  "not healthy within 20 min after the setup (link: not connected to the relay); no signed digest names the setup of 1.0.29",
+		Health: &linkproto.UpgradeHealth{Minutes: 20}})
+	a.clk.set(boxTime(4, 2, 10))
+	a.b.link.autoCheck()
+	af := a.auto(t)
+	if a.spawns() != 1 || af.Attempts[0].Outcome != linkproto.OutcomeNoRollback || af.View.Effective.Why != linkproto.WhyStopped {
+		t.Fatalf("spawned %d, %+v", a.spawns(), af.View.Effective)
+	}
+	if rep := a.rs.next(t); rep.AutoUpgrade.Outcome != linkproto.OutcomeNoRollback {
+		t.Fatalf("report %+v", rep.AutoUpgrade)
+	}
+}

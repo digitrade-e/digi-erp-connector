@@ -20,10 +20,13 @@ import (
 // runner waits up to the job's healthMinutes for the box to be healthy: both services as they were before, the daemon
 // proving itself the way provision's state does (it logs in with config.yaml's credential and answers /api/ping with
 // the installed build), and the installed build's link connected to the relay again (link\session.json, written by
-// the link). Not healthy: it installs exactly the build it replaced, from that release (the compiled-in prefix only),
-// its setup's SHA-256 equal to the release's SHA256SUMS line and to the digest this box recorded when that build was
-// installed, when it has one. That is the only downgrade the link ever makes, only for the ticket's own rollback, at
-// most once: a second failure leaves the box as the rollback's setup left it, and the result says so.
+// the link). Not healthy: it installs exactly the build it replaced, from that release (the compiled-in prefix only) —
+// and only when a SIGNED digest names that build's setup (D8, review B1: the policy's rollbacks for an automatic
+// upgrade, the command's spec for a manual one), which the release's SHA256SUMS line and the download must both equal.
+// The digest this box recorded when that build was installed is a cross-check, never an authority: without a signed
+// one the new build stays (unhealthy_no_rollback) and a person decides. That is the only downgrade the link ever
+// makes, only for the ticket's own rollback, at most once: a second failure leaves the box as the rollback's setup
+// left it, and the result says so.
 //
 // DIG-1297: a box that writes orders to a pickup folder is never taken below pickupMinVersion (1.0.25), which ignores
 // it. The runner's own build is the build replaced and holds this code, so it is from 1.0.31 on: the guard is the rule
@@ -170,8 +173,23 @@ func (r UpgradeRunner) healthRound(job UpgradeJob, accept []string, since time.T
 	return checks
 }
 
-// rollback installs the build job replaced again, once (see the top of this file). The connector windows it ended
-// before its setup go to res.RollbackClosedApps.
+// noRollback says why an unhealthy upgrade keeps the new build, in plan 088 §2b's words: the outcome and the reason,
+// or "" when the rollback may run.
+func (r UpgradeRunner) noRollback(job UpgradeJob) (outcome, why string) {
+	pin := job.Rollback
+	switch {
+	case pin == nil || releaseOf(pin.Version) != job.From || !sha256Re.MatchString(pin.SHA256):
+		return linkproto.OutcomeNoRollback, fmt.Sprintf("no signed digest names the setup of %s, the build it replaced (D8): "+
+			"the new build stays, and a person decides", orNone(job.From))
+	case job.FromSHA256 != "" && job.FromSHA256 != pin.SHA256:
+		return linkproto.OutcomeNoRollback, fmt.Sprintf("the signed digest of %s's setup (%s) is not the one that installed it here (%s): "+
+			"the new build stays, and a person decides", job.From, pin.SHA256, job.FromSHA256)
+	}
+	return "", ""
+}
+
+// rollback installs the build job replaced again, once (see the top of this file), to the signed digest noRollback
+// found. The connector windows it ended before its setup go to res.RollbackClosedApps.
 func (r UpgradeRunner) rollback(job UpgradeJob, tdir string, res *UpgradeResult) *linkproto.UpgradeRollback {
 	rb := &linkproto.UpgradeRollback{To: job.From, ExitCode: -1, StartedAt: r.Now().UTC()}
 	done := func() *linkproto.UpgradeRollback {
@@ -205,8 +223,12 @@ func (r UpgradeRunner) rollback(job UpgradeJob, tdir string, res *UpgradeResult)
 		rb.Error = withoutCredentials(fmt.Sprintf("release v%s: %v", to, err))
 		return done()
 	}
-	if job.FromSHA256 != "" && sha != job.FromSHA256 {
-		rb.Error = fmt.Sprintf("release v%s's setup has SHA-256 %s, not %s, the one that installed it here: not run", to, sha, job.FromSHA256)
+	if job.Rollback == nil || sha != job.Rollback.SHA256 {
+		want := ""
+		if job.Rollback != nil {
+			want = job.Rollback.SHA256
+		}
+		rb.Error = fmt.Sprintf("release v%s's setup has SHA-256 %s, not %s, the signed digest: not run", to, sha, orNone(want))
 		return done()
 	}
 	rb.SHA256 = sha

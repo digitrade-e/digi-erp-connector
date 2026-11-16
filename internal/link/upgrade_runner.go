@@ -211,13 +211,17 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		res.SetupLogTail = tailLines(logPath, 40, 300)
 	}
 	_ = os.Remove(setup) // tens of MB; the log, the job and the result stay
-	// Plan 088 D5: healthy within healthMinutes, or the build it replaced once more (upgrade_health.go).
+	// Plan 088 D5: healthy within healthMinutes, or the build it replaced once more (upgrade_health.go) — when nothing
+	// in §2b keeps the new build in place (noRollback).
 	if setupEnded && job.HealthMinutes > 0 {
 		res.Health = r.checkHealth(job, []string{job.To, job.From}, setupStarted)
 		if !res.Health.OK {
-			res.Rollback = r.rollback(job, tdir, &res)
 			msg := fmt.Sprintf("not healthy within %d min after the setup (%s)", job.HealthMinutes, failedChecks(res.Health))
-			if res.Rollback.OK {
+			if outcome, why := r.noRollback(job); outcome != "" {
+				res.Outcome = outcome
+				msg += "; " + why
+				r.Log.Warn(fmt.Sprintf("link upgrade %s: no rollback: %s", r.Ticket, why))
+			} else if res.Rollback = r.rollback(job, tdir, &res); res.Rollback.OK {
 				msg += fmt.Sprintf("; %s, the build it replaced, was installed again and is healthy", res.Rollback.To)
 			} else {
 				msg += fmt.Sprintf("; the rollback to %s failed: %s", res.Rollback.To, res.Rollback.Error)
@@ -233,6 +237,7 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		}
 	}
 	res.FinishedAt = r.Now().UTC()
+	res.Outcome = resultOutcome(res)
 	return res, r.write(res)
 }
 
@@ -297,6 +302,7 @@ func (r UpgradeRunner) write(res UpgradeResult) error {
 	if res.FinishedAt.IsZero() {
 		res.FinishedAt = r.Now().UTC()
 	}
+	res.Outcome = resultOutcome(res)
 	if r.Protect != nil {
 		if err := r.Protect(); err != nil {
 			r.Log.Error("link upgrade: protecting the data directory", err)
