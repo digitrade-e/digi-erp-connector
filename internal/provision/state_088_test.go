@@ -23,7 +23,7 @@ func TestState_ShowsAutoUpgrade(t *testing.T) {
 	}
 
 	ticket := strings.Repeat("ab", 16)
-	scope := linkproto.PolicyScope{Type: linkproto.ScopeRing, Value: "canary"}
+	scope := linkproto.PolicyScope{Type: linkproto.ScopeBoxes, Boxes: []string{"bfl-read"}}
 	next := time.Date(2026, 11, 17, 2, 10, 0, 0, time.UTC)
 	view := link.AutoUpgradeStatus{Enabled: true, Ring: "canary",
 		Policies: []link.PolicyStatus{{Scope: scope, Seq: 4, Target: &linkproto.PolicyTarget{Version: "1.0.31", SHA256: strings.Repeat("c", 64)},

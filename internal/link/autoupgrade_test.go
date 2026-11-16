@@ -46,7 +46,7 @@ func (a *autoRig) deliver(t *testing.T, tenant, ring string, ps ...linkproto.Upg
 
 // policy is the rig's release 1.0.30 for every box, in a 02:00-05:00 window on days.
 func (a *autoRig) policy(seq int64, days ...string) linkproto.UpgradePolicy {
-	p := targetPolicy(scope(linkproto.ScopeAll, ""), seq, "1.0.30", sha(a.setup), a.clk.Now())
+	p := targetPolicy(everyBox(), seq, "1.0.30", sha(a.setup), a.clk.Now())
 	if len(days) > 0 {
 		p.Window.Days = days
 	}
@@ -170,15 +170,22 @@ func TestTheSchedulerHolds(t *testing.T) {
 			st, _ := a.b.store.LoadState()
 			_ = os.WriteFile(a.b.store.statePath(), []byte(fmt.Sprintf("relay: %s\nbox: %s\nautoupgrade: false\n", st.Relay, st.Box)), 0o600)
 		}, linkproto.WhyStateUnreadable, true},
-		{"the box's hold over every box's target", "v1.0.29", func(a *autoRig) {
-			a.deliver(t, "", "", holdPolicy(scope(linkproto.ScopeBox, "bfl-read"), 1, at))
+		{"a box list's hold over every box's target", "v1.0.29", func(a *autoRig) {
+			a.deliver(t, "", "", holdPolicy(boxList("bfl-read", "bfl-write"), 1, at))
 		}, linkproto.WhyPolicyHolds, true},
-		{"a tenant's hold over a ring's target", "v1.0.29", func(a *autoRig) {
-			ring := a.policy(1)
-			ring.Scope = scope(linkproto.ScopeRing, "canary")
-			a.deliver(t, "bflstore", "canary", ring, holdPolicy(scope(linkproto.ScopeTenant, "bflstore"), 1, at))
+		{"every box's later hold over a box list's target (D10)", "v1.0.29", func(a *autoRig) {
+			list := a.policy(1)
+			list.Scope, list.IssuedAt = boxList("bfl-read"), at.Add(-2*time.Hour)
+			a.deliver(t, "", "", list, holdPolicy(everyBox(), 2, at))
 		}, linkproto.WhyPolicyHolds, true},
-		{"the policy expired", "v1.0.29", func(a *autoRig) { a.clk.add(31 * 24 * time.Hour) }, linkproto.WhyNoPolicy, true},
+		// review m9: an expired policy holds for its scope, said so
+		{"the policy expired", "v1.0.29", func(a *autoRig) { a.clk.add(31 * 24 * time.Hour) }, linkproto.WhyPolicyExpired, true},
+		{"an expired box list's hold does not lapse into every box's target", "v1.0.29", func(a *autoRig) {
+			h := holdPolicy(boxList("bfl-read"), 1, at)
+			h.ExpiresAt = at.Add(time.Hour)
+			a.deliver(t, "", "", a.policy(2), h)
+			a.clk.add(2 * time.Hour)
+		}, linkproto.WhyPolicyExpired, true},
 		{"already on the target", "v1.0.30", func(*autoRig) {}, linkproto.WhyUpToDate, false},
 	}
 	for _, c := range cases {
@@ -349,7 +356,7 @@ func TestTheJobRecordsTheSetupOfTheBuildReplaced(t *testing.T) {
 	}
 	// a policy this box holds that targets 1.0.29, when no ticket installed it
 	c := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
-	old := targetPolicy(scope(linkproto.ScopeTenant, "bflstore"), 1, "1.0.29", strings.Repeat("7", 64), c.clk.Now())
+	old := targetPolicy(boxList("bfl-read"), 1, "1.0.29", strings.Repeat("7", 64), c.clk.Now())
 	old.Window.Days = []string{"sun"} // keeps it from being the one acted on: it is up to date anyway
 	c.deliver(t, "bflstore", "", c.policy(1), old)
 	raw, e := envelope(ed25519.PrivateKey(c.priv), "team-1", "bfl-read", CommandUpgrade, nil, []byte(c.spec("1.0.30", sha(c.setup))), c.clk.Now())

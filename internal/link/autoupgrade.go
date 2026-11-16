@@ -72,19 +72,21 @@ type autoFile struct {
 
 // AutoUpgradeStatus is the auto-update part of link-status and of provision's state (plan 088).
 type AutoUpgradeStatus struct {
-	Enabled    bool                      `json:"enabled"`          // link.yaml autoUpgrade (default true)
-	Tenant     string                    `json:"tenant,omitempty"` // as the relay last stated them
-	Ring       string                    `json:"ring,omitempty"`
-	StatedAt   time.Time                 `json:"statedAt,omitzero"`
-	Policies   []PolicyStatus            `json:"policies"`
-	Refused    []linkproto.ReportRefusal `json:"refused,omitempty"` // the last delivery's refusals
-	Effective  linkproto.ReportEffective `json:"effective"`
-	NextWindow time.Time                 `json:"nextWindow,omitzero"` // the effective policy's next window, box time
-	LastCheck  time.Time                 `json:"lastCheck,omitzero"`
-	NextCheck  time.Time                 `json:"nextCheck,omitzero"`
-	Waiting    *AutoWait                 `json:"waiting,omitempty"`
-	Last       *linkproto.ReportAuto     `json:"last,omitempty"` // the last automatic attempt
-	Error      string                    `json:"error,omitempty"`
+	Enabled   bool                      `json:"enabled"`          // link.yaml autoUpgrade (default true)
+	Tenant    string                    `json:"tenant,omitempty"` // as the relay last stated them
+	Ring      string                    `json:"ring,omitempty"`
+	StatedAt  time.Time                 `json:"statedAt,omitzero"`
+	Policies  []PolicyStatus            `json:"policies"`
+	Refused   []linkproto.ReportRefusal `json:"refused,omitempty"` // the last delivery's refusals
+	Effective linkproto.ReportEffective `json:"effective"`
+	// Braked is the moving policy a later hold overrides (plan 088 D10), when that is why the box holds.
+	Braked     *PolicyRef            `json:"braked,omitempty"`
+	NextWindow time.Time             `json:"nextWindow,omitzero"` // the effective policy's next window, box time
+	LastCheck  time.Time             `json:"lastCheck,omitzero"`
+	NextCheck  time.Time             `json:"nextCheck,omitzero"`
+	Waiting    *AutoWait             `json:"waiting,omitempty"`
+	Last       *linkproto.ReportAuto `json:"last,omitempty"` // the last automatic attempt
+	Error      string                `json:"error,omitempty"`
 }
 
 // PolicyStatus is one policy the box holds, as it verifies now.
@@ -95,12 +97,13 @@ type PolicyStatus struct {
 	Hold          bool                    `json:"hold"`
 	Window        linkproto.PolicyWindow  `json:"window"`
 	HealthMinutes int                     `json:"healthMinutes,omitempty"`
+	Rollbacks     []linkproto.RollbackPin `json:"rollbacks,omitempty"` // the signed digests a rollback may install (D8)
 	IssuedAt      time.Time               `json:"issuedAt,omitzero"`
 	ExpiresAt     time.Time               `json:"expiresAt,omitzero"`
 	By            string                  `json:"by,omitempty"`
 	KeyID         string                  `json:"keyId"`
 	AcceptedAt    time.Time               `json:"acceptedAt"`
-	Applies       bool                    `json:"applies"` // names this box with the tenant and ring stated now
+	Applies       bool                    `json:"applies"` // names this box's id
 	Expired       bool                    `json:"expired"`
 	Error         string                  `json:"error,omitempty"` // it no longer verifies (its key retired): not used
 }
@@ -186,33 +189,49 @@ func decideAuto(in autoInputs) autoView {
 		s.Error = in.afErr.Error()
 		return hold(linkproto.WhyStateUnreadable)
 	}
-	var valid []linkproto.UpgradePolicy
+	// What the box holds, as Decide weighs it: a policy whose key is now below the epoch floor no longer verifies and
+	// is not followed, but it still holds for its scope — a less specific policy does not take over (review m9).
+	var held []linkproto.UpgradePolicy
+	retired := map[string]int64{} // scope key → the seq of a held policy that no longer verifies
 	for _, sp := range in.pf.Policies {
-		ps := PolicyStatus{Scope: sp.Scope, Seq: sp.Seq, AcceptedAt: sp.AcceptedAt, KeyID: sp.Signed.KeyID}
+		ps := PolicyStatus{Scope: sp.Scope, Seq: sp.Seq, AcceptedAt: sp.AcceptedAt, KeyID: sp.Signed.KeyID,
+			Applies: sp.Scope.Names(in.state.Box)}
 		p, _, err := in.team.VerifySignedPolicy(sp.Signed, in.minEpoch)
 		if err != nil {
 			ps.Error = "no longer verifies: " + refusalCode(err)
 			s.Policies = append(s.Policies, ps)
+			if ps.Applies {
+				held = append(held, linkproto.UpgradePolicy{Scope: sp.Scope, Seq: sp.Seq, Hold: true})
+				retired[sp.Scope.Key()] = sp.Seq
+			}
 			continue
 		}
 		ps.Target, ps.Hold, ps.Window, ps.HealthMinutes = p.Target, p.Hold, p.Window, p.HealthMinutes
-		ps.IssuedAt, ps.ExpiresAt, ps.By = p.IssuedAt, p.ExpiresAt, p.By
-		ps.Applies = linkproto.Applies(p, in.state.Box, in.pf.Tenant, in.pf.Ring)
+		ps.IssuedAt, ps.ExpiresAt, ps.By, ps.Rollbacks = p.IssuedAt, p.ExpiresAt, p.By, p.Rollbacks
+		ps.Applies = linkproto.Applies(p, in.state.Box)
 		ps.Expired = p.ActiveAt(in.now) != nil
-		if ps.Applies && !ps.Expired {
-			valid = append(valid, p)
+		if ps.Applies {
+			held = append(held, p)
 		}
 		s.Policies = append(s.Policies, ps)
 	}
-	eff, ok := linkproto.MostSpecific(valid)
-	if !ok {
+	d := linkproto.Decide(held, in.state.Box, in.now)
+	if !d.Found {
 		return hold(linkproto.WhyNoPolicy)
 	}
+	eff := d.Policy
 	v.policy = &eff
-	scope := eff.Scope
+	scope := eff.Scope.Ref()
 	s.Effective.Scope, s.Effective.Seq, s.Effective.ExpiresAt = &scope, eff.Seq, eff.ExpiresAt
-	if eff.Holds() {
-		return hold(linkproto.WhyPolicyHolds)
+	if d.Hold {
+		why := d.Why
+		if seq, ok := retired[eff.Scope.Key()]; ok && seq == eff.Seq {
+			why = linkproto.WhyPolicyRevoked
+		}
+		if d.Braked != nil {
+			s.Braked = &PolicyRef{Scope: d.Braked.Scope.Ref(), Seq: d.Braked.Seq}
+		}
+		return hold(why)
 	}
 	window := eff.Window
 	s.Effective.Version, s.Effective.Window = eff.Target.Version, &window
@@ -365,11 +384,11 @@ func (l *Link) autoAttempt(v autoView, af *autoFile, now time.Time) bool {
 	}
 	req := upgradeRequest{To: v.target, SHA256: p.Target.SHA256, Ticket: TicketFor("auto/" + linkproto.RandomNonce(16)),
 		By: fmt.Sprintf("auto-update: policy %s #%d approved by %s", p.Scope, p.Seq, p.By), HealthMinutes: p.HealthMinutes,
-		Policy: &PolicyRef{Scope: p.Scope, Seq: p.Seq}}
+		Policy: &PolicyRef{Scope: p.Scope.Ref(), Seq: p.Seq}}
 	upgradeMu.Lock()
 	ans, err := l.startUpgrade(req)
 	upgradeMu.Unlock()
-	a := autoAttempt{At: now.UTC(), Scope: p.Scope, Seq: p.Seq, From: from, To: v.target.String(), WindowStart: v.windowStart}
+	a := autoAttempt{At: now.UTC(), Scope: p.Scope.Ref(), Seq: p.Seq, From: from, To: v.target.String(), WindowStart: v.windowStart}
 	if err != nil {
 		var r *UpgradeRefusal
 		if !errors.As(err, &r) {

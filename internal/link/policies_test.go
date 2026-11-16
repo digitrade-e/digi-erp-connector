@@ -2,6 +2,7 @@ package link
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
@@ -17,8 +18,11 @@ import (
 
 var everyDay = []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 
-func scope(typ, value string) linkproto.PolicyScope {
-	return linkproto.PolicyScope{Type: typ, Value: value}
+// everyBox and boxList are the two scopes (plan 088 D9).
+func everyBox() linkproto.PolicyScope { return linkproto.PolicyScope{Type: linkproto.ScopeAll} }
+
+func boxList(ids ...string) linkproto.PolicyScope {
+	return linkproto.PolicyScope{Type: linkproto.ScopeBoxes, Boxes: ids}
 }
 
 // targetPolicy moves scope to version (setup digest digest) in a 02:00-05:00 window every day, valid around now.
@@ -176,34 +180,33 @@ func TestAPolicyDeliveryIsKeptAndReported(t *testing.T) {
 	now := time.Now()
 	digest := strings.Repeat("ab", 32)
 	ps := []linkproto.SignedPolicy{
-		signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeAll, ""), 3, "1.0.30", digest, now)),
-		signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeRing, "canary"), 5, "1.0.31", digest, now)),
-		signed(t, priv, "team-1", holdPolicy(scope(linkproto.ScopeTenant, "bflstore"), 2, now)),
-		signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeBox, "bfl-read"), 1, "1.0.32", digest, now)),
+		signed(t, priv, "team-1", targetPolicy(everyBox(), 3, "1.0.31", digest, now)),
+		signed(t, priv, "team-1", targetPolicy(boxList("bfl-read", "tamig-1"), 5, "1.0.32", digest, now)),
 	}
 	deliver(t, rc, delivery("bfl-read", "bflstore", "canary", ps...))
 	rep := rs.next(t)
-	if len(rep.Policies) != 4 || len(rep.Refused) != 0 || rep.Tenant != "bflstore" || rep.Ring != "canary" || rep.Build != "v1.0.30" {
+	if len(rep.Policies) != 2 || len(rep.Refused) != 0 || rep.Tenant != "bflstore" || rep.Ring != "canary" || rep.Build != "v1.0.30" {
 		t.Fatalf("report %+v", rep)
 	}
 	eff := rep.Effective
-	if eff.Scope == nil || eff.Scope.Key() != "box:bfl-read" || eff.Version != "1.0.32" || eff.Hold || eff.Why != linkproto.WhyScheduled {
-		t.Fatalf("effective %+v", eff) // the box's own policy is the most specific
+	if eff.Scope == nil || eff.Scope.Key() != "boxes" || len(eff.Scope.Boxes) != 0 || eff.Seq != 5 || eff.Version != "1.0.32" || eff.Hold ||
+		eff.Why != linkproto.WhyScheduled {
+		t.Fatalf("effective %+v", eff) // the box list naming it is the most specific; the report names it without the list
 	}
 	pf, err := b.store.loadPolicies()
-	if err != nil || len(pf.Policies) != 4 || pf.Tenant != "bflstore" || pf.Ring != "canary" {
+	if err != nil || len(pf.Policies) != 2 || pf.Policies[1].Epoch != 1 || len(pf.Policies[1].Scope.Boxes) != 2 {
 		t.Fatalf("policy.json %+v %v", pf, err)
 	}
-	if !b.log.has("policy box:bfl-read #1 accepted (key team-1): target 1.0.32") {
+	if !b.log.has("policy boxes[2] #5 accepted (key team-1): target 1.0.32") {
 		t.Fatalf("not logged: %v", b.log.lines)
 	}
 	// the relay delivers the same policies again on every connection: nothing changes, nothing is refused
 	deliver(t, rc, delivery("bfl-read", "bflstore", "canary", ps...))
-	if rep := rs.next(t); len(rep.Refused) != 0 || len(rep.Policies) != 4 {
+	if rep := rs.next(t); len(rep.Refused) != 0 || len(rep.Policies) != 2 {
 		t.Fatalf("again: %+v", rep)
 	}
-	if n := b.log.count("accepted (key"); n != 4 {
-		t.Fatalf("%d acceptances logged for 4 policies delivered twice", n)
+	if n := b.log.count("accepted (key"); n != 2 {
+		t.Fatalf("%d acceptances logged for 2 policies delivered twice", n)
 	}
 }
 
@@ -215,12 +218,12 @@ func TestPolicyRefusals(t *testing.T) {
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	digest := strings.Repeat("cd", 32)
-	all5 := targetPolicy(scope(linkproto.ScopeAll, ""), 5, "1.0.31", digest, now)
+	all5 := targetPolicy(everyBox(), 5, "1.0.31", digest, now)
 	deliver(t, rc, delivery("bfl-read", "bflstore", "canary", signed(t, priv, "team-1", all5)))
 	if rep := rs.next(t); len(rep.Policies) != 1 {
 		t.Fatalf("%+v", rep)
 	}
-	expired := targetPolicy(scope(linkproto.ScopeRing, "canary"), 1, "1.0.31", digest, now)
+	expired := targetPolicy(boxList("bfl-read"), 1, "1.0.31", digest, now)
 	expired.IssuedAt, expired.ExpiresAt = now.Add(-48*time.Hour), now.Add(-time.Hour)
 	other := all5
 	other.HealthMinutes = 30 // the same seq, other bytes
@@ -233,10 +236,8 @@ func TestPolicyRefusals(t *testing.T) {
 		{"a key this release does not trust", signed(t, stranger, "team-9", all5), linkproto.CodeKeyUnknown, false},
 		{"another key under our id", signed(t, stranger, "team-1", all5), linkproto.CodeBadSignature, false},
 		{"expired", signed(t, priv, "team-1", expired), linkproto.CodeExpired, true},
-		{"another ring's", signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeRing, "stable"), 1, "1.0.31", digest, now)), linkproto.CodeWrongScope, true},
-		{"another tenant's", signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeTenant, "tamig"), 1, "1.0.31", digest, now)), linkproto.CodeWrongScope, true},
-		{"another box's", signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeBox, "bfl-write"), 1, "1.0.31", digest, now)), linkproto.CodeWrongScope, true},
-		{"an older seq (a replay)", signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeAll, ""), 4, "1.0.30", digest, now)), linkproto.CodeStaleSeq, true},
+		{"a list without this box", signed(t, priv, "team-1", targetPolicy(boxList("bfl-write", "tamig-1"), 1, "1.0.31", digest, now)), linkproto.CodeWrongScope, true},
+		{"an older seq (a replay)", signed(t, priv, "team-1", targetPolicy(everyBox(), 4, "1.0.30", digest, now)), linkproto.CodeStaleSeq, true},
 		{"the same seq, other bytes", signed(t, priv, "team-1", other), linkproto.CodeStaleSeq, true},
 	}
 	for _, c := range cases {
@@ -263,7 +264,7 @@ func TestADeliveryRefusedAsAWhole(t *testing.T) {
 	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", forTests088)
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
-	p := signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeAll, ""), 1, "1.0.31", strings.Repeat("ef", 32), now))
+	p := signed(t, priv, "team-1", targetPolicy(everyBox(), 1, "1.0.31", strings.Repeat("ef", 32), now))
 	for _, c := range []struct {
 		name string
 		d    any
@@ -302,20 +303,20 @@ func TestARetiredKeysPolicies(t *testing.T) {
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	digest := strings.Repeat("ab", 32)
-	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv1, "team-1", targetPolicy(scope(linkproto.ScopeAll, ""), 1, "1.0.31", digest, now))))
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv1, "team-1", targetPolicy(everyBox(), 1, "1.0.31", digest, now))))
 	if rep := rs.next(t); rep.Effective.Version != "1.0.31" {
 		t.Fatalf("%+v", rep.Effective)
 	}
-	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv2, "team-2", holdPolicy(scope(linkproto.ScopeBox, "bfl-read"), 1, now))))
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv2, "team-2", holdPolicy(boxList("bfl-read"), 1, now))))
 	rep := rs.next(t)
 	if b.store.MinEpoch(CompiledMinEpoch) != 2 {
 		t.Fatal("the epoch floor did not rise")
 	}
 	// the epoch-1 policy no longer verifies: it is not reported as held
-	if len(rep.Policies) != 1 || rep.Policies[0].Scope.Key() != "box:bfl-read" {
+	if len(rep.Policies) != 1 || rep.Policies[0].Scope.Key() != "boxes" {
 		t.Fatalf("%+v", rep.Policies)
 	}
-	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv1, "team-1", targetPolicy(scope(linkproto.ScopeTenant, "x1"), 1, "1.0.31", digest, now))))
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv1, "team-1", targetPolicy(everyBox(), 2, "1.0.31", digest, now))))
 	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeKeyRevoked {
 		t.Fatalf("%+v", rep.Refused)
 	}
@@ -341,8 +342,9 @@ func TestNoReportToARelayThatSentNoPolicy(t *testing.T) {
 	rs.next(t)
 }
 
-// The tenant and ring are the relay's to state (plan 088 D6): a ring cleared stops the ring's policy applying.
-func TestTheStatedRingDecides(t *testing.T) {
+// D9 (review M1): what applies is the signed scope against the box's own id. A relay that states another tenant or
+// ring — or none — neither undoes a hold nor spreads a canary-only approval.
+func TestTheRelaysStatementsDecideNothing(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
 	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
@@ -350,26 +352,105 @@ func TestTheStatedRingDecides(t *testing.T) {
 	now := time.Now()
 	digest := strings.Repeat("ab", 32)
 	ps := []linkproto.SignedPolicy{
-		signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeAll, ""), 1, "1.0.31", digest, now)),
-		signed(t, priv, "team-1", holdPolicy(scope(linkproto.ScopeRing, "frozen"), 1, now)),
+		signed(t, priv, "team-1", targetPolicy(everyBox(), 20, "1.0.40", digest, now)),
+		signed(t, priv, "team-1", holdPolicy(boxList("bfl-read", "bfl-write"), 3, now)), // BFL stays on its build
 	}
-	deliver(t, rc, delivery("bfl-read", "bflstore", "frozen", ps...))
-	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Scope.Key() != "ring:frozen" {
-		t.Fatalf("%+v", rep.Effective)
-	}
-	deliver(t, rc, delivery("bfl-read", "bflstore", "", ps[0]))
-	rep := rs.next(t)
-	if rep.Effective.Why != linkproto.WhyScheduled || rep.Effective.Scope.Key() != "all" || rep.Ring != "" {
-		t.Fatalf("%+v", rep.Effective)
-	}
-	for _, p := range rep.Policies {
-		if p.Scope.Key() == "ring:frozen" && p.Applies {
-			t.Fatal("the cleared ring's policy still applies")
+	for _, stated := range []struct{ tenant, ring string }{{"bflstore", ""}, {"", ""}, {"tamig", "canary"}, {"bflstore", "stable"}} {
+		deliver(t, rc, delivery("bfl-read", stated.tenant, stated.ring, ps...))
+		rep := rs.next(t)
+		if rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Scope.Key() != "boxes" || !rep.Effective.Hold {
+			t.Fatalf("stated %+v: the hold was undone: %+v", stated, rep.Effective)
+		}
+		if rep.Tenant != stated.tenant || rep.Ring != stated.ring {
+			t.Fatalf("the report does not repeat what the relay stated: %+v", rep)
 		}
 	}
-	if !b.log.has(`ring "" (it was "bflstore", "frozen")`) {
-		t.Fatal("the move was not logged")
+	// a canary-only approval (the canary box list) never reaches a box it does not name, whatever ring it is stated in
+	canary := signed(t, priv, "team-1", targetPolicy(boxList("tamig-1"), 4, "1.0.41", digest, now))
+	deliver(t, rc, delivery("bfl-read", "bflstore", "canary", canary))
+	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeWrongScope || rep.Effective.Why != linkproto.WhyPolicyHolds {
+		t.Fatalf("%+v", rep)
 	}
+}
+
+// D10 (review M2): a hold issued after a moving policy wins at any scope — every box's hold is the emergency brake for
+// a box list that still targets the bad release.
+func TestAnAllHoldBrakesABoxListsTarget(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.40")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	digest := strings.Repeat("ab", 32)
+	canary := targetPolicy(boxList("bfl-read", "tamig-1"), 3, "1.0.41", digest, now)
+	canary.IssuedAt = now.Add(-3 * time.Hour)
+	all := targetPolicy(everyBox(), 5, "1.0.41", digest, now)
+	all.IssuedAt = now.Add(-2 * time.Hour)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", canary), signed(t, priv, "team-1", all)))
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyScheduled || rep.Effective.Version != "1.0.41" {
+		t.Fatalf("%+v", rep.Effective)
+	}
+	brake := holdPolicy(everyBox(), 6, now) // 1.0.41 is found bad: the inverse is every box's hold
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", canary), signed(t, priv, "team-1", brake)))
+	rep := rs.next(t)
+	if rep.Effective.Why != linkproto.WhyPolicyHolds || !rep.Effective.Hold || rep.Effective.Scope.Key() != "all" || rep.Effective.Seq != 6 {
+		t.Fatalf("the brake did not hold the box list's target: %+v", rep.Effective)
+	}
+	st := b.link.autoStatus()
+	if st.Braked == nil || st.Braked.Scope.Key() != "boxes" || st.Braked.Seq != 3 {
+		t.Fatalf("braked %+v", st.Braked)
+	}
+	// a box list issued after the brake moves its boxes again
+	again := targetPolicy(boxList("bfl-read"), 7, "1.0.42", digest, now)
+	again.IssuedAt = now.Add(time.Minute)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", again), signed(t, priv, "team-1", brake)))
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyScheduled || rep.Effective.Version != "1.0.42" {
+		t.Fatalf("%+v", rep.Effective)
+	}
+}
+
+// Review m1: seq stops at 2^31-1, and a floor set by a key the box has since retired no longer binds — a stolen key
+// cannot freeze a scope past its rotation.
+func TestARetiredKeysFloorNoLongerBinds(t *testing.T) {
+	r := newRelay(t)
+	priv1, kr1 := team(t, 1)
+	priv2, kr2 := team(t, 2)
+	b, rc := pairedBox(t, r, "bfl-read", append(kr1, kr2...), "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	digest := strings.Repeat("ab", 32)
+	frozen := targetPolicy(everyBox(), linkproto.MaxSeq, "1.0.31", digest, now)
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv1, "team-1", frozen)))
+	if rep := rs.next(t); len(rep.Refused) != 0 || rep.Policies[0].Seq != linkproto.MaxSeq {
+		t.Fatalf("%+v", rep)
+	}
+	// over the ceiling: refused before it is weighed (signed raw, the way only a forger with the key would)
+	over := strings.Replace(string(signed(t, priv1, "team-1", targetPolicy(everyBox(), 9, "1.0.31", digest, now)).Policy), `"seq":9`, `"seq":2147483648`, 1)
+	deliver(t, rc, delivery("bfl-read", "", "", rawSigned(priv1, "team-1", []byte(over))))
+	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeMalformed {
+		t.Fatalf("seq 2^31: %+v", rep.Refused)
+	}
+	// with team-1, nothing lower gets through
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv1, "team-1", targetPolicy(everyBox(), 5, "1.0.31", digest, now))))
+	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeStaleSeq {
+		t.Fatalf("%+v", rep.Refused)
+	}
+	// rotated: team-2's next policy is taken at its own seq, and team-1's floor is gone
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv2, "team-2", targetPolicy(everyBox(), 5, "1.0.31", digest, now))))
+	rep := rs.next(t)
+	if len(rep.Refused) != 0 || len(rep.Policies) != 1 || rep.Policies[0].Seq != 5 {
+		t.Fatalf("after the rotation: %+v", rep)
+	}
+	pf, _ := b.store.loadPolicies()
+	if len(pf.Policies) != 1 || pf.Policies[0].Seq != 5 || pf.Policies[0].Epoch != 2 {
+		t.Fatalf("policy.json %+v", pf.Policies)
+	}
+}
+
+// rawSigned signs raw policy bytes as they are, the way a forger holding the key would.
+func rawSigned(priv ed25519.PrivateKey, keyID string, raw []byte) linkproto.SignedPolicy {
+	sig := ed25519.Sign(priv, append([]byte("digi-link-policy-v1\x00"), raw...))
+	return linkproto.SignedPolicy{Policy: raw, KeyID: keyID, Sig: base64.StdEncoding.EncodeToString(sig)}
 }
 
 func TestTheAutoUpgradeSwitchIsAKnownKey(t *testing.T) {

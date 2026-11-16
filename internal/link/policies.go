@@ -17,16 +17,13 @@ import (
 
 // Managed auto-update, the box's side (plan 088). The relay delivers signed upgrade policies on a policy stream; the
 // link verifies each one as it verifies a command's envelope (the compiled-in team keys, the epoch floor), keeps those
-// that name this box in DataDir\link\policy.json — the highest seq per scope, never a lower or a different one at the
-// same seq — and answers on a report stream signed by its own key. autoupgrade.go decides when to act on them.
+// that name this box in DataDir\link\policy.json — the highest seq per scope key, never a lower or a different one at
+// the same seq — and answers on a report stream signed by its own key. autoupgrade.go decides when to act on them.
 //
-// What the relay can do: withhold a policy (the box keeps what it holds, and an expired one means hold), or state
-// another tenant or ring for the box (plan 088 D6: that only exposes it to another signed, approved policy). What it
-// cannot: invent or alter a policy, or replay an older one for a scope.
-
-// maxStoredPolicies bounds policy.json: one entry per scope ever accepted (the seq floor is kept after expiry, so an
-// older policy cannot come back); beyond it, the oldest entries that do not apply now go first.
-const maxStoredPolicies = 64
+// What the relay can do: withhold a policy (the box keeps what it holds; an expired one holds for its scope). What it
+// cannot: invent or alter a policy, replay an older one for a scope, or choose which policies apply — a policy names
+// every box or an explicit signed list of box ids (D9), and the tenant and ring the relay states are only repeated in
+// the box's reports.
 
 // policyFile is DataDir\link\policy.json.
 type policyFile struct {
@@ -37,10 +34,12 @@ type policyFile struct {
 	Policies []storedPolicy `json:"policies"`
 }
 
-// storedPolicy is one accepted policy: the signed bytes as delivered, verified again at every use.
+// storedPolicy is one accepted policy: the signed bytes as delivered, verified again at every use. Epoch is the epoch
+// of the team key that signed it: once the box's epoch floor is above it, its seq no longer binds (review m1).
 type storedPolicy struct {
 	Scope      linkproto.PolicyScope  `json:"scope"`
 	Seq        int64                  `json:"seq"`
+	Epoch      int                    `json:"epoch,omitempty"`
 	AcceptedAt time.Time              `json:"acceptedAt"`
 	Signed     linkproto.SignedPolicy `json:"signed"`
 }
@@ -72,46 +71,28 @@ func (s *Store) savePolicies(pf policyFile) error {
 	return writeLinkFile(s.Dir, policyPath(s.Dir), append(b, '\n'))
 }
 
-// put records an accepted policy for its scope: a higher seq replaces, the same bytes at the same seq are a policy
-// delivered again (nothing changes), anything else is refused (seq_not_newer).
-func (pf *policyFile) put(p linkproto.UpgradePolicy, sp linkproto.SignedPolicy, now time.Time) (accepted bool, code string) {
+// put records an accepted policy for its scope key: a higher seq replaces, the same bytes at the same seq are a policy
+// delivered again (nothing changes), anything else is refused (seq_not_newer). An entry whose key is now below the
+// epoch floor (minEpoch) no longer binds (review m1): a stolen key's seq does not outlive the key's retirement.
+func (pf *policyFile) put(p linkproto.UpgradePolicy, sp linkproto.SignedPolicy, epoch, minEpoch int, now time.Time) (accepted bool, code string) {
 	key := p.Scope.Key()
+	entry := storedPolicy{Scope: p.Scope, Seq: p.Seq, Epoch: epoch, AcceptedAt: now.UTC(), Signed: sp}
 	for i := range pf.Policies {
 		cur := &pf.Policies[i]
 		if cur.Scope.Key() != key {
 			continue
 		}
 		switch {
-		case p.Seq > cur.Seq:
-			*cur = storedPolicy{Scope: p.Scope, Seq: p.Seq, AcceptedAt: now.UTC(), Signed: sp}
+		case p.Seq > cur.Seq, cur.Epoch > 0 && cur.Epoch < minEpoch: // an entry of unknown epoch binds (fail closed)
+			*cur = entry
 			return true, ""
 		case p.Seq == cur.Seq && bytes.Equal(cur.Signed.Policy, sp.Policy):
 			return false, ""
 		}
 		return false, linkproto.CodeStaleSeq
 	}
-	pf.Policies = append(pf.Policies, storedPolicy{Scope: p.Scope, Seq: p.Seq, AcceptedAt: now.UTC(), Signed: sp})
+	pf.Policies = append(pf.Policies, entry)
 	return true, ""
-}
-
-// prune keeps at most maxStoredPolicies entries, dropping the oldest that do not name box with the stated tenant and
-// ring.
-func (pf *policyFile) prune(box string) {
-	for len(pf.Policies) > maxStoredPolicies {
-		oldest := -1
-		for i, sp := range pf.Policies {
-			if linkproto.Applies(linkproto.UpgradePolicy{Scope: sp.Scope}, box, pf.Tenant, pf.Ring) {
-				continue
-			}
-			if oldest < 0 || sp.AcceptedAt.Before(pf.Policies[oldest].AcceptedAt) {
-				oldest = i
-			}
-		}
-		if oldest < 0 {
-			return
-		}
-		pf.Policies = slices.Delete(pf.Policies, oldest, oldest+1)
-	}
 }
 
 // policyStream reads one delivery, records it and answers with a report. The relay opened a policy stream, so it is a
@@ -122,7 +103,7 @@ func (l *Link) policyStream(c *conn, st net.Conn, release func()) {
 		c.policies.Store(true)
 	}
 	_ = st.SetReadDeadline(time.Now().Add(frameWait))
-	raw, err := linkproto.ReadFrame(st, linkproto.MaxControlFrame)
+	raw, err := linkproto.ReadFrame(st, linkproto.MaxPolicyFrame)
 	_ = st.Close()
 	if err != nil {
 		return
@@ -141,8 +122,8 @@ func (l *Link) policyStream(c *conn, st net.Conn, release func()) {
 	l.kickAuto()
 }
 
-// acceptDelivery verifies a delivery's policies and keeps those that name this box. The error refuses the delivery
-// as a whole (nothing is recorded); refused lists the policies refused one by one.
+// acceptDelivery verifies a delivery's policies and keeps those that name this box's id. The error refuses the
+// delivery as a whole (nothing is recorded); refused lists the policies refused one by one.
 func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 	d, err := linkproto.DecodePolicyDelivery(raw)
 	if err != nil {
@@ -186,20 +167,21 @@ func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 		if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil {
 			l.cfg.Log.Error("link: recording the key epoch", err)
 		}
+		minEpoch = max(minEpoch, key.Epoch)
 		code := ""
 		if err := p.ActiveAt(now); err != nil {
 			code = refusalCode(err)
-		} else if !linkproto.Applies(p, st.Box, d.Tenant, d.Ring) {
+		} else if !linkproto.Applies(p, st.Box) {
 			code = linkproto.CodeWrongScope
 		} else {
 			var accepted bool
-			if accepted, code = pf.put(p, sp, now); accepted {
+			if accepted, code = pf.put(p, sp, key.Epoch, minEpoch, now); accepted {
 				l.cfg.Log.Info(fmt.Sprintf("link: policy %s #%d accepted (key %s): %s; by %q, expires %s",
 					p.Scope, p.Seq, key.ID, describePolicy(p), p.By, p.ExpiresAt.UTC().Format(time.RFC3339)))
 			}
 		}
 		if code != "" {
-			scope := p.Scope
+			scope := p.Scope.Ref()
 			refused = append(refused, linkproto.ReportRefusal{Scope: &scope, Seq: p.Seq, Code: code})
 			l.logEvery("policy-"+p.Scope.Key()+"-"+code, func() {
 				l.cfg.Log.Warn(fmt.Sprintf("link: policy %s #%d refused: %s", p.Scope, p.Seq, code))
@@ -212,7 +194,6 @@ func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 			l.cfg.Log.Warn(fmt.Sprintf("link: %d policy(ies) of a delivery refused before verification (last: %s)", unverified, lastUnverified))
 		})
 	}
-	pf.prune(st.Box)
 	if err := l.cfg.Store.savePolicies(pf); err != nil {
 		l.cfg.Log.Error("link: saving link\\policy.json", err)
 		return nil, &linkproto.Refusal{Code: codeStateUnreadable}
@@ -229,8 +210,16 @@ func describePolicy(p linkproto.UpgradePolicy) string {
 	if p.Holds() {
 		return "hold"
 	}
-	return fmt.Sprintf("target %s (setup %s…), window %s %s-%s box time, health %d min", p.Target.Version, p.Target.SHA256[:12],
-		strings.Join(p.Window.Days, ","), p.Window.From, p.Window.To, p.HealthMinutes)
+	rollbacks := "none"
+	if len(p.Rollbacks) > 0 {
+		vs := make([]string, len(p.Rollbacks))
+		for i, r := range p.Rollbacks {
+			vs[i] = r.Version
+		}
+		rollbacks = strings.Join(vs, ",")
+	}
+	return fmt.Sprintf("target %s (setup %s…), window %s %s-%s box time, health %d min, signed rollbacks %s", p.Target.Version,
+		p.Target.SHA256[:12], strings.Join(p.Window.Days, ","), p.Window.From, p.Window.To, p.HealthMinutes, rollbacks)
 }
 
 // kickAuto asks the scheduler for a check now (after a delivery changed what it holds).
@@ -259,7 +248,7 @@ func (l *Link) buildReport() linkproto.Report {
 		if p.Error != "" {
 			continue // it no longer verifies (its key retired): the box does not hold it
 		}
-		rp := linkproto.ReportPolicy{Scope: p.Scope, Seq: p.Seq, Hold: p.Hold || p.Target == nil, ExpiresAt: p.ExpiresAt, Applies: p.Applies}
+		rp := linkproto.ReportPolicy{Scope: p.Scope.Ref(), Seq: p.Seq, Hold: p.Hold || p.Target == nil, ExpiresAt: p.ExpiresAt, Applies: p.Applies}
 		if p.Target != nil && !p.Hold {
 			rp.Target = p.Target.Version
 		}
