@@ -170,8 +170,9 @@ func (r UpgradeRunner) healthRound(job UpgradeJob, accept []string, since time.T
 	return checks
 }
 
-// rollback installs the build job replaced again, once (see the top of this file).
-func (r UpgradeRunner) rollback(job UpgradeJob, tdir string) *linkproto.UpgradeRollback {
+// rollback installs the build job replaced again, once (see the top of this file). The connector windows it ended
+// before its setup go to res.RollbackClosedApps.
+func (r UpgradeRunner) rollback(job UpgradeJob, tdir string, res *UpgradeResult) *linkproto.UpgradeRollback {
 	rb := &linkproto.UpgradeRollback{To: job.From, ExitCode: -1, StartedAt: r.Now().UTC()}
 	done := func() *linkproto.UpgradeRollback {
 		rb.FinishedAt = r.Now().UTC()
@@ -214,6 +215,10 @@ func (r UpgradeRunner) rollback(job UpgradeJob, tdir string) *linkproto.UpgradeR
 	}
 	if got, err := fileSHA256(setup); err != nil || got != sha {
 		rb.Error = fmt.Sprintf("the rollback's setup is not the one checked (%s, %v): not run", got, err)
+		return done()
+	}
+	if res.RollbackClosedApps = r.closeConnectorWindows(job.InstallDir); res.RollbackClosedApps != nil && res.RollbackClosedApps.StillOpen > 0 {
+		rb.Error = stillOpenError(res.RollbackClosedApps, "the rollback's setup")
 		return done()
 	}
 	started := r.Now()

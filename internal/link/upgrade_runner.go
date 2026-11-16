@@ -40,8 +40,10 @@ const (
 )
 
 // setupArgs are the setup's silent flags (Inno Setup): no window, no message box (each takes its default answer), no
-// reboot, no "This will install..." prompt, and its log.
-const setupArgs = `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`
+// reboot, no "This will install..." prompt; close (by force) the applications using the files it replaces, with that
+// logged — in its own session only, which is why the runner ends the connector's windows in the others first
+// (upgrade_close.go); and its log in the ticket's folder (/LOG, added by runSetupSilent).
+const setupArgs = `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /LOGCLOSEAPPLICATIONS`
 
 // UpgradeRunner is the runner's work, its effects behind functions so a test can play the setup and the services.
 type UpgradeRunner struct {
@@ -71,6 +73,10 @@ type UpgradeRunner struct {
 	PickupDir  func() string
 	HTTPClient *http.Client  // Fetch's (link.yaml's proxy)
 	HealthPoll time.Duration // between health rounds; 0 = 15 s
+	// ListProcesses lists the processes named name, every session; KillProcess ends one (upgrade_close.go: the
+	// connector's windows are ended before each setup). Nil ListProcesses: none is looked for.
+	ListProcesses func(name string) ([]RunningProcess, error)
+	KillProcess   func(pid uint32) error
 }
 
 // NewUpgradeRunner is the runner on this machine.
@@ -89,13 +95,15 @@ func NewUpgradeRunner(dataDir, ticket string, log Logger) UpgradeRunner {
 			}
 			return info.State, err
 		},
-		StartService: autostart.StartWindowsService,
-		StopService:  func(name string) error { return autostart.StopWindowsService(name, autostart.StopTimeout) },
-		Version:      installedVersion,
-		Probe:        probeState,
-		Session:      func() (SessionMarker, error) { return ReadSessionMarker(dataDir) },
-		PickupDir:    func() string { return pickupDirOf(dataDir) },
-		HTTPClient:   runnerHTTPClient(dataDir),
+		StartService:  autostart.StartWindowsService,
+		StopService:   func(name string) error { return autostart.StopWindowsService(name, autostart.StopTimeout) },
+		Version:       installedVersion,
+		Probe:         probeState,
+		Session:       func() (SessionMarker, error) { return ReadSessionMarker(dataDir) },
+		PickupDir:     func() string { return pickupDirOf(dataDir) },
+		HTTPClient:    runnerHTTPClient(dataDir),
+		ListProcesses: listProcesses,
+		KillProcess:   killProcess,
 	}
 	ur.Fetch = ur.fetchRelease
 	return ur
@@ -164,6 +172,12 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		res.Error = fmt.Sprintf("the setup is not the one checked (%s, %v): not run", got, err)
 		return res, r.write(res)
 	}
+	// G-143: the connector's windows in other sessions, which the setup cannot close itself
+	if res.ClosedApps = r.closeConnectorWindows(job.InstallDir); res.ClosedApps != nil && res.ClosedApps.StillOpen > 0 {
+		res.Error = stillOpenError(res.ClosedApps, "the setup")
+		_ = os.Remove(setup)
+		return res, r.write(res)
+	}
 	logPath := filepath.Join(tdir, "setup.log")
 	setupStarted := r.Now()
 	code, err := r.RunSetup(setup, logPath, setupTimeout)
@@ -201,7 +215,7 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 	if setupEnded && job.HealthMinutes > 0 {
 		res.Health = r.checkHealth(job, []string{job.To, job.From}, setupStarted)
 		if !res.Health.OK {
-			res.Rollback = r.rollback(job, tdir)
+			res.Rollback = r.rollback(job, tdir, &res)
 			msg := fmt.Sprintf("not healthy within %d min after the setup (%s)", job.HealthMinutes, failedChecks(res.Health))
 			if res.Rollback.OK {
 				msg += fmt.Sprintf("; %s, the build it replaced, was installed again and is healthy", res.Rollback.To)

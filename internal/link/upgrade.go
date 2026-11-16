@@ -161,6 +161,10 @@ type UpgradeResult struct {
 	Policy   *PolicyRef                 `json:"policy,omitempty"`
 	Health   *linkproto.UpgradeHealth   `json:"health,omitempty"`
 	Rollback *linkproto.UpgradeRollback `json:"rollback,omitempty"`
+	// ClosedApps and RollbackClosedApps: the connector windows ended before the setup and before the rollback's
+	// (G-143; upgrade_close.go). Absent when none was open.
+	ClosedApps         *ClosedApps `json:"closedApps,omitempty"`
+	RollbackClosedApps *ClosedApps `json:"rollbackClosedApps,omitempty"`
 }
 
 var (
