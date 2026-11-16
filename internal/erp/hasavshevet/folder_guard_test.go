@@ -93,6 +93,10 @@ func TestFolderGuard(t *testing.T) {
 	if err := g.Allowed("herp"); !errors.Is(err, ErrFolderWritable) || !strings.Contains(err.Error(), "not been read yet") {
 		t.Fatalf("before the first read: %v, want refused (fail closed)", err)
 	}
+	g.wg.Wait() // review m1: the request started the unread folder's read
+	if err := g.Allowed("herp"); err != nil {
+		t.Fatalf("after the read the request started: %v", err)
+	}
 	g.checkAll()
 	for key, refused := range map[string]bool{"herp": false, "herp_receipts": false, "herp_test": true, "sendOrderDir": false, "sendOrderPickupDir": false, "nope": false} {
 		if err := g.Allowed(key); errors.Is(err, ErrFolderWritable) != refused {
@@ -194,5 +198,55 @@ func TestFolderGuard_ImporterAndItsFolders(t *testing.T) {
 	off.checkAll()
 	if err := off.Allowed(KeyOrderImporter); err != nil {
 		t.Errorf("off the link: %v", err)
+	}
+}
+
+// Review m1: the folders are read in parallel, each waited on at most the
+// read timeout. A read hung on a domain controller leaves only its folder
+// unknown (refused behind the link) — the others are decided — and starts no
+// second read of it while it hangs; once it ends its result counts.
+func TestFolderGuard_AHungReadHoldsUpNoOtherFolder(t *testing.T) {
+	b := newGuardBox(t)
+	b.who = map[string][]dataacl.Writer{"herp_test": {usersW}}
+	reads := 0
+	b.gate = make(chan struct{})
+	g := NewFolderGuard(b.cfg, true, func(dir string) ([]dataacl.Writer, error) {
+		if filepath.Base(dir) == "slow" {
+			b.mu.Lock()
+			reads++
+			b.mu.Unlock()
+		}
+		return b.writers(dir)
+	}, b.fileWriters, b.log)
+	g.readTimeout = 50 * time.Millisecond
+	start := time.Now()
+	g.checkAll()
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("checkAll waited %s on the hung read", took)
+	}
+	if err := g.Allowed("herp"); err != nil {
+		t.Errorf("herp, read while slow hung: %v", err)
+	}
+	if err := g.Allowed("herp_test"); !errors.Is(err, ErrFolderWritable) {
+		t.Errorf("herp_test: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := g.Allowed("slow"); !errors.Is(err, ErrFolderWritable) || !strings.Contains(err.Error(), "did not finish") {
+			t.Fatalf("slow while its read hangs: %v", err)
+		}
+	}
+	g.tick()
+	if !b.log.warned("did not finish in 50ms") {
+		t.Errorf("warnings %v", b.log.warns)
+	}
+	close(b.gate)
+	g.wg.Wait()
+	if err := g.Allowed("slow"); err != nil {
+		t.Errorf("slow once its read ended: %v", err)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if reads != 1 {
+		t.Errorf("%d reads of the hung folder, want 1 (no pile-up)", reads)
 	}
 }

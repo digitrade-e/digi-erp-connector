@@ -36,6 +36,14 @@ import (
 //   - a provision command that changes the folders or their ACL (documents,
 //     folder-acl) restarts the service, which starts a fresh guard.
 // Reads run in the background: Allowed never waits on one.
+//
+// Review m1: one slow folder holds up no other. The folders are read in
+// parallel, each read waited on at most FolderReadTimeout: one that does not
+// finish in time (a lookup hung on an unresponsive domain controller) leaves
+// only its folder unknown — refused behind the link — and records its result
+// whenever it ends; one read per folder at a time, so a hung one never piles
+// up. A request for a folder never read, and not being read, starts its
+// read (bounded the same way); the tick reads such a folder too.
 
 // The guard's keys for the importers (review T1): read before each run.
 const (
@@ -43,10 +51,11 @@ const (
 	KeyReceiptImporter = "importer:receipts"
 )
 
-// The guard's re-check intervals.
+// The guard's re-check intervals, and how long one read is waited on.
 const (
 	FolderRecheckRefused = time.Minute
 	FolderRecheckAllowed = 10 * time.Minute
+	FolderReadTimeout    = 10 * time.Second
 )
 
 // FolderAllower is what the order queue and the receipt writer ask before
@@ -72,7 +81,7 @@ type guardedFolder struct {
 	state    guardState
 	why      string
 	checked  time.Time
-	checking bool
+	checking bool // a read is in flight (at most one per folder)
 }
 
 // FolderGuard is the daemon's view of the document folders' writers.
@@ -81,6 +90,7 @@ type FolderGuard struct {
 	fileWriters func(path string) ([]string, error)
 	log         logger.LoggerService
 	now         func() time.Time
+	readTimeout time.Duration // FolderReadTimeout; tests shorten it
 
 	mu      sync.Mutex
 	folders map[string]*guardedFolder // by typed key, or by name for the pre-087 folders
@@ -97,7 +107,7 @@ type FolderGuard struct {
 // (KeyOrderImporter, KeyReceiptImporter; review T1): behind the link an
 // importer others can write to is not run; no trusted writer is exempt.
 func NewFolderGuard(cfg config.Config, linked bool, writers func(string) ([]dataacl.Writer, error), fileWriters func(string) ([]string, error), log logger.LoggerService) *FolderGuard {
-	g := &FolderGuard{writers: writers, fileWriters: fileWriters, log: log, now: time.Now, folders: map[string]*guardedFolder{}}
+	g := &FolderGuard{writers: writers, fileWriters: fileWriters, log: log, now: time.Now, readTimeout: FolderReadTimeout, folders: map[string]*guardedFolder{}}
 	for key, p := range map[string]string{KeyOrderImporter: cfg.OrderImporter(), KeyReceiptImporter: cfg.ReceiptImporter()} {
 		if p != "" && fileWriters != nil {
 			g.folders[key] = &guardedFolder{f: config.WriteFolder{Name: "the " + strings.TrimPrefix(key, "importer:") + " importer", Path: p}, file: true, enforced: linked}
@@ -132,10 +142,14 @@ func (g *FolderGuard) Allowed(key string) error {
 		return nil
 	}
 	why := f.why
-	if f.state == guardUnknown {
+	if f.state == guardUnknown && why == "" {
 		why = "who can write to it has not been read yet since the start"
 	}
-	if f.state == guardRefused && !f.checking && g.now().Sub(f.checked) >= FolderRecheckRefused {
+	switch {
+	case f.checking:
+	case f.state == guardUnknown: // review m1: never read, and not being read: read it now
+		g.startCheckLocked(key)
+	case f.state == guardRefused && g.now().Sub(f.checked) >= FolderRecheckRefused:
 		g.startCheckLocked(key)
 	}
 	if f.file {
@@ -160,12 +174,17 @@ func (g *FolderGuard) Run(ctx context.Context) {
 	}
 }
 
-// checkAll is the first read of every folder, with its progress logged.
+// checkAll is the first read of every folder — in parallel, each waited on
+// at most readTimeout (review m1) — with its progress logged. A folder whose
+// read is already in flight (a request started it) is left to that read.
 func (g *FolderGuard) checkAll() {
 	g.mu.Lock()
-	keys := append([]string(nil), g.order...)
-	for _, k := range keys {
-		g.folders[k].checking = true
+	var keys []string
+	for _, k := range g.order {
+		if f := g.folders[k]; !f.checking {
+			f.checking = true
+			keys = append(keys, k)
+		}
 	}
 	g.mu.Unlock()
 	if len(keys) == 0 {
@@ -173,38 +192,49 @@ func (g *FolderGuard) checkAll() {
 	}
 	start := g.now()
 	g.log.Info(fmt.Sprintf("FOLDER CHECK: reading who can write to %d document folder(s); behind the link a typed folder is refused until it is read", len(keys)))
-	for _, k := range keys {
-		g.check(k)
-	}
+	g.checkEach(keys)
 	g.mu.Lock()
 	allowed, refused := 0, 0
 	for _, k := range keys {
-		if f := g.folders[k]; f.enforced && f.state == guardRefused {
+		if f := g.folders[k]; f.enforced && f.state != guardAllowed {
 			refused++
 		} else if f.enforced {
 			allowed++
 		}
 	}
 	g.mu.Unlock()
-	g.log.Info(fmt.Sprintf("FOLDER CHECK: done in %s — typed folders behind the link: %d allowed, %d refused", g.now().Sub(start).Round(time.Millisecond), allowed, refused))
+	g.log.Info(fmt.Sprintf("FOLDER CHECK: done in %s — typed folders behind the link: %d allowed, %d refused or unknown", g.now().Sub(start).Round(time.Millisecond), allowed, refused))
+}
+
+// checkEach reads keys in parallel (each marked checking by the caller) and
+// returns once each is recorded or has had its readTimeout.
+func (g *FolderGuard) checkEach(keys []string) {
+	var wg sync.WaitGroup
+	for _, k := range keys {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			g.check(k)
+		}()
+	}
+	wg.Wait()
 }
 
 // tick re-reads the allowed folders whose last read is FolderRecheckAllowed
-// old (refused ones are re-read lazily, by Allowed).
+// old, and any folder still unknown with no read in flight (review m1);
+// refused ones are re-read lazily, by Allowed.
 func (g *FolderGuard) tick() {
 	g.mu.Lock()
 	var due []string
 	for _, k := range g.order {
 		f := g.folders[k]
-		if f.state == guardAllowed && !f.checking && g.now().Sub(f.checked) >= FolderRecheckAllowed {
+		if !f.checking && (f.state == guardUnknown || f.state == guardAllowed && g.now().Sub(f.checked) >= FolderRecheckAllowed) {
 			f.checking = true
 			due = append(due, k)
 		}
 	}
 	g.mu.Unlock()
-	for _, k := range due {
-		g.check(k)
-	}
+	g.checkEach(due)
 }
 
 // startCheckLocked reads folder key again in the background. Caller holds mu.
@@ -217,29 +247,61 @@ func (g *FolderGuard) startCheckLocked(key string) {
 	}()
 }
 
-// check reads folder key's writers (outside the lock: it may wait on the
-// domain controller) and records the result, logging what changed.
+// check reads folder key's writers (in a goroutine of its own: it may wait
+// on the domain controller), waits for them at most readTimeout, and records
+// the result, logging what changed. The caller marked the folder checking.
+// A read that does not finish in time leaves the folder unknown — refused
+// behind the link — and still checking: its result is recorded whenever it
+// ends, and no other read of the folder starts meanwhile (review m1).
 func (g *FolderGuard) check(key string) {
 	g.mu.Lock()
 	f := g.folders[key]
-	path, name, enforced, before, trusted, file := f.f.Path, f.f.Name, f.enforced, f.state, f.trusted, f.file
+	path, name, trusted, file := f.f.Path, f.f.Name, f.trusted, f.file
 	g.mu.Unlock()
 
+	type result struct {
+		who []string
+		err error
+	}
 	start := g.now()
-	var who []string
-	var err error
-	if file {
-		who, err = g.fileWriters(path) // an importer: nobody exempt
-	} else {
-		var all []dataacl.Writer
-		all, err = g.writers(path)
-		for _, w := range all {
-			if !trusted[w.SID] {
-				who = append(who, w.Name)
+	done := make(chan result, 1)
+	go func() {
+		var r result
+		if file {
+			r.who, r.err = g.fileWriters(path) // an importer: nobody exempt
+		} else {
+			var all []dataacl.Writer
+			all, r.err = g.writers(path)
+			for _, w := range all {
+				if !trusted[w.SID] {
+					r.who = append(r.who, w.Name)
+				}
 			}
 		}
+		done <- r
+	}()
+	timer := time.NewTimer(g.readTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		g.record(key, r.who, r.err, g.now().Sub(start))
+	case <-timer.C:
+		g.mu.Lock()
+		f.state, f.why, f.checked = guardUnknown, fmt.Sprintf("reading who can write to it did not finish in %s", g.readTimeout), g.now()
+		g.mu.Unlock()
+		g.log.Warn(fmt.Sprintf("FOLDER CHECK: reading who can write to %s (%s) did not finish in %s: unknown — refused behind the link — until it does; "+
+			"the other folders are not held up", name, path, g.readTimeout))
+		g.wg.Add(1)
+		go func() {
+			defer g.wg.Done()
+			r := <-done
+			g.record(key, r.who, r.err, g.now().Sub(start))
+		}()
 	}
-	took := g.now().Sub(start)
+}
+
+// record sets folder key's state from one read and logs what changed.
+func (g *FolderGuard) record(key string, who []string, err error, took time.Duration) {
 	state, why := guardAllowed, ""
 	switch {
 	case err != nil:
@@ -249,6 +311,8 @@ func (g *FolderGuard) check(key string) {
 	}
 
 	g.mu.Lock()
+	f := g.folders[key]
+	path, name, enforced, file, before := f.f.Path, f.f.Name, f.enforced, f.file, f.state
 	f.state, f.why, f.checked, f.checking = state, why, g.now(), false
 	g.mu.Unlock()
 

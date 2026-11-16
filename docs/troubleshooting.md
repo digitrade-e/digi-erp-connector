@@ -194,7 +194,9 @@ leaves SYSTEM and Administrators full control and Users read. Then:
    (review R3): right after its start (until then, behind the link, a typed folder counts as refused), a refused folder
    again at most once a minute when an order or a receipt needs it, an allowed one every ten minutes — no restart
    needed (`folder-acl` and `documents` restart it anyway). server.log says `FOLDER ALLOWED` when a refused folder is
-   the administrators' only again.
+   the administrators' only again. The folders are read in parallel, each waited on at most 10 s (review m1): a read
+   hung on an unresponsive domain controller logs `FOLDER CHECK: … did not finish in 10s` and leaves only that folder
+   unknown (refused behind the link) until it ends; a request for a folder not read yet starts its read.
 
 ## File endpoint returns INVALID_FILE_PATH
 
