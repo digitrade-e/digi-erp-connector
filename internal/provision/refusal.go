@@ -85,6 +85,10 @@ const (
 	// CodeFolderWritable: documents, receipts, orders — accounts besides the administrators can write to a folder the
 	// connector writes documents into (plan 087 review M1); allowWritable accepts it over WinRM only.
 	CodeFolderWritable = "folder_writable"
+	// CodeWriterUnknown / CodeWriterTooBroad: documents' trustedWriters (review R1b) — a name the box cannot
+	// resolve to an account / one that is not a single user account (a group, an alias, a well-known SID).
+	CodeWriterUnknown  = "writer_unknown"
+	CodeWriterTooBroad = "writer_too_broad"
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

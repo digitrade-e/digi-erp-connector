@@ -427,7 +427,17 @@ the receipt store.
  "receipts":{"folder":"herp_receipts","counter":"receipts"}}
 ```
 
-Each folder named is set whole (an object) or removed (`null`); folders not named are kept. `receipts.folder` /
+Each folder named is set whole (an object) or removed (`null`); folders not named are kept.
+
+**`trustedWriters`** (plan 087 review R1b): `"trustedWriters": ["BFL\\wizsched"]` replaces the box's list (`[]` clears it,
+absent keeps it) — at most 8 accounts, for the ERP's own importer and scheduler, which must write into the folders
+(Masofon renames what it imported). The box resolves each name to a SID at check time: one that does not resolve is
+`writer_unknown`; anything but a single user account — a group, an alias, a computer, a well-known SID (Everyone,
+Authenticated Users, Users, Guests, INTERACTIVE, NETWORK, ANONYMOUS, Domain Users/Guests/Computers, LOCAL SERVICE,
+NETWORK SERVICE) — is `writer_too_broad`. `--check` answers `check.trustedWriters: [{name, sid, resolved, type}]` for
+the approval form. Stored in `config.yaml` as `documents.trustedWriters: [{sid, name}]`; the commands, the daemon and
+`state` never count those SIDs as writers (`state.writableFolders[].trusted` shows them). It is an ordinary `documents`
+change (pre-image, restore), the same over WinRM and behind the link. `receipts.folder` /
 `receipts.counter` bind `POST /api/sendReceipt` (a field left out keeps the box's, `""` clears it); the bound
 folder's path replaces `sendReceiptDir`, its pattern the receipt file's name (`KUPAIN.prm` keeps its name).
 
@@ -508,6 +518,7 @@ actually changed.
 | `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore` (review R7): the same, for the order and receipt index entries their in-flight guard reads (`acceptUnreadable`; `restore --accept-unreadable=N`) |
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`: no folder of that key to remove / the path is not a folder here / a link, inside the data directory, or not a path link mode takes |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
+| `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |

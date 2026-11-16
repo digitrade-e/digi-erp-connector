@@ -70,7 +70,21 @@ type CheckResult struct {
 	// Counter (plan 087, counters --check) is the counter's store as the
 	// command would leave it.
 	Counter *CounterCheck `json:"counter,omitempty"`
-	Restart bool          `json:"restart"` // the service would restart
+	// TrustedWriters (plan 087 review R1b, documents --check) are the
+	// accounts the input's trustedWriters resolve to on the box, for the
+	// approval form.
+	TrustedWriters []TrustedWriterCheck `json:"trustedWriters,omitempty"`
+	Restart        bool                 `json:"restart"` // the service would restart
+}
+
+// TrustedWriterCheck is one trusted writer as the box resolved it.
+type TrustedWriterCheck struct {
+	Name string `json:"name"` // as given
+	SID  string `json:"sid"`
+	// Resolved is the canonical DOMAIN\name; Type is "user" (only a user is
+	// trusted).
+	Resolved string `json:"resolved"`
+	Type     string `json:"type"`
 }
 
 // Step is one part of the change: whether it changed anything.

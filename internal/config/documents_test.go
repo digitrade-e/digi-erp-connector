@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -458,5 +459,44 @@ func TestValidateDocuments_TestAndProductionNeverNest(t *testing.T) {
 		if _, _, err := ParseNamePattern(pattern, "TMP_"); (err == nil) != ok {
 			t.Errorf("ParseNamePattern(%q) = %v, want ok %v", pattern, err, ok)
 		}
+	}
+}
+
+// Review R1b: documents.trustedWriters holds at most 8 single accounts by SID
+// — never a well-known or built-in SID, which are groups of every user.
+func TestValidateDocuments_TrustedWriters(t *testing.T) {
+	ok := TrustedWriter{SID: "S-1-5-21-1004336348-1177238915-682003330-1105", Name: `BFL\wizsched`}
+	cfg := bflDocuments(t)
+	cfg.Documents.TrustedWriters = []TrustedWriter{ok}
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Fatalf("one user account: %v", err)
+	}
+	if !cfg.TrustedSIDs()[ok.SID] {
+		t.Error("TrustedSIDs misses it")
+	}
+	for name, sid := range map[string]string{
+		"Everyone": "S-1-1-0", "Users": "S-1-5-32-545", "Authenticated Users": "S-1-5-11", "INTERACTIVE": "S-1-5-4",
+		"NETWORK": "S-1-5-2", "ANONYMOUS": "S-1-5-7", "LOCAL SERVICE": "S-1-5-19", "NETWORK SERVICE": "S-1-5-20", "SYSTEM": "S-1-5-18",
+		"Domain Users": "S-1-5-21-1004336348-1177238915-682003330-513", "Domain Guests": "S-1-5-21-1004336348-1177238915-682003330-514",
+		"Domain Computers": "S-1-5-21-1004336348-1177238915-682003330-515", "Guest": "S-1-5-21-1004336348-1177238915-682003330-501",
+		"not a SID": "BFL\\wizsched",
+	} {
+		cfg := bflDocuments(t)
+		cfg.Documents.TrustedWriters = []TrustedWriter{{SID: sid, Name: name}}
+		if err := cfg.ValidateOrders(); err == nil {
+			t.Errorf("%s (%s) accepted as a trusted writer", name, sid)
+		}
+	}
+	cfg = bflDocuments(t)
+	cfg.Documents.TrustedWriters = []TrustedWriter{ok, ok}
+	if err := cfg.ValidateOrders(); err == nil {
+		t.Error("the same account twice accepted")
+	}
+	cfg.Documents.TrustedWriters = nil
+	for i := range MaxTrustedWriters + 1 {
+		cfg.Documents.TrustedWriters = append(cfg.Documents.TrustedWriters, TrustedWriter{SID: fmt.Sprintf("S-1-5-21-1-2-3-%d", 2000+i), Name: fmt.Sprintf("u%d", i)})
+	}
+	if err := cfg.ValidateOrders(); err == nil {
+		t.Errorf("%d trusted writers accepted", MaxTrustedWriters+1)
 	}
 }

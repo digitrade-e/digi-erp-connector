@@ -144,6 +144,10 @@ documents:
   receipts: {folder: herp_receipts, counter: receipts}
 ```
 
+`documents.trustedWriters: [{sid, name}]` (review R1b; set by the `documents` command, which resolves names on the
+box): at most 8 accounts never counted as writers of a document folder — each an `S-1-5-21-…` account SID with a RID
+of 1000 or more, never a well-known or built-in one.
+
 Refused (`config.ValidateDocuments`, from `ValidateOrders`: the daemon, `CheckConfig`, the GUI save): keys not
 `[a-z][a-z0-9_]{0,31}`, or a Windows device name (`con`, `prn`, `aux`, `nul`, `com0`–`9`, `lpt0`–`9`); a kind other than `orders`/`receipts`; a range outside 1–999 999 999; **overlapping ranges —
 any two counters on the box**; a store adopted twice or by the wrong kind; orders on and orders counters configured but none

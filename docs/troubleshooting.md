@@ -170,8 +170,8 @@ leaves SYSTEM and Administrators full control and Users read. Then:
 
 1. **The importer's account.** The ERP's scheduler renames what it imported (`*.MASOFON2.BAK`), so the account it runs
    as needs Modify there. An administrator or SYSTEM is covered above. Any other account must be added
-   (`icacls … /grant "DOMAIN\account:(OI)(CI)M"`) and is then named as a writer: over WinRM that needs
-   `allowWritable`; behind the link run the scheduler as an administrator or SYSTEM.
+   (`icacls … /grant "DOMAIN\account:(OI)(CI)M"`) and named in `documents`' `trustedWriters` (review R1b): a trusted
+   account is never counted as a writer, over WinRM and behind the link.
 2. **The folders above.** Nobody but the administrators may delete or rename them: `icacls "C:\xampp\htdocs"` (and each
    folder up to the drive) must not give `Users`, `Authenticated Users`, `Everyone` or `Domain Users` `(D)`, `(DC)`,
    `(F)`, `(M)`, `(WDAC)` or `(WO)`.

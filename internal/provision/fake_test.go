@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
+	"hash/fnv"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,7 +103,8 @@ type fakeSys struct {
 	instances  []SQLInstance
 	host       HostInfo
 	candidates []string
-	writers    map[string][]string // who besides the administrators can change a file (or a folder: FolderWriters)
+	writers    map[string][]string        // who besides the administrators can change a file (or a folder: FolderWriters)
+	accounts   map[string]dataacl.Account // LookupAccount, by lower-case name
 	daemon     *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
@@ -249,8 +253,32 @@ func (s *fakeSys) Writers(path string) ([]string, error) {
 	return []string{}, nil
 }
 
-// FolderWriters answers from the same map, keyed by the folder.
-func (s *fakeSys) FolderWriters(dir string) ([]string, error) { return s.Writers(dir) }
+// FolderWriters answers from the same map, keyed by the folder, each name
+// with its SID (accounts, else a fake one derived from the name).
+func (s *fakeSys) FolderWriters(dir string) ([]dataacl.Writer, error) {
+	out := []dataacl.Writer{}
+	for _, n := range s.writers[dir] {
+		out = append(out, dataacl.Writer{Name: n, SID: s.sidOf(n)})
+	}
+	return out, nil
+}
+
+func (s *fakeSys) sidOf(name string) string {
+	if a, ok := s.accounts[strings.ToLower(name)]; ok {
+		return a.SID
+	}
+	h := fnv.New32a()
+	h.Write([]byte(strings.ToLower(name)))
+	return fmt.Sprintf("S-1-5-21-0-0-0-%d", 1000+h.Sum32()%100000)
+}
+
+// LookupAccount answers from accounts (keyed by the lower-case name).
+func (s *fakeSys) LookupAccount(name string) (dataacl.Account, error) {
+	if a, ok := s.accounts[strings.ToLower(name)]; ok {
+		return a, nil
+	}
+	return dataacl.Account{}, fmt.Errorf("%w: %s", dataacl.ErrAccountUnknown, name)
+}
 
 func (s *fakeSys) ImporterCandidates() ([]string, error) {
 	return s.candidates, nil

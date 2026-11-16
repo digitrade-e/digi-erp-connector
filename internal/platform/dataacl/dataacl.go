@@ -282,6 +282,37 @@ func splitDACL(s string) (protected bool, aces string) {
 	return strings.Contains(s[:k], "P"), s[k:]
 }
 
+// Writer is an account that can change what is in a folder (FolderWriters):
+// its SID, and its name for a human.
+type Writer struct {
+	SID  string `json:"sid"`
+	Name string `json:"name"`
+}
+
+// names is the writers' names.
+func names(who []Writer) []string {
+	out := make([]string, 0, len(who))
+	for _, w := range who {
+		out = append(out, w.Name)
+	}
+	return out
+}
+
+// Account is an account name resolved by the security system (LookupAccount):
+// its SID, its canonical DOMAIN\name, and its type — AccountUser for a single
+// user account; "group", "alias", "wellKnownGroup", "computer", … otherwise.
+type Account struct {
+	SID  string `json:"sid"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// AccountUser is Account.Type for a single user account.
+const AccountUser = "user"
+
+// ErrAccountUnknown is a name that maps to no account.
+var ErrAccountUnknown = errors.New("no such account")
+
 // MoveAside renames path to "<path>.<UTC time>.old" so the next open creates a
 // fresh file — a new file object no earlier handle points at. A missing path
 // is ("", nil).

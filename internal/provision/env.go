@@ -12,6 +12,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 )
 
 // System is everything provisioning touches outside the data directory's
@@ -49,8 +50,13 @@ type System interface {
 	Writers(path string) ([]string, error)
 	// FolderWriters names who besides the administrators can add to, delete
 	// from or rename away a folder the connector writes documents into
-	// (dataacl.FolderWriters; plan 087 review M1); empty when nobody can.
-	FolderWriters(dir string) ([]string, error)
+	// (dataacl.FolderWriters; plan 087 review M1), each with its SID (review
+	// R1b: trusted writers are matched by SID); empty when nobody can.
+	FolderWriters(dir string) ([]dataacl.Writer, error)
+	// LookupAccount resolves an account name to its SID, canonical name and
+	// type (dataacl.LookupAccount; review R1b); dataacl.ErrAccountUnknown
+	// when it names no account.
+	LookupAccount(name string) (dataacl.Account, error)
 }
 
 // Database is the SQL Server work provisioning does, as fixed operations.

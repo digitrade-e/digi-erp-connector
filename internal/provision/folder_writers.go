@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 )
 
 // Plan 087 review M1: who can write to a folder the connector writes
@@ -53,10 +54,11 @@ func (a *applier) checkFolderWriters(what, path string, allow bool) error {
 		a.folderChecked = map[string]bool{}
 	}
 	a.folderChecked[folderKey(path)] = true
-	who, err := a.env.Sys.FolderWriters(path)
+	all, err := a.env.Sys.FolderWriters(path)
 	if err != nil {
 		return refuse(CodeFolderWritable, "run it elevated (as an administrator)", "read who can write to %s (%s): %v", what, path, err)
 	}
+	who, _ := splitTrusted(all, a.tgt.TrustedSIDs())
 	if len(who) == 0 {
 		return nil
 	}
@@ -84,7 +86,8 @@ func (a *applier) reportWritableFolders(cfg config.Config) {
 		if a.folderChecked[folderKey(f.Path)] {
 			continue
 		}
-		who, err := a.env.Sys.FolderWriters(f.Path)
+		all, err := a.env.Sys.FolderWriters(f.Path)
+		who, _ := splitTrusted(all, cfg.TrustedSIDs())
 		switch {
 		case err != nil:
 			a.res.WritableFolders = append(a.res.WritableFolders, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})
@@ -95,6 +98,21 @@ func (a *applier) reportWritableFolders(cfg config.Config) {
 				f.Name, f.Path, strings.Join(who, ", "))
 		}
 	}
+}
+
+// splitTrusted divides a folder's writers into the names that count and the
+// names of documents.trustedWriters' accounts among them (matched by SID;
+// review R1b).
+func splitTrusted(all []dataacl.Writer, trusted map[string]bool) (untrusted, trustedNames []string) {
+	untrusted = []string{}
+	for _, w := range all {
+		if trusted[w.SID] {
+			trustedNames = append(trustedNames, w.Name)
+			continue
+		}
+		untrusted = append(untrusted, w.Name)
+	}
+	return untrusted, trustedNames
 }
 
 // refuseAllowWritableLinked is Validate's refusal of allowWritable behind the

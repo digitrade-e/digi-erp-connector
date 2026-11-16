@@ -651,7 +651,10 @@ func folderWritersChain(dir string) []writerCheck {
 // is their code run as SYSTEM (plan 068's panel, 2026-10-20); the link trusts
 // the daemon's certificate file (review m8). Empty: only the administrators
 // control it.
-func Writers(path string) ([]string, error) { return writers(writersChain(path)) }
+func Writers(path string) ([]string, error) {
+	who, err := writers(writersChain(path))
+	return names(who), err
+}
 
 // FolderWriters names who, besides the same trusted accounts, can change what is in the folder dir: an owner outside
 // them, and every account an allow entry gives a right on dir to add a file or a folder, delete an entry, rename dir
@@ -661,14 +664,17 @@ func Writers(path string) ([]string, error) { return writers(writersChain(path))
 // books, or — where an importer runs with the folder as its working directory — plant a program or DLL it loads.
 // Empty: only the administrators control it. Existing files are not read: a file someone created before the folder
 // was locked down is still theirs (docs/troubleshooting.md).
-func FolderWriters(dir string) ([]string, error) { return writers(folderWritersChain(dir)) }
+//
+// Each writer comes with its SID, so a caller can trust named accounts by SID (plan 087 review R1b: the ERP's own
+// scheduler account, documents' trustedWriters).
+func FolderWriters(dir string) ([]Writer, error) { return writers(folderWritersChain(dir)) }
 
-func writers(chain []writerCheck) ([]string, error) {
+func writers(chain []writerCheck) ([]Writer, error) {
 	t, err := newTrust()
 	if err != nil {
 		return nil, err
 	}
-	out := []string{}
+	out := []Writer{}
 	seen := map[string]bool{}
 	for _, o := range chain {
 		sd, err := windows.GetNamedSecurityInfo(longPath(o.path), windows.SE_FILE_OBJECT,
@@ -688,7 +694,7 @@ func writers(chain []writerCheck) ([]string, error) {
 		if dacl == nil { // no DACL at all: every right to everyone
 			if !seen["S-1-1-0"] {
 				seen["S-1-1-0"] = true
-				out = append(out, "Everyone (no DACL on "+o.path+")")
+				out = append(out, Writer{SID: "S-1-1-0", Name: "Everyone (no DACL on " + o.path + ")"})
 			}
 			continue
 		}
@@ -710,10 +716,51 @@ func writers(chain []writerCheck) ([]string, error) {
 				continue
 			}
 			seen[s] = true
-			out = append(out, accountName(sid))
+			out = append(out, Writer{SID: s, Name: accountName(sid)})
 		}
 	}
 	return out, nil
+}
+
+// LookupAccount resolves an account name (DOMAIN\name, name@domain, or a
+// local name) to its SID, its canonical DOMAIN\name and its type, as the
+// security system does (plan 087 review R1b). A name that maps to no account
+// wraps ErrAccountUnknown. Resolving a domain account may need the domain
+// controller.
+func LookupAccount(name string) (Account, error) {
+	sid, _, use, err := windows.LookupSID("", name)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+			return Account{}, fmt.Errorf("%w: %s", ErrAccountUnknown, name)
+		}
+		return Account{}, fmt.Errorf("dataacl: look up %s: %w", name, err)
+	}
+	return Account{SID: sid.String(), Name: accountName(sid), Type: sidUseName(use)}, nil
+}
+
+// sidUseName is a SID_NAME_USE as Account.Type says it.
+func sidUseName(use uint32) string {
+	switch use {
+	case windows.SidTypeUser:
+		return AccountUser
+	case windows.SidTypeGroup:
+		return "group"
+	case windows.SidTypeDomain:
+		return "domain"
+	case windows.SidTypeAlias:
+		return "alias"
+	case windows.SidTypeWellKnownGroup:
+		return "wellKnownGroup"
+	case windows.SidTypeDeletedAccount:
+		return "deletedAccount"
+	case windows.SidTypeComputer:
+		return "computer"
+	case windows.SidTypeLabel:
+		return "label"
+	case windows.SidTypeLabel + 1: // SidTypeLogonSession, not named by x/sys
+		return "logonSession"
+	}
+	return "unknown"
 }
 
 // The allow ACE types besides ACCESS_ALLOWED_ACE_TYPE (winnt.h). An object

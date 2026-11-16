@@ -69,10 +69,14 @@ type StateResult struct {
 	Errors          []string              `json:"errors,omitempty"`
 }
 
-// StateWritableFolder is one folder others can write to (config.WriteFolder).
+// StateWritableFolder is one folder others can write to (config.WriteFolder):
+// Writers are the accounts that count; Trusted (review R1b) are the
+// documents.trustedWriters accounts that can write there too, which never
+// count.
 type StateWritableFolder struct {
 	config.WriteFolder
 	Writers []string `json:"writers"`
+	Trusted []string `json:"trusted,omitempty"`
 	Error   string   `json:"error,omitempty"`
 }
 
@@ -626,12 +630,13 @@ func writableFolders(sys System, cfg *config.Config) []StateWritableFolder {
 		return out
 	}
 	for _, f := range cfg.WriteFolders() {
-		who, err := sys.FolderWriters(f.Path)
+		all, err := sys.FolderWriters(f.Path)
+		who, trusted := splitTrusted(all, cfg.TrustedSIDs())
 		switch {
 		case err != nil:
 			out = append(out, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})
-		case len(who) > 0:
-			out = append(out, StateWritableFolder{WriteFolder: f, Writers: who})
+		case len(who) > 0 || len(trusted) > 0:
+			out = append(out, StateWritableFolder{WriteFolder: f, Writers: who, Trusted: trusted})
 		}
 	}
 	return out

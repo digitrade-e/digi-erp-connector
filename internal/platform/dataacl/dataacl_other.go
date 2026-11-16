@@ -21,7 +21,12 @@ func FileTrusted(string) (bool, error) { return true, nil }
 func Writers(string) ([]string, error) { return []string{}, nil }
 
 // FolderWriters has nobody to name off Windows.
-func FolderWriters(string) ([]string, error) { return []string{}, nil }
+func FolderWriters(string) ([]Writer, error) { return []Writer{}, nil }
+
+// LookupAccount resolves no account off Windows.
+func LookupAccount(name string) (Account, error) {
+	return Account{}, fmt.Errorf("%w: %s (accounts are resolved on Windows only)", ErrAccountUnknown, name)
+}
 
 // OpenLog opens path for appending, creating it 0600.
 func OpenLog(path string) (*os.File, error) {

@@ -3,6 +3,7 @@
 package dataacl
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -123,7 +124,7 @@ func TestFolderWriters(t *testing.T) {
 			setDACL(t, top, adminsOnly+tc.topACE, windows.PROTECTED_DACL_SECURITY_INFORMATION)
 			setDACL(t, dir, adminsOnly+tc.dirACE, windows.PROTECTED_DACL_SECURITY_INFORMATION)
 			who, err := FolderWriters(dir)
-			if err != nil || slices.Contains(who, users) != tc.named {
+			if err != nil || slices.Contains(names(who), users) != tc.named {
 				t.Fatalf("FolderWriters = %v, %v; Users named: want %v", who, err, tc.named)
 			}
 		})
@@ -180,7 +181,44 @@ func TestFolderWriters_ConditionalACE(t *testing.T) {
 	}
 	setDACL(t, dir, adminsOnly+"(XA;;0x2;;;BU;(Member_of {SID(BA)}))", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	who, err := FolderWriters(dir)
-	if err != nil || !slices.Contains(who, wellKnownName(t, windows.WinBuiltinUsersSid)) {
+	if err != nil || !slices.Contains(names(who), wellKnownName(t, windows.WinBuiltinUsersSid)) {
 		t.Fatalf("a conditional write ACE for Users: %v, %v", who, err)
+	}
+}
+
+// Review R1b: FolderWriters gives each writer's SID (Users: S-1-5-32-545), and
+// LookupAccount resolves a name to its SID and type — a user account is
+// "user", Users is an alias, Everyone a well-known group; an unknown name is
+// ErrAccountUnknown.
+func TestFolderWritersSIDsAndLookupAccount(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	dir := filepath.Join(t.TempDir(), "herp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, dir, adminsOnly+"(A;;0x2;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	who, err := FolderWriters(dir)
+	if err != nil || !slices.ContainsFunc(who, func(w Writer) bool { return w.SID == "S-1-5-32-545" }) {
+		t.Fatalf("FolderWriters = %+v, %v; want Users by SID", who, err)
+	}
+	users := wellKnownName(t, windows.WinBuiltinUsersSid)
+	if a, err := LookupAccount(users); err != nil || a.SID != "S-1-5-32-545" || a.Type != "alias" {
+		t.Errorf("LookupAccount(%s) = %+v, %v", users, a, err)
+	}
+	everyone := wellKnownName(t, windows.WinWorldSid)
+	if a, err := LookupAccount(everyone); err != nil || a.SID != "S-1-1-0" || a.Type == AccountUser {
+		t.Errorf("LookupAccount(%s) = %+v, %v", everyone, a, err)
+	}
+	if _, err := LookupAccount("nobody-at-all-087"); !errors.Is(err, ErrAccountUnknown) {
+		t.Errorf("an unknown name: %v, want ErrAccountUnknown", err)
+	}
+	tok := windows.GetCurrentProcessToken()
+	u, err := tok.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := accountName(u.User.Sid)
+	if a, err := LookupAccount(me); err != nil || a.SID != u.User.Sid.String() || a.Type != AccountUser {
+		t.Errorf("LookupAccount(%s) = %+v, %v; want this process's own user account", me, a, err)
 	}
 }

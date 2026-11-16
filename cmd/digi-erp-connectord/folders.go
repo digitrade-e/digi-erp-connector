@@ -33,8 +33,15 @@ var folderWritersFn = dataacl.FolderWriters
 // hostage to a folder.
 func checkWriteFolders(cfg config.Config, linked bool, log logger.LoggerService) (orders map[string]string, receipts string) {
 	orders = map[string]string{}
+	trusted := cfg.TrustedSIDs() // documents.trustedWriters never count (review R1b)
 	for _, f := range cfg.WriteFolders() {
-		who, err := folderWritersFn(f.Path)
+		all, err := folderWritersFn(f.Path)
+		var who []string
+		for _, w := range all {
+			if !trusted[w.SID] {
+				who = append(who, w.Name)
+			}
+		}
 		var why string
 		switch {
 		case err != nil:

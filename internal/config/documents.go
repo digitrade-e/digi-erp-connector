@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -67,6 +68,51 @@ type DocumentsConfig struct {
 	// Receipts binds POST /api/sendReceipt to a typed folder and a counter:
 	// the receipt body is the backend's frozen contract and carries no rule.
 	Receipts DocumentReceiptsConfig `yaml:"receipts,omitempty"`
+	// TrustedWriters (plan 087 review R1b) are the accounts — the ERP's own
+	// importer and scheduler, which must write into the folders (Masofon
+	// renames what it imported) — that are never counted as writers of a
+	// folder the connector writes documents into: by the commands, the daemon
+	// and state. At most MaxTrustedWriters, each a single user account; set
+	// only by the documents command, which resolves the names on the box.
+	TrustedWriters []TrustedWriter `yaml:"trustedWriters,omitempty"`
+}
+
+// TrustedWriter is one trusted account: its SID (what is compared) and its
+// name as the box resolved it (for a human).
+type TrustedWriter struct {
+	SID  string `yaml:"sid" json:"sid"`
+	Name string `yaml:"name" json:"name"`
+}
+
+// MaxTrustedWriters bounds documents.trustedWriters.
+const MaxTrustedWriters = 8
+
+// accountSIDRe is a domain or local account's SID: S-1-5-21-<three
+// sub-authorities>-<RID>. Well-known and built-in SIDs (Everyone, Users,
+// Authenticated Users, INTERACTIVE, NETWORK, ANONYMOUS, LOCAL SERVICE,
+// NETWORK SERVICE, every BUILTIN alias, …) never match; RIDs below 1000 are
+// built-in accounts and groups (Guest, Domain Users/Guests/Computers, …).
+var accountSIDRe = regexp.MustCompile(`^S-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-([0-9]{1,10})$`)
+
+// AccountSID reports whether sid can be a single account's (a user, or a
+// group an administrator created: the box's lookup tells them apart): an
+// S-1-5-21 SID with a RID of 1000 or above.
+func AccountSID(sid string) bool {
+	m := accountSIDRe.FindStringSubmatch(sid)
+	if m == nil {
+		return false
+	}
+	rid, err := strconv.ParseUint(m[1], 10, 32)
+	return err == nil && rid >= 1000
+}
+
+// TrustedSIDs is the set of documents.trustedWriters' SIDs.
+func (c Config) TrustedSIDs() map[string]bool {
+	out := map[string]bool{}
+	for _, w := range c.Documents.TrustedWriters {
+		out[w.SID] = true
+	}
+	return out
 }
 
 // CounterConfig is one named counter. Its last issued number lives in its
@@ -269,7 +315,7 @@ func sortedKeys[V any](m map[string]V) []string {
 // CloneDocuments is a deep copy of the documents block: Config is copied by
 // value, and its maps would otherwise be shared between the copies.
 func (d DocumentsConfig) Clone() DocumentsConfig {
-	out := DocumentsConfig{Receipts: d.Receipts}
+	out := DocumentsConfig{Receipts: d.Receipts, TrustedWriters: append([]TrustedWriter(nil), d.TrustedWriters...)}
 	if d.Counters != nil {
 		out.Counters = make(map[string]CounterConfig, len(d.Counters))
 		for k, v := range d.Counters {
@@ -385,11 +431,14 @@ func DocumentFileName(pattern, tempPrefix string, temporary bool, n int64) strin
 // receipts into the books).
 func (c Config) ValidateDocuments() error {
 	d := c.Documents
-	if len(d.Counters) == 0 && len(d.Folders) == 0 && d.Receipts == (DocumentReceiptsConfig{}) {
+	if len(d.Counters) == 0 && len(d.Folders) == 0 && d.Receipts == (DocumentReceiptsConfig{}) && len(d.TrustedWriters) == 0 {
 		return nil
 	}
 	if c.ERP != ERPHasavshevet {
 		return fmt.Errorf("documents (counters, folders) are Hashavshevet's; erp is %q", c.ERP)
+	}
+	if err := c.validateTrustedWriters(); err != nil {
+		return err
 	}
 	if err := c.validateCounters(); err != nil {
 		return err
@@ -611,6 +660,29 @@ func (c Config) validateReceiptsBinding() error {
 	}
 	if folder != nil && folder.Test && (strings.TrimSpace(c.HasReceiptBatFile) != "" || strings.TrimSpace(c.HasReceiptParamFile) != "") {
 		return errors.New("documents.receipts.folder is a test folder and a receipt importer is configured (hasReceiptBatFile / hasReceiptParamFile): it would import test receipts into the books")
+	}
+	return nil
+}
+
+// validateTrustedWriters: at most MaxTrustedWriters, each an account SID
+// (never a well-known or built-in one: those are groups of every user) given
+// once, with a name.
+func (c Config) validateTrustedWriters() error {
+	ws := c.Documents.TrustedWriters
+	if len(ws) > MaxTrustedWriters {
+		return fmt.Errorf("documents.trustedWriters has %d accounts: at most %d (the ERP's own importer and scheduler)", len(ws), MaxTrustedWriters)
+	}
+	seen := map[string]bool{}
+	for _, w := range ws {
+		switch {
+		case !AccountSID(w.SID):
+			return fmt.Errorf("documents.trustedWriters: %q (%s) is not a single account's SID: well-known and built-in SIDs (Everyone, Users, Authenticated Users, Domain Users, …) are never trusted", w.SID, w.Name)
+		case seen[w.SID]:
+			return fmt.Errorf("documents.trustedWriters names %s twice", w.SID)
+		case strings.TrimSpace(w.Name) == "" || len(w.Name) > 256 || hasControlChar(w.Name):
+			return fmt.Errorf("documents.trustedWriters: %s has no usable name", w.SID)
+		}
+		seen[w.SID] = true
 	}
 	return nil
 }

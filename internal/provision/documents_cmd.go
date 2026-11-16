@@ -2,6 +2,8 @@ package provision
 
 import (
 	"context"
+	"fmt"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,9 +38,16 @@ type DocumentsInput struct {
 	// AcceptUnreadable is the number of unreadable order and receipt index
 	// entries a human checked (review R7): without it, or with another count,
 	// a change the in-flight guard must scan for refuses (index_unreadable).
-	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
-	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
-	Expect           *Expect `json:"expect,omitempty"`
+	AcceptUnreadable *int `json:"acceptUnreadable,omitempty"`
+	// TrustedWriters (review R1b) replaces documents.trustedWriters: account
+	// names (DOMAIN\name, name@domain, or a local name) of the ERP's own
+	// importer and scheduler, at most config.MaxTrustedWriters; [] clears
+	// it, absent keeps it. The box resolves each to a SID (writer_unknown)
+	// and refuses anything but a single user account (writer_too_broad).
+	// Over WinRM and behind the link alike.
+	TrustedWriters *[]string `json:"trustedWriters,omitempty"`
+	AssumeIdle     bool      `json:"assumeIdle,omitempty"`
+	Expect         *Expect   `json:"expect,omitempty"`
 }
 
 // FolderInput is one typed folder (config.FolderConfig).
@@ -73,8 +82,22 @@ func (in DocumentsInput) Validate(linked bool, systemDirs []string) *Refusal {
 	if r := validateHeader(in.Version, in.ChangeSet, in.Expect); r != nil {
 		return r
 	}
-	if len(in.Folders) == 0 && in.Receipts == nil {
-		return refuse(CodeSpecInvalid, "name at least one folder, or the receipts binding", "the input changes nothing")
+	if len(in.Folders) == 0 && in.Receipts == nil && in.TrustedWriters == nil {
+		return refuse(CodeSpecInvalid, "name at least one folder, the receipts binding, or trustedWriters", "the input changes nothing")
+	}
+	if ws := in.TrustedWriters; ws != nil {
+		if len(*ws) > config.MaxTrustedWriters {
+			return refuse(CodeSpecInvalid, fmt.Sprintf("name at most %d accounts: the ERP's own importer and scheduler", config.MaxTrustedWriters),
+				"trustedWriters names %d accounts", len(*ws))
+		}
+		seen := map[string]bool{}
+		for _, n := range *ws {
+			k := strings.ToLower(strings.TrimSpace(n))
+			if k == "" || len(n) > 256 || hasControl(n) || seen[k] {
+				return refuse(CodeSpecInvalid, "name each account once, as DOMAIN\\name, name@domain or a local name", "trustedWriters entry %q is not an account name", n)
+			}
+			seen[k] = true
+		}
 	}
 	if linked {
 		if r := refuseAllowWritableLinked(in.AllowWritable); r != nil {
@@ -139,8 +162,19 @@ func ApplyDocuments(ctx context.Context, env Env, in DocumentsInput, check bool)
 		return res, err
 	}
 	defer unlock()
+	// Review R1b: the trusted writers' names are resolved on the box first.
+	var trusted []config.TrustedWriter
+	var checks []TrustedWriterCheck
+	if in.TrustedWriters != nil {
+		if trusted, checks, err = a.resolveTrustedWriters(*in.TrustedWriters); err != nil {
+			return res, err
+		}
+	}
 	set := func(t *config.Config) {
 		t.Documents = t.Documents.Clone()
+		if in.TrustedWriters != nil {
+			t.Documents.TrustedWriters = trusted
+		}
 		for k, f := range in.Folders {
 			if f == nil {
 				delete(t.Documents.Folders, k)
@@ -161,8 +195,40 @@ func ApplyDocuments(ctx context.Context, env Env, in DocumentsInput, check bool)
 		}
 	}
 	err = a.runConfigChange(ctx, set, func() error { return a.checkDocuments(in) })
+	if res.Check != nil {
+		res.Check.TrustedWriters = checks
+	}
 	a.settle()
 	return res, err
+}
+
+// resolveTrustedWriters resolves each name on the box (review R1b): one that
+// maps to no account is writer_unknown; one that is not a single user account
+// — a group, an alias, a computer, a well-known SID such as Everyone, Users,
+// Authenticated Users, INTERACTIVE, NETWORK, ANONYMOUS, Domain
+// Users/Guests/Computers, LOCAL SERVICE, NETWORK SERVICE — writer_too_broad.
+func (a *applier) resolveTrustedWriters(names []string) ([]config.TrustedWriter, []TrustedWriterCheck, error) {
+	var out []config.TrustedWriter
+	var checks []TrustedWriterCheck
+	seen := map[string]bool{}
+	for _, n := range names {
+		acc, err := a.env.Sys.LookupAccount(strings.TrimSpace(n))
+		if err != nil {
+			return nil, nil, refuse(CodeWriterUnknown, "name an account this machine resolves (DOMAIN\\name, name@domain or a local name); a domain account needs the domain controller",
+				"trusted writer %q does not resolve to an account: %v", n, err)
+		}
+		if acc.Type != dataacl.AccountUser || !config.AccountSID(acc.SID) {
+			return nil, nil, refuse(CodeWriterTooBroad, "trust single user accounts only: the ERP's importer and scheduler, never a group or a built-in account",
+				"trusted writer %q is %s (%s, a %s), not a single user account", n, acc.Name, acc.SID, acc.Type)
+		}
+		if seen[acc.SID] {
+			return nil, nil, refuse(CodeSpecInvalid, "name each account once", "trusted writers %q and another name are the same account (%s)", n, acc.SID)
+		}
+		seen[acc.SID] = true
+		out = append(out, config.TrustedWriter{SID: acc.SID, Name: acc.Name})
+		checks = append(checks, TrustedWriterCheck{Name: n, SID: acc.SID, Resolved: acc.Name, Type: acc.Type})
+	}
+	return out, checks, nil
 }
 
 // checkDocuments: each folder set is a folder on this machine, not a link or

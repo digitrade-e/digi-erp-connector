@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/provision"
 )
 
@@ -46,18 +47,22 @@ func TestCheckWriteFolders(t *testing.T) {
 			Receipts: config.DocumentReceiptsConfig{Folder: "herp_receipts"},
 		},
 	}
-	users := []string{`BUILTIN\Users`}
+	users := []dataacl.Writer{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`}}
+	scheduler := dataacl.Writer{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}
 	old := folderWritersFn
 	t.Cleanup(func() { folderWritersFn = old })
-	folderWritersFn = func(dir string) ([]string, error) {
+	folderWritersFn = func(dir string) ([]dataacl.Writer, error) {
 		switch filepath.Base(dir) {
 		case "orders", "pickup", "herp", "kupain":
 			return users, nil
 		case "herp_test":
 			return nil, errors.New("access denied")
+		case "clean":
+			return []dataacl.Writer{scheduler}, nil // trusted below: never counted
 		}
-		return []string{}, nil
+		return []dataacl.Writer{}, nil
 	}
+	cfg.Documents.TrustedWriters = []config.TrustedWriter{{SID: scheduler.SID, Name: scheduler.Name}}
 
 	log := &folderLog{}
 	orders, receipts := checkWriteFolders(cfg, false, log)

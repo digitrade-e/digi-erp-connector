@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
 )
 
@@ -33,15 +34,18 @@ func (otherSystem) StartService(string) error                     { return errUn
 func (otherSystem) FirewallProfiles() (FirewallProfiles, error) {
 	return FirewallProfiles{}, errUnsupported
 }
-func (otherSystem) FirewallRule(string) (*FirewallRule, error) { return nil, errUnsupported }
-func (otherSystem) SetFirewallRule(FirewallRule) error         { return errUnsupported }
-func (otherSystem) RemoveFirewallRule(string) error            { return errUnsupported }
-func (otherSystem) Listeners() ([]Listener, error)             { return nil, errUnsupported }
-func (otherSystem) SQLInstances() ([]SQLInstance, error)       { return nil, errUnsupported }
-func (otherSystem) Host() (HostInfo, error)                    { return HostInfo{}, errUnsupported }
-func (otherSystem) ImporterCandidates() ([]string, error)      { return nil, errUnsupported }
-func (otherSystem) Writers(string) ([]string, error)           { return nil, errUnsupported }
-func (otherSystem) FolderWriters(string) ([]string, error)     { return nil, errUnsupported }
+func (otherSystem) FirewallRule(string) (*FirewallRule, error)     { return nil, errUnsupported }
+func (otherSystem) SetFirewallRule(FirewallRule) error             { return errUnsupported }
+func (otherSystem) RemoveFirewallRule(string) error                { return errUnsupported }
+func (otherSystem) Listeners() ([]Listener, error)                 { return nil, errUnsupported }
+func (otherSystem) SQLInstances() ([]SQLInstance, error)           { return nil, errUnsupported }
+func (otherSystem) Host() (HostInfo, error)                        { return HostInfo{}, errUnsupported }
+func (otherSystem) ImporterCandidates() ([]string, error)          { return nil, errUnsupported }
+func (otherSystem) Writers(string) ([]string, error)               { return nil, errUnsupported }
+func (otherSystem) FolderWriters(string) ([]dataacl.Writer, error) { return nil, errUnsupported }
+func (otherSystem) LookupAccount(string) (dataacl.Account, error) {
+	return dataacl.Account{}, errUnsupported
+}
 
 func (otherSystem) Service(string) (autostart.ServiceInfo, error) {
 	return autostart.ServiceInfo{}, errUnsupported
