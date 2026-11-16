@@ -251,6 +251,10 @@ func askDaemon(ctx context.Context, env Env, cfg *config.Config, svc autostart.S
 	out := StateDaemon{Asked: true}
 	d := env.daemonFor(*cfg)
 	tok, err := d.login(ctx, cfg.Auth.Username, cfg.Auth.Password)
+	if errors.Is(err, errNotTheDaemon) {
+		// review m7: config.yaml's address is not the running daemon's (written after its start, say): not asked
+		return StateDaemon{Error: "not asked: " + err.Error()}
+	}
 	if err != nil {
 		out.Error = err.Error()
 		return out

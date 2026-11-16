@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -21,15 +23,71 @@ import (
 // API with a credential from config.yaml — the only way to see its in-memory
 // order queue, and the proof that it listens.
 type daemon struct {
-	base string
-	http *http.Client
+	base  string
+	http  *http.Client
+	check func() error // before the credential is sent: the address is the connector's service (nil: none)
 }
 
 func (e Env) daemonFor(cfg config.Config) daemon {
-	if !cfg.TLS.Enabled() {
-		return daemon{base: "http://" + e.LocalAddr(cfg.APIListen), http: e.HTTP}
+	addr := e.LocalAddr(cfg.APIListen)
+	var check func() error
+	if e.DaemonAt != nil {
+		check = func() error { return e.DaemonAt(addr) }
 	}
-	return daemon{base: "https://" + e.LocalAddr(cfg.APIListen), http: pinnedClient(e.HTTP, cfg.TLS.CertFile)}
+	if !cfg.TLS.Enabled() {
+		return daemon{base: "http://" + addr, http: e.HTTP, check: check}
+	}
+	return daemon{base: "https://" + addr, http: pinnedClient(e.HTTP, cfg.TLS.CertFile), check: check}
+}
+
+// errNotTheDaemon: the address config.yaml names is not served by the connector's service, so its credential is not
+// sent there (review m7).
+var errNotTheDaemon = errors.New("not the connector's service")
+
+// daemonAt checks that the socket listening at addr belongs to the process the service manager runs as the
+// connector (review m7). config.yaml can name a port the running daemon does not listen on — written after its start
+// (ConfigNewerThanStart), or the daemon failed to bind — and a local user may hold that port: POST /auth/token would
+// hand them the credential in clear. The listener bound to addr's own address wins over one bound to every address,
+// as in the kernel.
+func daemonAt(sys System, addr string) error {
+	host, p, err := net.SplitHostPort(addr)
+	port, perr := strconv.Atoi(p)
+	ip := net.ParseIP(host)
+	if err != nil || perr != nil || ip == nil {
+		return fmt.Errorf("%w: %s is not an address on this machine", errNotTheDaemon, addr)
+	}
+	svc, err := sys.Service(ServiceName)
+	if err != nil {
+		return fmt.Errorf("%w: read the %s service: %v", errNotTheDaemon, ServiceName, err)
+	}
+	if svc.ProcessID == 0 {
+		return fmt.Errorf("%w: the %s service runs no process", errNotTheDaemon, ServiceName)
+	}
+	ls, err := sys.Listeners()
+	if err != nil {
+		return fmt.Errorf("%w: read the TCP table: %v", errNotTheDaemon, err)
+	}
+	var found *Listener
+	for _, exact := range []bool{true, false} {
+		for i := range ls {
+			lip := net.ParseIP(ls[i].Address)
+			if ls[i].Port == port && lip != nil && ((exact && lip.Equal(ip)) || (!exact && lip.IsUnspecified())) {
+				found = &ls[i]
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	switch {
+	case found == nil:
+		return fmt.Errorf("%w: nothing listens on %s (the service, process %d, runs another config or has not bound it yet)", errNotTheDaemon, addr, svc.ProcessID)
+	case found.PID != svc.ProcessID:
+		return fmt.Errorf("%w: %s is held by process %d %s, not the %s service (process %d); its credential was not sent",
+			errNotTheDaemon, addr, found.PID, found.Process, ServiceName, svc.ProcessID)
+	}
+	return nil
 }
 
 // pinnedClient is base with a TLS config that trusts exactly the certificate at certFile — the connector's own pair,
@@ -70,6 +128,11 @@ var (
 const maxLocalBody = 64 << 10
 
 func (d daemon) login(ctx context.Context, user, pass string) (string, error) {
+	if d.check != nil {
+		if err := d.check(); err != nil {
+			return "", err
+		}
+	}
 	body, _ := json.Marshal(map[string]string{"username": user, "password": pass})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.base+"/auth/token", bytes.NewReader(body))
 	if err != nil {

@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -163,6 +169,79 @@ func TestState_AsksTheRunningDaemon(t *testing.T) {
 	_, res, _ = runState(t, stateSys{fakeSys: sys}, testEnv(sys, &fakeDB{}), `{}`)
 	if res.Daemon.Asked || res.Config.ConfigNewerThanStart {
 		t.Fatalf("a stopped daemon: %+v", res.Daemon)
+	}
+}
+
+// Review m7: config.yaml written after the daemon's start names a port the daemon does not listen on, and a local user
+// holds it. state — and the upgrade's queue check, which runs it — must not send config.yaml's credential there.
+func TestState_NeverSendsTheCredentialToAPortTheDaemonDoesNotHold(t *testing.T) {
+	sys, _, _ := handInstallBox(t)
+	var got []string
+	var mu sync.Mutex
+	squatter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = append(got, r.URL.Path+" "+string(b))
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(squatter.Close)
+	sqAddr := strings.TrimPrefix(squatter.URL, "http://")
+	_, sqPort, _ := net.SplitHostPort(sqAddr)
+	port, _ := strconv.Atoi(sqPort)
+	daemonAddr := strings.TrimPrefix(sys.daemon.srv.URL, "http://")
+	_, dPort, _ := net.SplitHostPort(daemonAddr)
+	dport, _ := strconv.Atoi(dPort)
+	// the daemon (process 4242) still serves its old port; the squatter (process 31337) holds config.yaml's new one
+	sys.listeners = []Listener{{Address: "0.0.0.0", Port: dport, PID: 4242}, {Address: "127.0.0.1", Port: port, PID: 31337, Process: "evil.exe"}}
+	env := testEnv(sys, &fakeDB{})
+	env.LocalAddr = func(string) string { return sqAddr }
+	env.DaemonAt = func(addr string) error { return daemonAt(sys, addr) }
+	_, res, _ := runState(t, stateSys{fakeSys: sys}, env, `{}`)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("the credential reached the squatter: %q", got)
+	}
+	if res.Daemon.Asked || res.Daemon.Queue != nil || !strings.Contains(res.Daemon.Error, "process 31337") || !strings.Contains(res.Daemon.Error, "not asked") {
+		t.Fatalf("daemon %+v", res.Daemon)
+	}
+	// the daemon's own port: asked as before
+	env.LocalAddr = func(string) string { return daemonAddr }
+	if _, res, _ = runState(t, stateSys{fakeSys: sys}, env, `{}`); !res.Daemon.Asked || res.Daemon.Queue == nil || res.Daemon.Error != "" {
+		t.Fatalf("the daemon's own port: %+v", res.Daemon)
+	}
+	// nothing listens there at all
+	sys.listeners = sys.listeners[:1]
+	env.LocalAddr = func(string) string { return sqAddr }
+	if _, res, _ = runState(t, stateSys{fakeSys: sys}, env, `{}`); res.Daemon.Asked || !strings.Contains(res.Daemon.Error, "nothing listens") || len(got) != 0 {
+		t.Fatalf("no listener: %+v, squatter got %q", res.Daemon, got)
+	}
+}
+
+// The same guard for a provisioning run's queue check (idle): refused, nothing sent.
+func TestIdle_NeverSendsTheCredentialToAPortTheDaemonDoesNotHold(t *testing.T) {
+	sys, fdb, _ := handInstallBox(t)
+	var hits int
+	var mu sync.Mutex
+	squatter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(squatter.Close)
+	sqAddr := strings.TrimPrefix(squatter.URL, "http://")
+	sys.listeners = []Listener{{Address: "127.0.0.1", Port: 1, PID: 4242}}
+	env := testEnv(sys, fdb)
+	env.LocalAddr = func(string) string { return sqAddr }
+	env.DaemonAt = func(addr string) error { return daemonAt(sys, addr) }
+	_, err := ApplyDB(context.Background(), env, offSa(), true)
+	wantRefusal(t, err, CodePendingUnknown)
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("the squatter was asked %d times", hits)
 	}
 }
 

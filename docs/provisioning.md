@@ -397,7 +397,11 @@ shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; a
 answer.
 
 **`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
-the credential in `config.yaml` (an error says so when the daemon runs another one). `missingKeys` are the keys the
+the credential in `config.yaml` (an error says so when the daemon runs another one) — and only when the socket at
+`config.yaml`'s address belongs to the service's own process (the TCP table against the service manager's PID);
+otherwise it is not asked, and `daemon.error` says `not asked:` and who holds the port. Every run that sends that
+credential (the queue checks before writes and restarts, the proofs, `verify`) makes the same check first: a
+`config.yaml` written after the daemon's start can name a port a local user holds. `missingKeys` are the keys the
 model always writes that `config.yaml` lacks (their defaults apply); `unknownKeys` are keys it does not know (left from
 an older build, or misspelt). Index entries are read for their number and state only (a receipt's request never
 leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
