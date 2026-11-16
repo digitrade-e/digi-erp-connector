@@ -38,17 +38,24 @@ func (l *Link) handleStream(c *conn, st *yamux.Stream) {
 	}
 	select {
 	case slots <- struct{}{}:
-		defer func() { <-slots }()
 	default:
 		return
 	}
+	released := false
+	release := func() { // the policy stream lets its slot go before it reports: the relay sends its next delivery then
+		if !released {
+			released = true
+			<-slots
+		}
+	}
+	defer release()
 	switch kind[0] {
 	case linkproto.StreamData:
 		l.pipe(st)
 	case linkproto.StreamCommand:
 		l.command(st)
 	case linkproto.StreamPolicy:
-		l.policyStream(c, st)
+		l.policyStream(c, st, release)
 	}
 }
 

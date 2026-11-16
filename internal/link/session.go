@@ -35,8 +35,10 @@ func sessionPath(dataDir string) string   { return filepath.Join(linkDir(dataDir
 func policyPath(dataDir string) string    { return filepath.Join(linkDir(dataDir), "policy.json") }
 func autoStatePath(dataDir string) string { return filepath.Join(linkDir(dataDir), "autoupgrade.json") }
 
-// writeLinkFile writes one of the link's state files: DataDir\link must be a plain folder (no junction in its place),
-// the write is atomic, and the file gets the data directory's inherited DACL (a no-op off Windows).
+// writeLinkFile writes one of the link's state files: DataDir\link must be a plain folder (no junction in its place)
+// and the write is atomic. The file is born inside the data directory's protected tree and inherits its DACL;
+// ProtectFile only asserts it again (a no-op off Windows, and when it already matches), so its failure does not undo a
+// write that happened.
 func writeLinkFile(dataDir, path string, b []byte) error {
 	dir := linkDir(dataDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -48,7 +50,8 @@ func writeLinkFile(dataDir, path string, b []byte) error {
 	if err := atomicfile.Write(path, b, 0o600); err != nil {
 		return err
 	}
-	return dataacl.ProtectFile(path)
+	_ = dataacl.ProtectFile(path)
+	return nil
 }
 
 // readLinkFile reads one of the link's state files by handle, at most max bytes; a missing file wraps os.ErrNotExist.

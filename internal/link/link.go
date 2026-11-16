@@ -66,6 +66,9 @@ type Config struct {
 	// call autoCheck themselves). AutoFirst is the first check's delay after start, default 1–3 min.
 	AutoEvery time.Duration
 	AutoFirst time.Duration
+	// ReportBudget is the most report streams one connection opens in a minute, default 5: the relay ends a
+	// connection whose box opens more than six.
+	ReportBudget int
 }
 
 // Link keeps one box connected to the relay.
@@ -166,6 +169,9 @@ func New(cfg Config) *Link {
 	if cfg.AutoEvery == 0 {
 		cfg.AutoEvery = 10 * time.Minute
 	}
+	if cfg.ReportBudget <= 0 {
+		cfg.ReportBudget = 5
+	}
 	l := &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64),
 		policySlots: make(chan struct{}, 1), autoKick: make(chan struct{}, 1)}
 	l.status.started = cfg.Now()
@@ -192,6 +198,7 @@ type conn struct {
 	// policies: the relay opened a policy stream on this connection (plan 088), so it takes report streams; the box
 	// opens one on no other connection (an older relay closes a connection whose box opens a second stream).
 	policies atomic.Bool
+	reports  reportGate
 }
 
 var (

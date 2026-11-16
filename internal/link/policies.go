@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/pkg/linkproto"
@@ -114,8 +115,9 @@ func (pf *policyFile) prune(box string) {
 }
 
 // policyStream reads one delivery, records it and answers with a report. The relay opened a policy stream, so it is a
-// relay that takes report streams on this connection.
-func (l *Link) policyStream(c *conn, st net.Conn) {
+// relay that takes report streams on this connection. It lets its slot go before it reports: the relay waits for the
+// report before its next delivery, and the link takes one delivery at a time (a second one is closed unread).
+func (l *Link) policyStream(c *conn, st net.Conn, release func()) {
 	if c != nil {
 		c.policies.Store(true)
 	}
@@ -134,6 +136,7 @@ func (l *Link) policyStream(c *conn, st net.Conn) {
 	l.refusedMu.Lock()
 	l.refused = refused
 	l.refusedMu.Unlock()
+	release()
 	l.sendReport(c)
 	l.kickAuto()
 }
@@ -268,10 +271,61 @@ func (l *Link) buildReport() linkproto.Report {
 // reportWait bounds a report stream's write: the relay reads it at once.
 const reportWait = 10 * time.Second
 
+// reportWindow is the period of the report budget (Config.ReportBudget, default 5): the relay ends a connection whose
+// box opens more than six report streams a minute. A variable for the tests only.
+var reportWindow = time.Minute
+
+// reportGate keeps one connection's report streams within the budget: at most budget in any reportWindow, counted in
+// real time (the relay's). A report over the budget is owed: the view as it is then goes as soon as the budget allows.
+type reportGate struct {
+	mu   sync.Mutex
+	sent []time.Time
+	owed bool
+}
+
+// take reserves a report at now, or says how long until one may go.
+func (g *reportGate) take(now time.Time, budget int) time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	keep := g.sent[:0]
+	for _, at := range g.sent {
+		if now.Sub(at) < reportWindow {
+			keep = append(keep, at)
+		}
+	}
+	g.sent = keep
+	if len(g.sent) < budget {
+		g.sent = append(g.sent, now)
+		return 0
+	}
+	return max(g.sent[0].Add(reportWindow).Sub(now), time.Millisecond)
+}
+
+// owe calls send once after wait, unless a call is owed already (it will carry the newest view).
+func (g *reportGate) owe(wait time.Duration, send func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.owed {
+		return
+	}
+	g.owed = true
+	time.AfterFunc(wait, func() {
+		g.mu.Lock()
+		g.owed = false
+		g.mu.Unlock()
+		send()
+	})
+}
+
 // sendReport opens a report stream on c and writes the signed report. Only on a connection whose relay opened a
-// policy stream: an older relay closes a connection whose box opens a second stream. False when nothing was sent.
+// policy stream: an older relay closes a connection whose box opens a second stream. Within the report budget: one
+// over it is sent later, as the then-latest view. False when nothing was sent now.
 func (l *Link) sendReport(c *conn) bool {
 	if c == nil || !c.policies.Load() {
+		return false
+	}
+	if wait := c.reports.take(time.Now(), l.cfg.ReportBudget); wait > 0 {
+		c.reports.owe(wait, func() { l.sendReport(c) })
 		return false
 	}
 	r := l.buildReport()

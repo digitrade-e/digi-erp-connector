@@ -144,10 +144,13 @@ type fakeClock struct {
 	t  time.Time
 }
 
-func (c *fakeClock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
-func (c *fakeClock) set(t time.Time)         { c.mu.Lock(); c.t = t; c.mu.Unlock() }
-func (c *fakeClock) add(d time.Duration)     { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
-func noScheduler(c *Config)                  { c.AutoEvery = -1 }
+func (c *fakeClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *fakeClock) set(t time.Time)     { c.mu.Lock(); c.t = t; c.mu.Unlock() }
+func (c *fakeClock) add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+// forTests088: no scheduler (the tests call autoCheck) and no report budget (they read every report at once).
+func forTests088(c *Config) { c.AutoEvery, c.ReportBudget = -1, 1000 }
+
 func withBuild(build string) func(*Config)   { return func(c *Config) { c.Build = build } }
 func withClock(clk *fakeClock) func(*Config) { return func(c *Config) { c.Now = clk.Now } }
 
@@ -168,7 +171,7 @@ func (l *testLog) count(sub string) int {
 func TestAPolicyDeliveryIsKeptAndReported(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
-	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { noScheduler(c); withBuild("v1.0.30")(c) })
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	digest := strings.Repeat("ab", 32)
@@ -208,7 +211,7 @@ func TestPolicyRefusals(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
 	stranger, _ := team(t, 1)
-	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { noScheduler(c); withBuild("v1.0.30")(c) })
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	digest := strings.Repeat("cd", 32)
@@ -257,7 +260,7 @@ func TestPolicyRefusals(t *testing.T) {
 func TestADeliveryRefusedAsAWhole(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
-	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", noScheduler)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", forTests088)
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	p := signed(t, priv, "team-1", targetPolicy(scope(linkproto.ScopeAll, ""), 1, "1.0.31", strings.Repeat("ef", 32), now))
@@ -295,7 +298,7 @@ func TestARetiredKeysPolicies(t *testing.T) {
 	r := newRelay(t)
 	priv1, kr1 := team(t, 1)
 	priv2, kr2 := team(t, 2)
-	b, rc := pairedBox(t, r, "bfl-read", append(kr1, kr2...), "127.0.0.1:1", func(c *Config) { noScheduler(c); withBuild("v1.0.30")(c) })
+	b, rc := pairedBox(t, r, "bfl-read", append(kr1, kr2...), "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	digest := strings.Repeat("ab", 32)
@@ -323,7 +326,7 @@ func TestARetiredKeysPolicies(t *testing.T) {
 func TestNoReportToARelayThatSentNoPolicy(t *testing.T) {
 	r := newRelay(t)
 	_, kr := team(t, 1)
-	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", noScheduler)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", forTests088)
 	rs := acceptReports(t, rc, b.keys.Public())
 	c := waitCurrent(t, b)
 	if b.link.sendReport(c) {
@@ -342,7 +345,7 @@ func TestNoReportToARelayThatSentNoPolicy(t *testing.T) {
 func TestTheStatedRingDecides(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
-	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { noScheduler(c); withBuild("v1.0.30")(c) })
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
 	rs := acceptReports(t, rc, b.keys.Public())
 	now := time.Now()
 	digest := strings.Repeat("ab", 32)
@@ -392,5 +395,63 @@ func TestTheAutoUpgradeSwitchIsAKnownKey(t *testing.T) {
 	_ = s.SaveState(st)
 	if back, _ := s.LoadState(); back.AutoUpgradeOn() {
 		t.Fatal("pairing turned auto-update back on")
+	}
+}
+
+// The relay ends a connection whose box opens more than six report streams a minute: the box keeps within its budget,
+// and a report over it goes later as the latest view (one, however many were owed).
+func TestReportsStayWithinTheRelaysLimit(t *testing.T) {
+	old := reportWindow
+	reportWindow = 400 * time.Millisecond
+	t.Cleanup(func() { reportWindow = old })
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); c.ReportBudget = 2 })
+	rs := acceptReports(t, rc, b.keys.Public())
+	stated := func(ring string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			// taken, and its slot let go (the relay waits for the report, or 10 s, before its next delivery)
+			if pf, err := b.store.loadPolicies(); err == nil && pf.Ring == ring && len(b.link.policySlots) == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("delivery for ring %s not taken", ring)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	start := time.Now()
+	for _, ring := range []string{"r-1", "r-2"} {
+		deliver(t, rc, delivery("bfl-read", "", ring))
+		if rep := rs.next(t); rep.Ring != ring {
+			t.Fatalf("report for %s: %+v", ring, rep)
+		}
+	}
+	for _, ring := range []string{"r-3", "r-4"} { // over the budget: owed
+		deliver(t, rc, delivery("bfl-read", "", ring))
+		stated(ring)
+	}
+	rep := rs.next(t)
+	if rep.Ring != "r-4" || time.Since(start) < 300*time.Millisecond {
+		t.Fatalf("the owed report: ring %q after %s", rep.Ring, time.Since(start))
+	}
+	rs.none(t)
+}
+
+// The link takes one delivery at a time, and the relay sends its next one once it has the report: the slot is free
+// before the report leaves, so that next delivery is never closed unread.
+func TestTheDeliverySlotIsFreeBeforeTheReport(t *testing.T) {
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", forTests088)
+	rs := acceptReports(t, rc, b.keys.Public())
+	for i := range 5 {
+		deliver(t, rc, delivery("bfl-read", "", ""))
+		rs.next(t)
+		if n := len(b.link.policySlots); n != 0 {
+			t.Fatalf("delivery %d: the slot was still held when the report arrived", i)
+		}
 	}
 }

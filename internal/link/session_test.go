@@ -10,7 +10,7 @@ func TestTheSessionMarker(t *testing.T) {
 	r := newRelay(t)
 	_, kr := team(t, 1)
 	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) {
-		noScheduler(c)
+		forTests088(c)
 		c.Build, c.LiveEvery = "v1.0.31", 50*time.Millisecond
 	})
 	waitFor := func(what string, ok func(SessionMarker) bool) SessionMarker {

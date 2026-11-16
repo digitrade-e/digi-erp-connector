@@ -30,7 +30,7 @@ type autoRig struct {
 func newAutoRig(t *testing.T, build string, at time.Time, extra ...func(*Config)) *autoRig {
 	t.Helper()
 	clk := &fakeClock{t: at}
-	g := newUpgradeRig(t, build, append([]func(*Config){noScheduler, withClock(clk)}, extra...)...)
+	g := newUpgradeRig(t, build, append([]func(*Config){forTests088, withClock(clk)}, extra...)...)
 	return &autoRig{upgradeRig: g, clk: clk, rs: acceptReports(t, g.rc, g.b.keys.Public())}
 }
 
