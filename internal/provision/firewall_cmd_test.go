@@ -95,13 +95,17 @@ func TestRemoveFirewallRules_Refusals(t *testing.T) {
 		{"too many", fwInput(slices.Repeat([]string{"a"}, MaxFirewallNames+1)...), CodeSpecInvalid},
 		{"version", FirewallRemoveInput{Version: 2, ChangeSet: "cs-fw-000001", Names: []string{"a"}}, CodeSpecInvalid},
 		{"a bad change set", FirewallRemoveInput{Version: 1, ChangeSet: "cs", Names: []string{"a"}}, CodeChangeSetID},
+		// review m9: ours, but not one inbound TCP allow on one port (a Block rule, several rules of one name, UDP, a
+		// range: ruleFromPS reads it as port 0) — restore could not re-create it, so it is not removed
+		{"a rule restore cannot re-create", fwInput("digi-erp-connector", "digi-erp-connector odd"), CodeFirewallUnrestorable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sys, fdb := boxWithOldRules(t)
+			sys.rules["digi-erp-connector odd"] = FirewallRule{Name: "digi-erp-connector odd", Ours: true}
 			res, err := RemoveFirewallRules(context.Background(), testEnv(sys, fdb), tc.in, false)
 			wantRefusal(t, err, tc.code)
-			if len(sys.rules) != 3 || len(sys.calls) != 0 || res.PreimageCaptured {
+			if len(sys.rules) != 4 || len(sys.calls) != 0 || res.PreimageCaptured {
 				t.Errorf("work was done before the refusal: rules %d, calls %v", len(sys.rules), sys.calls)
 			}
 		})

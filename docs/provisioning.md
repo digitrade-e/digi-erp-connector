@@ -292,7 +292,9 @@ back); the recovery actions are not in a pre-image. No restart: the service mana
 
 Once a box is on the link nothing listens on the network, and `apply` refuses a `firewall` block there. This
 command removes the named inbound rules (1–16) that **this tool made** — the connector's group; a rule of that name
-that is not is refused for the whole run (`firewall_foreign`), and a name with no rule is already gone. Every rule
+that is not is refused for the whole run (`firewall_foreign`), and so is one of ours that `restore` could not
+re-create as it is — anything but one inbound TCP allow rule on one port: a Block rule, several rules of one name, UDP,
+a port range (`firewall_unrestorable`; remove it by hand). A name with no rule is already gone. Every rule
 is read before the first removal; the change set's pre-image keeps each removed rule, `restore <changeSet>`
 re-creates them, and a removal failing half way puts back what the run removed. No restart. `--check` reports
 `check.firewall` (`remove` / `keep`) and `check.rules`.
@@ -362,6 +364,7 @@ actually changed.
 | `secret_roundtrip`, `write_failed` | the secret or a file could not be written |
 | `firewall_failed`, `service_failed` | the firewall or the service manager refused |
 | `firewall_foreign` | a rule of the spec's name exists and this tool did not make it |
+| `firewall_unrestorable` | `firewall-remove`: a rule of ours that is not one inbound TCP allow on one port; restore could not re-create it |
 | `order_number_conflict` | the old and the new order folder hold different order counters |
 | `busy` | another run (or an upgrade over the link) holds `provision\.lock` |
 | `upgrade_running` | an upgrade over the link is pending (its job written, no result yet): its setup stops the services and replaces this program; ask `upgrade-result` |

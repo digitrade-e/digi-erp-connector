@@ -95,6 +95,12 @@ func (a *applier) runFirewallRemove(in FirewallRemoveInput) error {
 		case !rule.Ours:
 			return refuse(CodeFirewallForeign, "leave it out: a rule this tool did not make is the client's to remove",
 				"the firewall rule %q is not the connector's (its group is not %s)", name, firewallGroup)
+		case rule.Port == 0:
+			// Review m9: in our group but not one inbound TCP allow on one port (a Block rule, several rules of one
+			// name, UDP, a range — ruleFromPS reads that as port 0). Its pre-image could not re-create it: restore
+			// would fail on port 0, or bring it back as an Allow rule.
+			return refuse(CodeFirewallUnrestorable, "remove it by hand (wf.msc) after noting what it is; restore could not bring it back",
+				"the firewall rule %q is not one inbound TCP allow rule on one port, so it could not be restored as it is", name)
 		default:
 			present = append(present, *rule)
 		}
