@@ -76,6 +76,8 @@ const (
 type guardedFolder struct {
 	f    config.WriteFolder
 	file bool // an importer's file: read with the file walk (Writers), no trusted writer
+	// params are the importer's other files, read with it (review R4-4): has.exe's parameter file
+	params []string
 
 	trusted  map[string]bool // documents.trustedWriters, none where an importer runs (review T1)
 	enforced bool            // behind the link and typed: refused while writable or unknown
@@ -106,12 +108,15 @@ type FolderGuard struct {
 // fileWriters (dataacl.Writers) reads an importer file's writers — the file,
 // its folder, every folder above — for the importer entries
 // (KeyOrderImporter, KeyReceiptImporter; review T1): behind the link an
-// importer others can write to is not run; no trusted writer is exempt.
+// importer others can write to is not run; no trusted writer is exempt. An
+// importer entry reads has.exe's parameter file too (review R4-4): who can
+// change what has.exe is told to import changes the import.
 func NewFolderGuard(cfg config.Config, linked bool, writers func(string) ([]dataacl.Writer, error), fileWriters func(string) ([]string, error), log logger.LoggerService) *FolderGuard {
 	g := &FolderGuard{writers: writers, fileWriters: fileWriters, log: log, now: time.Now, readTimeout: FolderReadTimeout, folders: map[string]*guardedFolder{}}
-	for key, p := range map[string]string{KeyOrderImporter: cfg.OrderImporter(), KeyReceiptImporter: cfg.ReceiptImporter()} {
-		if p != "" && fileWriters != nil {
-			g.folders[key] = &guardedFolder{f: config.WriteFolder{Name: "the " + strings.TrimPrefix(key, "importer:") + " importer", Path: p}, file: true, enforced: linked}
+	for key, files := range map[string][]string{KeyOrderImporter: cfg.OrderImporterFiles(), KeyReceiptImporter: cfg.ReceiptImporterFiles()} {
+		if len(files) > 0 && fileWriters != nil {
+			g.folders[key] = &guardedFolder{f: config.WriteFolder{Name: "the " + strings.TrimPrefix(key, "importer:") + " importer", Path: files[0]},
+				params: files[1:], file: true, enforced: linked}
 			g.order = append(g.order, key)
 		}
 	}
@@ -259,7 +264,7 @@ func (g *FolderGuard) startCheckLocked(key string) {
 func (g *FolderGuard) check(key string) {
 	g.mu.Lock()
 	f := g.folders[key]
-	path, name, trusted, file := f.f.Path, f.f.Name, f.trusted, f.file
+	path, name, trusted, file, params := f.f.Path, f.f.Name, f.trusted, f.file, f.params
 	g.mu.Unlock()
 
 	type result struct {
@@ -272,6 +277,18 @@ func (g *FolderGuard) check(key string) {
 		var r result
 		if file {
 			r.who, r.err = g.fileWriters(path) // an importer: nobody exempt
+			for _, p := range params {         // review R4-4: and the parameter file it is handed
+				if r.err != nil {
+					break
+				}
+				who, err := g.fileWriters(p)
+				if err != nil {
+					r.err = fmt.Errorf("its parameter file %s: %w", p, err)
+				}
+				for _, w := range who {
+					r.who = append(r.who, w+" (its parameter file "+p+")")
+				}
+			}
 		} else {
 			var all []dataacl.Writer
 			all, r.err = g.writers(path)

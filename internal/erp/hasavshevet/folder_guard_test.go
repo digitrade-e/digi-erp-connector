@@ -309,3 +309,45 @@ func TestFolderGuard_ASlowRecheckKeepsTheLastAnswer(t *testing.T) {
 	close(fresh.gate)
 	h.wg.Wait()
 }
+
+// Review R4-4: an importer's guard entry reads the parameter file has.exe is handed too — hasParamFile (relative: in
+// sendOrderDir) for orders, hasReceiptParamFile for receipts — with nobody exempt; one others can change, or one that
+// cannot be read, refuses the importer behind the link.
+func TestFolderGuard_TheImportersParameterFiles(t *testing.T) {
+	b := newGuardBox(t)
+	hash := filepath.Join(filepath.Dir(b.cfg.SendOrderDir), "Hash7")
+	b.cfg.HasExePath, b.cfg.HasParamFile = filepath.Join(hash, "has.exe"), "digi.prm"
+	b.cfg.HasReceiptParamFile = filepath.Join(hash, "kupain.prm")
+	b.cfg.SendOrderPickupDir, b.cfg.SendOrderFormat = "", ""
+	if got := b.cfg.OrderImporterFiles(); len(got) != 2 || got[1] != filepath.Join(b.cfg.SendOrderDir, "digi.prm") {
+		t.Fatalf("the order importer's files: %v", got)
+	}
+	b.who = map[string][]dataacl.Writer{"digi.prm": {usersW}}
+	g := b.guard(true)
+	g.checkAll()
+	err := g.Allowed(KeyOrderImporter)
+	if !errors.Is(err, ErrImporterWritable) || !strings.Contains(err.Error(), "its parameter file "+filepath.Join(b.cfg.SendOrderDir, "digi.prm")) {
+		t.Fatalf("a parameter file Users can change: %v", err)
+	}
+	if err := g.Allowed(KeyReceiptImporter); err != nil {
+		t.Fatalf("the receipt importer, its files the administrators' only: %v", err)
+	}
+	// a trusted writer is no exemption here, and a receipt parameter file that does not read refuses too
+	b.set(func(b *guardBox) {
+		b.who = map[string][]dataacl.Writer{"kupain.prm": {schedulerW}}
+		b.errs = map[string]error{"digi.prm": errors.New("the file was not found")}
+	})
+	g = b.guard(true)
+	g.checkAll()
+	if err := g.Allowed(KeyReceiptImporter); !errors.Is(err, ErrImporterWritable) || !strings.Contains(err.Error(), `BFL\wizsched (its parameter file`) {
+		t.Fatalf("a receipt parameter file the ERP's account can change: %v", err)
+	}
+	if err := g.Allowed(KeyOrderImporter); !errors.Is(err, ErrImporterWritable) || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("a parameter file that does not read: %v", err)
+	}
+	// a BAT importer hands nothing: only the BAT is read
+	b.cfg.HasBatFile = filepath.Join(hash, "digi.bat")
+	if got := b.cfg.OrderImporterFiles(); len(got) != 1 || got[0] != b.cfg.HasBatFile {
+		t.Fatalf("a BAT importer's files: %v", got)
+	}
+}
