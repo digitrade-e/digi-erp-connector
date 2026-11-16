@@ -30,7 +30,8 @@ const usage = `digi-erp-connector-link — the connector's outbound link to Digi
   digi-erp-connector-link run           run in the foreground (the service does this itself)
   digi-erp-connector-link upgrade-run <ticket>   the upgrade runner the link starts itself (plan 086); not for a person
 
-link.yaml in the data directory holds the state; "admin: false" there turns remote commands off.`
+link.yaml in the data directory holds the state; "admin: false" there turns remote commands off, "autoUpgrade: false"
+the managed auto-update (plan 088).`
 
 func main() {
 	if runAsService() {
@@ -78,7 +79,8 @@ func main() {
 		case box == "":
 			box = "(not paired)"
 		}
-		fmt.Printf("relay:       %s\nbox:         %s\ncommands:    %s\nfingerprint: %s\n", st.RelayURL(), box, onOff(st.AdminOn()), k.Public().Fingerprint())
+		fmt.Printf("relay:       %s\nbox:         %s\ncommands:    %s\nauto-update: %s\nfingerprint: %s\n", st.RelayURL(), box, onOff(st.AdminOn()),
+			autoOnOff(st.AutoUpgradeOn()), k.Public().Fingerprint())
 	case "preflight":
 		// Writes nothing: no keys, no link.yaml. Exit 0 ready, 3 with warnings, 1 a STOP.
 		st, err := m.Store().LoadState()
@@ -131,6 +133,13 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off (link.yaml admin: false)"
+}
+
+func autoOnOff(b bool) string {
+	if b {
+		return "on (it follows the upgrade policies Digitrade approves, in their maintenance window)"
+	}
+	return "off (link.yaml autoUpgrade: false)"
 }
 
 func exitOn(err error) {

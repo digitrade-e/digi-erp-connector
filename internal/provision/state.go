@@ -170,6 +170,9 @@ type StateLink struct {
 	Proxy       string `json:"proxy,omitempty"`
 	UnknownKeys bool   `json:"unknownKeys"`
 	Error       string `json:"error,omitempty"`
+	// AutoUpgrade (plan 088) is managed auto-update: link.yaml's switch (enabled), and the link's last view — the
+	// policies it holds, what decides, the next check — with the last automatic upgrade's outcome read afresh.
+	AutoUpgrade *link.AutoUpgradeStatus `json:"autoUpgrade,omitempty"`
 }
 
 // StateDisk is the data directory's volume.
@@ -559,7 +562,24 @@ func linkState(dir string) StateLink {
 	if p := strings.TrimSpace(st.Proxy); p != "" {
 		out.Proxy = proxyWithoutCredential(p)
 	}
+	out.AutoUpgrade = autoUpgradeState(dir, st)
 	return out
+}
+
+// autoUpgradeState is the link's last auto-update view (plan 088), with link.yaml's switch as it reads now.
+func autoUpgradeState(dir string, st link.State) *link.AutoUpgradeStatus {
+	s, err := link.ReadAutoUpgradeStatus(dir, time.Now())
+	switch {
+	case err != nil:
+		s = &link.AutoUpgradeStatus{Error: err.Error()}
+	case s == nil:
+		s = &link.AutoUpgradeStatus{Error: "the link has not checked for an upgrade yet (a build before v1.0.31, or it started a moment ago)"}
+	}
+	s.Enabled = st.AutoUpgradeOn()
+	if s.Policies == nil {
+		s.Policies = []link.PolicyStatus{}
+	}
+	return s
 }
 
 // proxyWithoutCredential is a proxy URL without its user and password; one that does not parse is only named as set.
