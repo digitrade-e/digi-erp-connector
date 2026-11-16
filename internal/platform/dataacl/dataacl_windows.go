@@ -179,6 +179,14 @@ func newTrust() (*trust, error) {
 		if *x.dst, err = windows.SecurityDescriptorFromString(s); err != nil {
 			return nil, fmt.Errorf("dataacl: parse %s: %w", s, err)
 		}
+		// v1.0.32 (the round-4 finding): SetKernelObjectSecurity takes the
+		// protection from the descriptor (the root's "P") and drops the
+		// auto-inherited mark ("AI") unless SE_DACL_AUTO_INHERIT_REQ asks for it
+		// too — so every entry ProtectTree and ProtectFile wrote lost its mark,
+		// and MARTA (icacls, Explorer, a later propagation) read it converted.
+		if err := daclControl(*x.dst, !x.child, true); err != nil {
+			return nil, fmt.Errorf("dataacl: the template %s: %w", s, err)
+		}
 	}
 	return t, nil
 }

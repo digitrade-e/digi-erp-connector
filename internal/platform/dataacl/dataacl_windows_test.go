@@ -1032,3 +1032,51 @@ func TestProtectTree_SteadyAfterAClaim(t *testing.T) {
 		t.Errorf("third run %+v (reset %v); want nothing written", rep, rep.ResetPaths)
 	}
 }
+
+// v1.0.32: ProtectTree and ProtectFile write the protection and the
+// auto-inherited mark through the descriptor (SE_DACL_PROTECTED |
+// SE_DACL_AUTO_INHERIT_REQ), so the kernel keeps both — read raw
+// (kernelSD), not through MARTA, which would show a mark-less entry
+// converted. A second run writes nothing.
+func TestProtectTree_KeepsTheAutoInheritedMark(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	file := filepath.Join(dir, "receipts", "index.json")
+	mkfile(t, file)
+	protectTree(t, dir)
+	raw := func(p string) windows.SECURITY_DESCRIPTOR_CONTROL {
+		t.Helper()
+		n, err := open(p, windows.READ_CONTROL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer windows.CloseHandle(n.h)
+		sd, err := kernelSD(n.h, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctl, _, _ := sd.Control()
+		return ctl
+	}
+	if ctl := raw(dir); ctl&windows.SE_DACL_PROTECTED == 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 {
+		t.Errorf("the data directory: control %#x, want protected and auto-inherited", ctl)
+	}
+	for _, p := range []string{filepath.Dir(file), file} {
+		if ctl := raw(p); ctl&windows.SE_DACL_AUTO_INHERITED == 0 || ctl&windows.SE_DACL_PROTECTED != 0 {
+			t.Errorf("%s: control %#x, want auto-inherited, not protected", p, ctl)
+		}
+	}
+	other := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, other, "D:P(A;;FA;;;SY)(A;;FA;;;BA)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err := ProtectFile(other); err != nil {
+		t.Fatal(err)
+	}
+	if ctl := raw(other); ctl&windows.SE_DACL_AUTO_INHERITED == 0 || ctl&windows.SE_DACL_PROTECTED != 0 {
+		t.Errorf("ProtectFile: control %#x, want auto-inherited, not protected", ctl)
+	}
+	if rep := protectTree(t, dir); rep.RootSet || rep.Reset != 0 {
+		t.Errorf("a second run wrote: %+v", rep)
+	}
+}
