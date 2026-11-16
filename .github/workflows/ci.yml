@@ -84,11 +84,21 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
+      # As in release-windows.yml (plan 086 review m11): the link's upgrade runs the setup as LocalSystem, and Inno Setup
+      # 6.5.0+ gives it a private temporary folder there (GetTempPath2: C:\Windows\SystemTemp). The version is the one
+      # the compiler reports while it compiles (iscc on PATH is Chocolatey's shim, whose file says 0.0.0.0).
       - name: Compile the installer
         shell: powershell
         run: |
-          iscc /DAppVersion=0.0.0 /DBuildDir="$PWD\\dist\\bin" /DOutputDir="$PWD\\dist" assets\\installer\\digi-erp-connector.iss
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $out = & iscc /DAppVersion=0.0.0 /DBuildDir="$PWD\\dist\\bin" /DOutputDir="$PWD\\dist" assets\\installer\\digi-erp-connector.iss
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          $m = [regex]::Match(($out -join "`n"), 'Compiler engine version: Inno Setup (\d+\.\d+\.\d+)')
+          if (-not $m.Success) { Write-Error "the compiler did not report its version"; exit 1 }
+          $v = [version]$m.Groups[1].Value
+          if ($v -lt [version]'6.5.0') { Write-Error "Inno Setup $v is older than 6.5.0: no private temporary folder under LocalSystem"; exit 1 }
+          Write-Host "Inno Setup $v (at least 6.5.0)"
 
       # A branch's installer, kept 14 days, for a test install before anything is released (plan 083: link-test-N).
       - name: Keep the installer

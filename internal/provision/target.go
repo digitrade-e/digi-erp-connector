@@ -36,22 +36,7 @@ func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Confi
 	t := cur
 	t.ERP = config.ERPType(s.ERP)
 	t.APIListen = strings.TrimSpace(s.APIListen)
-
-	server, instance := db.SplitInstance(s.DB.Host)
-	t.DB.Driver = config.DBDriverMSSQL
-	t.DB.Host = server
-	if instance != "" {
-		t.DB.Host = server + `\` + instance
-	}
-	t.DB.Port = s.DB.Port
-	t.DB.Database = s.DB.Database
-	t.DB.User = dbUser
-	if s.DB.Encrypt != nil {
-		t.DB.Encrypt = *s.DB.Encrypt
-	}
-	if s.DB.TrustServerCertificate != nil {
-		t.DB.TrustServerCertificate = *s.DB.TrustServerCertificate
-	}
+	setDB(&t, s.DB, dbUser)
 
 	if s.SendOrderDir != nil {
 		t.SendOrderDir = strings.TrimSpace(*s.SendOrderDir)
@@ -84,6 +69,32 @@ func buildTarget(cur config.Config, s Spec, dataDir, dbUser string) config.Confi
 		}
 	}
 	return t
+}
+
+// setDB writes d's database onto t, logging in as dbUser; encrypt and
+// trustServerCertificate left out keep t's. Mode none clears the database:
+// config.yaml then names none (db.IsConfigured is false). Shared by apply and
+// the db command.
+func setDB(t *config.Config, d DBSpec, dbUser string) {
+	if d.None() {
+		t.DB = config.DBConfig{Driver: config.DBDriverMSSQL}
+		return
+	}
+	server, instance := db.SplitInstance(d.Host)
+	t.DB.Driver = config.DBDriverMSSQL
+	t.DB.Host = server
+	if instance != "" {
+		t.DB.Host = server + `\` + instance
+	}
+	t.DB.Port = d.Port
+	t.DB.Database = d.Database
+	t.DB.User = dbUser
+	if d.Encrypt != nil {
+		t.DB.Encrypt = *d.Encrypt
+	}
+	if d.TrustServerCertificate != nil {
+		t.DB.TrustServerCertificate = *d.TrustServerCertificate
+	}
 }
 
 // setOptions writes the options a spec gives onto t; a nil field keeps t's.

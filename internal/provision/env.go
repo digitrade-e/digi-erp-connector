@@ -225,6 +225,10 @@ type Env struct {
 	ProofTimeout time.Duration
 	// LookupIP resolves a host name here, on the box (checkDBHost).
 	LookupIP func(ctx context.Context, host string) ([]net.IP, error)
+	// DaemonAt checks that the address about to receive config.yaml's credential is served by the connector's
+	// service (review m7: daemonAt). NewEnv's reads the service's process and the TCP table; nil checks nothing
+	// (tests that do not model the TCP table).
+	DaemonAt func(addr string) error
 }
 
 // staleGrace: the daemon writes config.yaml itself just after its first start
@@ -259,6 +263,7 @@ func NewEnv(sys System) Env {
 		LookupIP: func(ctx context.Context, host string) ([]net.IP, error) {
 			return net.DefaultResolver.LookupIP(ctx, "ip", host)
 		},
+		DaemonAt: func(addr string) error { return daemonAt(sys, addr) },
 	}
 }
 

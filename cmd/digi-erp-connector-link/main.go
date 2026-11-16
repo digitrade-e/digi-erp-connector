@@ -28,6 +28,7 @@ const usage = `digi-erp-connector-link — the connector's outbound link to Digi
   digi-erp-connector-link version       print the build
   digi-erp-connector-link preflight     check this server can reach Digitrade, the way the service will (setup runs it)
   digi-erp-connector-link run           run in the foreground (the service does this itself)
+  digi-erp-connector-link upgrade-run <ticket>   the upgrade runner the link starts itself (plan 086); not for a person
 
 link.yaml in the data directory holds the state; "admin: false" there turns remote commands off.`
 
@@ -40,6 +41,11 @@ func main() {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
+	}
+	if args[0] == "upgrade-run" && len(args) == 2 {
+		// The detached upgrade runner (plan 086 C8): a copy of this executable in DataDir\upgrade\<ticket>\, started
+		// by the link's upgrade command. It writes DataDir\results\upgrade-<ticket>.json.
+		os.Exit(link.RunUpgrade(paths.DataDir(), args[1]))
 	}
 	switch args[0] {
 	case "fingerprint", "pair", "status": // they make or read the box's keys: the data directory is protected first

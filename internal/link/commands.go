@@ -32,6 +32,12 @@ var commands = map[string]func(args []string) ([]string, bool){
 // before anything else (L25 item 4).
 const CommandHashes = "hashes"
 
+// selfCommands are answered by the link itself, not provision.exe; they take no args. The answer is stdout and the
+// exit code.
+var selfCommands = map[string]func(l *Link, env linkproto.Envelope, stdin []byte) ([]byte, int){
+	CommandHashes: func(l *Link, _ linkproto.Envelope, _ []byte) ([]byte, int) { return Hashes(l.cfg.InstallDir), 0 },
+}
+
 var changeSetShape = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
 func fixed(argv ...string) func([]string) ([]string, bool) {
@@ -53,6 +59,128 @@ func restore(args []string) ([]string, bool) {
 	}
 	return nil, false
 }
+
+// --- plan 086 B1: the provision commands of v1.0.29 (auth, daemon, service, db, firewall-remove) ---
+//
+// Kept in their own table, merged into commands at start, so the plan's other
+// builders add theirs without touching these lines. Each one is a provision
+// subcommand with fixed argv; the pin test lists them all.
+var provisionCommands086 = map[string]func(args []string) ([]string, bool){
+	"auth-check":            fixed("auth", "--check", "--spec", "-"),
+	"auth":                  fixed("auth", "--spec", "-"),
+	"daemon-restart":        daemonCmd086("restart"),
+	"daemon-stop":           daemonCmd086("stop"),
+	"daemon-start":          daemonCmd086("start"),
+	"service-check":         fixed("service", "--check", "--spec", "-"),
+	"service":               fixed("service", "--spec", "-"),
+	"db-check":              fixed("db", "--check", "--spec", "-"),
+	"db":                    fixed("db", "--spec", "-"),
+	"firewall-remove-check": fixed("firewall-remove", "--check", "--spec", "-"),
+	"firewall-remove":       fixed("firewall-remove", "--spec", "-"),
+	"receipt-seed":          receiptSeed086,
+	"receipts-check":        fixed("receipts", "--check", "--spec", "-"),
+	"receipts":              fixed("receipts", "--spec", "-"),
+	"orders-check":          fixed("orders", "--check", "--spec", "-"),
+	"orders":                fixed("orders", "--spec", "-"),
+}
+
+// sealedOnly086 are the commands whose stdin carries a secret (the API
+// password, a SQL credential): the box refuses them unless the envelope's
+// stdin is sealed to its X25519 key, so a slip on the sender's side never
+// shows a password to the relay.
+var sealedOnly086 = map[string]bool{
+	"auth-check": true,
+	"auth":       true,
+	"db-check":   true,
+	"db":         true,
+}
+
+// CodeInputNotSealed refuses a secret-carrying command whose stdin was sent in
+// clear.
+const CodeInputNotSealed = "input_not_sealed"
+
+func init() {
+	for name, f := range provisionCommands086 {
+		commands[name] = f
+	}
+}
+
+// sealedOnlyBase are the base commands whose stdin always carries a password: apply's spec holds the DB and API
+// credentials (review m5).
+var sealedOnlyBase = map[string]bool{
+	"apply":       true,
+	"apply-check": true,
+}
+
+// MustBeSealed reports whether command's stdin must arrive sealed whatever it holds.
+func MustBeSealed(command string) bool { return sealedOnly086[command] || sealedOnlyBase[command] }
+
+// MustBeSealedInput reports whether this command with this stdin must arrive sealed: always for MustBeSealed's, and for
+// any other whenever its stdin holds a password field with a value (discover's db.password; review m5). It guards
+// against a sender's mistake only — an unsealed stdin has already crossed the relay when the box refuses it; digi-mcp
+// seals every command.
+func MustBeSealedInput(command string, stdin []byte) bool {
+	return MustBeSealed(command) || carriesPassword(stdin)
+}
+
+// passwordKey is a JSON key that names a credential.
+var passwordKey = regexp.MustCompile(`(?i)password|passwd|pwd|secret`)
+
+// carriesPassword: stdin is JSON with, at any depth, a password-like key holding a non-empty string.
+func carriesPassword(stdin []byte) bool {
+	var v any
+	if json.Unmarshal(stdin, &v) != nil {
+		return false // not JSON: provision refuses it without reading a field
+	}
+	var walk func(any) bool
+	walk = func(v any) bool {
+		switch t := v.(type) {
+		case map[string]any:
+			for k, x := range t {
+				if s, ok := x.(string); ok && s != "" && passwordKey.MatchString(k) {
+					return true
+				}
+				if walk(x) {
+					return true
+				}
+			}
+		case []any:
+			for _, x := range t {
+				if walk(x) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(v)
+}
+
+// daemonCmd086 is provision's daemon <action>, optionally with --assume-idle.
+func daemonCmd086(action string) func([]string) ([]string, bool) {
+	return func(args []string) ([]string, bool) {
+		switch {
+		case len(args) == 0:
+			return []string{"daemon", action}, true
+		case len(args) == 1 && args[0] == "--assume-idle":
+			return []string{"daemon", action, "--assume-idle"}, true
+		}
+		return nil, false
+	}
+}
+
+// receiptSeed086 is provision's receipt-seed <N>: N is 1 to 9 digits, no
+// sign, no leading zero (the KUPAIN number's width).
+func receiptSeed086(args []string) ([]string, bool) {
+	if len(args) == 1 && receiptSeedShape.MatchString(args[0]) {
+		return []string{"receipt-seed", args[0]}, true
+	}
+	return nil, false
+}
+
+var receiptSeedShape = regexp.MustCompile(`^[1-9][0-9]{0,8}$`)
+
+// --- end plan 086 B1 ---
 
 // Argv maps an envelope's command and args to provision.exe's arguments, or
 // refuses.

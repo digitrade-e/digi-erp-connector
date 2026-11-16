@@ -54,3 +54,38 @@ func TestWriters(t *testing.T) {
 		t.Errorf("Users add to the folder: %v, %v", who, err)
 	}
 }
+
+// Review m12/m8: a folder above the file that Users may rename a child of (FILE_DELETE_CHILD) lets them swap the
+// whole folder; so does DELETE on the file's own folder. Creating folders in an ancestor (as Users may in C:\) does not.
+func TestWritersLooksAtEveryFolderAbove(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	top := filepath.Join(t.TempDir(), "top")
+	dir := filepath.Join(top, "Hash7")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cert := filepath.Join(dir, "cert.pem")
+	if err := os.WriteFile(cert, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, cert, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, dir, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	users := wellKnownName(t, windows.WinBuiltinUsersSid)
+
+	// Users may create folders in the grandparent: harmless
+	setDACL(t, top, adminsOnly+"(A;;0x1200a9;;;BU)(A;;0x4;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if who, err := Writers(cert); err != nil || slices.Contains(who, users) {
+		t.Fatalf("adding to a folder above: %v, %v", who, err)
+	}
+	// Users may delete children of the grandparent: they can rename Hash7 away and put their own in its place
+	setDACL(t, top, adminsOnly+"(A;;0x1200a9;;;BU)(A;;0x44;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if who, err := Writers(cert); err != nil || !slices.Contains(who, users) {
+		t.Fatalf("delete-child on a folder above: %v, %v", who, err)
+	}
+	// DELETE on the file's own folder: the same
+	setDACL(t, top, adminsOnly, windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, dir, adminsOnly+"(A;;0x10000;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if who, err := Writers(cert); err != nil || !slices.Contains(who, users) {
+		t.Fatalf("delete on the folder: %v, %v", who, err)
+	}
+}

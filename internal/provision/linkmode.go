@@ -75,7 +75,7 @@ func (s Spec) ValidateFor(linked bool, systemDirs []string) *Refusal {
 	}
 	// A login of the connector's own, never sa or any login the client gave as it is: whoever holds the connector's
 	// credential can run SQL through custom_sql, and a sysadmin login of another name is sa by another name.
-	if s.DB.AllowSa || !s.DB.LeastPrivilege {
+	if !s.DB.None() && (s.DB.AllowSa || !s.DB.LeastPrivilege) {
 		return refuse(CodeSaLinkMode, "set leastPrivilege: true — behind the link the connector keeps a login of its own",
 			"behind the link the connector never keeps the login the client gave (allowSa %v, leastPrivilege %v)", s.DB.AllowSa, s.DB.LeastPrivilege)
 	}

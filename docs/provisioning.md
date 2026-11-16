@@ -6,21 +6,32 @@ machine, writes the configuration, installs the Hasavshevet procedures, can move
 the connector off `sa`, opens the port in the Windows firewall, hardens the
 service, restarts it and proves it answers.
 
-digi-mcp runs it over WinRM with fixed command lines (Digitrade plan 068). A human
-can run it the same way in an elevated PowerShell. The code is
+digi-mcp runs it over WinRM with fixed command lines (Digitrade plan 068), or through
+the link's signed commands ([link.md](link.md), plan 083 / 086). A human can run it the
+same way in an elevated PowerShell. The code is
 `internal/provision`; `cmd/digi-erp-connector-provision` is only the entry point.
 
 ## Commands
 
 | Command | Input (stdin) | What it does | Writes |
 |---|---|---|---|
-| `discover [--spec -]` | optional `{"db":{"user","password"[,"host","port"]}}` | Reads the machine: SQL Server instances, their ports and login mode, the connector's service and `config.yaml` (secrets shown as `set`/`missing`), the listeners, the firewall, has.exe candidates and, with a credential, which databases look like Hasavshevet or SAP B1. Names the defects of a hand install and suggests a spec | nothing |
+| `discover [--spec -]` | optional `{"db":{"user","password"[,"host","port"]}}`, or `{"db":{"mode":"none"}}` for a box without a database (an empty stdin is `{}`) | Reads the machine: SQL Server instances, their ports and login mode, the connector's service and `config.yaml` (secrets shown as `set`/`missing`), the listeners, the firewall, has.exe candidates and, with a credential, which databases look like Hasavshevet or SAP B1. Names the defects of a hand install and suggests a spec | nothing |
 | `apply --spec -` | the spec (below) | Makes the connector match the spec | see below |
-| `verify [--spec -]` | optional `{"expectVersion","firewallRule"}` | Checks the running connector against `config.yaml`: service, login, `/api/ping`, `/api/health`, the order queue, recovery, the SQL dependency, the firewall rule | nothing |
+| `verify [--spec -]` | optional `{"expectVersion","firewallRule","db"?:{"mode":"none"}}` (an empty stdin is `{}`) | Checks the running connector against `config.yaml`: service, login, `/api/ping`, `/api/health`, the order queue, recovery, the SQL dependency, the firewall rule | nothing |
 | `restore <changeSet> [--assume-idle]` | none | Puts a change set's pre-image back and restarts on it | the pre-image's files, firewall rule, dependencies |
 | `apply --check --spec -` | the spec | Every check `apply` makes, its refusals included, then what it would change (`check`) | nothing |
 | `options [--check] --spec -` | `{"version":1,"changeSet","options":{…},"assumeIdle"?,"expect"?}` | Sets `options` (below) on a connector that is already configured, and nothing else: no credential, database, listener, firewall or service setting is read from stdin or changed | `config.yaml` |
+| `auth [--check] --spec -` | `{"version":1,"changeSet","auth":{"password","username"?},"rotateSecret"?,"assumeIdle"?,"expect"?}` | Sets the API credential (and, with `rotateSecret`, a new signing secret) and nothing else — no DB credential (below) | `config.yaml` |
+| `db [--check] --spec -` | `{"version":1,"changeSet","db":{…},"admin"?:{"user","password"},"assumeIdle"?,"expect"?}` | Changes the database login and settings only, or turns the database off — the API credential is not restated (below) | `config.yaml`, the DB secret, the SQL login |
+| `service [--check] --spec -` | `{"version":1,"changeSet","dependOn"?:[…],"recovery"?:true}` | The daemon service's SQL Server dependencies and recovery actions only; no restart (below) | the service |
+| `firewall-remove [--check] --spec -` | `{"version":1,"changeSet","names":[…]}` | Removes inbound rules this tool made (the connector's group); allowed behind the link (below) | the firewall |
+| `receipts [--check] --spec -` | `{"version":1,"changeSet","sendReceiptDir"?,"hasReceiptBatFile"?,"hasReceiptParamFile"?,"receiptCardNames"?,"allowWritable"?,"assumeIdle"?,"expect"?}` | The receipt settings only (below) | `config.yaml` |
+| `orders [--check] --spec -` | `{"version":1,"changeSet","sendOrderDir"?,"importer"?,"sendOrderPickupDir"?,"sendOrderFormat"?,"assumeIdle"?,"expect"?}` | The order settings only, model (a) included (below) | `config.yaml`, the order counter |
+| `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
+| `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
+| `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
+| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk. Plan 086 C4 | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
@@ -39,7 +50,7 @@ UTF-8 as mojibake; every JSON reader decodes it back. Exit codes: 0 done, 1 refu
   "erp": "hasavshevet",                   // or "sap"
   "apiListen": "0.0.0.0:8082",            // an IP literal, never loopback
   "tls": { "mode": "self-signed", "hosts": ["203.0.113.58"] },   // optional; or {"mode":"off"}
-  "db": {
+  "db": {                                // or {"mode": "none"}: a box without a database (below), every other db field refused
     "host": "127.0.0.1\\WIZSOFT",         // this machine or its LAN; host, or host\instance (port 0 = ask the SQL Server Browser)
     "port": 0,
     "database": "erp_db",
@@ -124,7 +135,13 @@ the hand script or a person may use it), or the one it knows no longer logs in. 
 connectors on one SQL Server name two logins (`db.login`): rotating a shared login
 locks the other connector out. A password set in SQL Server cannot be taken back, so
 a rollback or a `restore` keeps the current password whenever the config they put
-back logs in as that login.
+back logs in as that login. When the running connector logs in as the login that is
+given a new password (`apply` or `db`), the order queue is asked and the service
+stopped **before** SQL Server changes it (a step `stop`): its pool would keep the old
+password, failing every new connection while the process lives on. A failure after
+the change rolls back, starts the service on the restored config — whose secret is
+the new password — and proves it (a warning says so); the daemon is never left on a
+password the server no longer accepts.
 
 ## What `apply` does, in order
 
@@ -206,6 +223,125 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 `check.config` and `check.restart`. No `config.yaml` is `config_refused`: run
 `apply` first.
 
+## `auth`: the API credential alone
+
+`apply` restates the database credential with every run, so a caller that holds none — digi-mcp setting the password
+it generated for erp-manager (G-127) — could not change the API credential without it. `auth` takes
+`auth.password` (16–256 characters of plain text, no edge spaces: apply's guard, `auth_password_weak`), optionally
+`auth.username` (left out keeps the box's) and `rotateSecret` (a new signing secret, the GUI's *Regenerate*: every
+token issued until now stops working and callers log in again on their next 401). A `db` key is refused as an
+unknown field.
+
+In order: the input's checks, the drift guard, the daemon's own startup check on the result; then, only when
+`config.yaml` would change, the order queue (`orders_pending` / `pending_unknown`, `assumeIdle`), the change set's
+pre-image of **`config.yaml` alone**, the write, the restart, and the proof with the **new** credential:
+`/auth/token`, `/api/ping`, `/api/health` (not asked on a box without a database). A failed proof puts `config.yaml`
+back and the service as it was (`rolledBack`); `restore <changeSet>` undoes a success. The same credential again
+writes nothing and does not restart, but proves the credential on the running daemon (or restarts a daemon older
+than the file); a stopped service stays stopped. The password never appears in the output.
+
+## `db`: the database alone
+
+```jsonc
+{
+  "version": 1, "changeSet": "cs-bfl-db-0001",
+  "db": {
+    "host": "127.0.0.1\\WIZSOFT2017", "port": 0, "database": "WIZDB",
+    "leastPrivilege": true,               // the connector's own login, erp_connector_… (login, rotateLogin as in apply)
+    "encrypt": true, "trustServerCertificate": true   // or "trust": the same; left out keeps the box's
+  },
+  "admin": { "user": "sa", "password": "…" }   // only to create or rotate the login and install the procedures; never stored
+}
+```
+
+The API credential is not restated (an `auth` key is an unknown field). With `leastPrivilege`, a login that works
+with a password this box knows is **kept without any administrator** — a host, port or encryption change needs no
+`sa`; `admin` (or `db.user`/`db.password`, apply's convention — not both) is needed only to create or take over the
+login (`least_privilege_failed` otherwise) and installs the Hasavshevet procedures when it comes. Without
+`leastPrivilege` (WinRM only: behind the link `sa_link_mode`) the connector logs in as `db.user` with `db.password`,
+or with the stored password when it is left out and `db.user` is the login in use; `sa` needs `allowSa`. `"db":
+{"mode": "none"}` turns the database off.
+
+Guarantees as `apply`'s: every check before the first write (the database host on this machine or its LAN, the
+order queue, the login opened), the change set's pre-image of `config.yaml` and the DB secret (a least-privilege
+login's own key never goes back), then the login, the secret, `config.yaml`, the restart and the proof **including
+`/api/health`**: a connector that answers but not its database after the change is `port_proof_failed`, and the
+pre-image goes back. Nothing to change writes nothing and proves the running daemon.
+
+## A box without a database (`"db": {"mode": "none"}`)
+
+A write node that only sends orders (BFL's DIGI) has no SQL Server of its own. `apply`, `db`, `discover` and
+`verify` take `"db": {"mode": "none"}`; any other `db` field beside it is refused. `apply` writes a `config.yaml`
+that names no database, opens nothing, and skips the login, the procedures and the DB secret (left as it is);
+behind the link it needs no `leastPrivilege`. The proof does not ask `/api/health` (`proof.health`: `no_database`):
+its 503 there is by design. `discover` suggests `dbMode: none` when asked, or when `config.yaml` names no database
+(the note `no_database`). `verify` with `"db": {"mode": "none"}` passes its `database` check when `config.yaml`
+names none, and fails it when it names one; without it, a config with no database fails that check and says so.
+
+## `service`: dependencies and recovery alone
+
+`dependOn` is the whole list of SQL Server services the daemon depends on (`MSSQLSERVER` or `MSSQL$<instance>`, at
+most 8; `[]` removes them all; left out keeps the list); `recovery: true` sets the restart-on-failure actions. Every
+dependency must be a service installed on this machine (`dependency_missing`) and not Disabled
+(`dependency_disabled`): either would stop the daemon starting at the next start or boot, which this command never
+sees. One that is installed but not running (a Manual instance, stopped) is accepted with a warning: the service
+manager starts it with the connector. The change set's pre-image keeps the dependencies before (`restore` puts them
+back); the recovery actions are not in a pre-image. No restart: the service manager reads both at the next start.
+
+## `firewall-remove`: closing the old inbound rules
+
+Once a box is on the link nothing listens on the network, and `apply` refuses a `firewall` block there. This
+command removes the named inbound rules (1–16) that **this tool made** — the connector's group; a rule of that name
+that is not is refused for the whole run (`firewall_foreign`), and so is one of ours that `restore` could not
+re-create as it is — anything but one inbound TCP allow rule on one port: a Block rule, several rules of one name, UDP,
+a port range (`firewall_unrestorable`; remove it by hand). A name with no rule is already gone. Every rule
+is read before the first removal; the change set's pre-image keeps each removed rule, `restore <changeSet>`
+re-creates them, and a removal failing half way puts back what the run removed. No restart. `--check` reports
+`check.firewall` (`remove` / `keep`) and `check.rules`.
+
+## `daemon`: restart, stop, start
+
+`daemon restart|stop|start [--assume-idle]` is what a person does in services.msc after a hand edit or before a
+reboot. A stop or a restart of a running service asks the order queue first (it is in memory: a restart drops it;
+`--assume-idle` goes on when it cannot be read, and is the only way to stop a service whose `config.yaml` does not
+read). A start or a restart first checks `config.yaml` with the daemon's own startup check, so a running service is
+never stopped onto a config it would refuse (`config_refused`). `start` and `restart` end with the proof with
+`config.yaml`'s credential (`/auth/token`, `/api/ping`, `/api/health`); a start of a running service only proves it,
+a restart of a stopped one starts it. Nothing is written, so there is no pre-image and nothing to roll back: a
+failed proof is reported (`port_proof_failed`) and the service is left as the action left it. It takes the run lock
+(`busy` while an `apply` runs).
+
+## `receipts`, `orders`: those settings alone
+
+Each field left out keeps the box's; both run `options`' flow (the pre-image of `config.yaml`, the order queue, the
+restart only on change, the proof with the box's own credential, the rollback). Neither carries a credential.
+
+- **`receipts`**: `sendReceiptDir` (`""` turns receipts off), model (b)'s `hasReceiptBatFile` or
+  `hasReceiptParamFile` (`""` clears one), `receiptCardNames` (the whole block; `{}` clears it). Refused: a folder or
+  file that is not on the machine (`receipt_dir_missing`, `importer_missing`), a runner others can change
+  (`importer_writable`; `allowWritable` over WinRM only — it runs as LocalSystem once per receipt), anything the
+  daemon's own receipt guard refuses (`config_refused`: the order folder, both runners). Behind the link: plain local
+  paths outside the system folders, a `.bat`/`.cmd` only.
+- **`orders`**: `sendOrderDir` and `importer` with `apply`'s checks (the importer stated, its files present and
+  administrators-only, the counter carried to a new folder at the restart, two counters refused), and model (a)'s
+  `sendOrderPickupDir` (`""` off) and `sendOrderFormat` (`official` / `legacy`; required with a pickup folder —
+  the daemon's `ValidateOrders`). Behind the link: `apply`'s importer rules, folders outside the system folders.
+
+## `receipt-seed <N>`
+
+What `cutover-seed -receipt-seed N` does — the installer does not ship `cutover-seed`: creates
+`receipts\receiptNumber.json` with N (1–999999999) as the number the **next** receipt gets. Write-if-absent only: an
+existing store, valid or damaged, is never touched (`receipt_store_exists`), so a seed can neither lower the
+numbering nor hide a damaged file; a seed at or below a receipt already written (`history\receipts\<n>`) is refused
+(`receipt_seed_low`). No pre-image (there was no file) and no restart: the receipt writer reads the store on every
+request.
+
+## `restore` and pre-images without files
+
+A pre-image holding no file (`service`, `firewall-remove`) changes nothing the service reads: its `restore` neither
+asks the order queue nor restarts, and leaves the DB secret alone. A pre-image with files restarts only when a file
+actually changed.
+
 ## Refusals
 
 | Code | Meaning |
@@ -214,7 +350,7 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 | `loopback_listen` | `apiListen` is loopback: the Hub cannot reach it |
 | `sa_login` | the connector would keep `sa`: set `leastPrivilege` or `allowSa` |
 | `importer_required` / `importer_missing` | orders are configured but no importer is named / the named file is not on the machine |
-| `importer_writable` | someone besides the administrators can change the importer or its folder |
+| `importer_writable` | someone besides the administrators can change the importer or its folder, or rename a folder above it (DELETE on it, or delete-child on its parent) |
 | `db_host_public` | `db.host` is not this machine or its LAN |
 | `send_order_dir_missing` | the order folder does not exist |
 | `auth_password_weak` | the credential is shorter than 16 characters or not plain text |
@@ -228,15 +364,50 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 | `secret_roundtrip`, `write_failed` | the secret or a file could not be written |
 | `firewall_failed`, `service_failed` | the firewall or the service manager refused |
 | `firewall_foreign` | a rule of the spec's name exists and this tool did not make it |
+| `firewall_unrestorable` | `firewall-remove`: a rule of ours that is not one inbound TCP allow on one port; restore could not re-create it |
 | `order_number_conflict` | the old and the new order folder hold different order counters |
-| `busy` | another run holds `provision\.lock` |
-| `port_proof_failed` | the restarted connector did not answer; the pre-image was put back |
+| `busy` | another run (or an upgrade over the link) holds `provision\.lock` |
+| `upgrade_running` | an upgrade over the link is pending (its job written, no result yet): its setup stops the services and replaces this program; ask `upgrade-result` |
+| `port_proof_failed` | the restarted connector did not answer (for `db`: or its database did not); the pre-image was put back (`daemon`: nothing to put back) |
 | `sa_link_mode` | behind the link (below), `allowSa`: the connector never keeps `sa` there |
 | `importer_not_erp` | behind the link, an importer that is not `has.exe` or a `.bat`/`.cmd`, or one in a system folder |
 | `image_folder_forbidden` | behind the link, an image folder in a system folder or a user's `AppData` |
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
+| `dependency_missing` | `service`: a dependency that is not a service on this machine |
+| `dependency_disabled` | `service`: a dependency whose start type is Disabled |
+| `receipt_dir_missing` | `receipts`: `sendReceiptDir` is not a folder on this machine |
+| `receipt_store_exists`, `receipt_seed_low` | `receipt-seed`: the store exists already / N is at or below a receipt already written |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
+
+## `logs` and `state` (plan 086 C4)
+
+Both are read-only and travel the link signed, not sealed (plan 086 D1), so nothing secret may be in them.
+
+**`logs`** reads only the connector's own files in the data directory — `server.log` (and `server.log.<UTC>.old`,
+`server-<UTC>.log`), `link.log` (and `link.log.1`), `ui.log` (and `ui.log.<UTC>.old`), the newest three by time — by
+handle (`dataacl.OpenRead`): a reparse point, a multiply-linked file or a file whose final path is outside the data
+directory is refused (`log_unreadable`), never followed. `events-daemon` / `events-link` read the Application Event
+Log of `digi-erp-connectord` / `digi-erp-connector-link` (Get-WinEvent, fixed script). A line without a time of its
+own (a continuation) has the time of the line above it. Every line is redacted before it is measured: every form of
+this box's own secrets (`config.yaml`'s API password and signing secret, the database passwords in the secret store
+— as given, URL-escaped, JSON-escaped, T-SQL-doubled), `Authorization` and bearer values, JWTs, the value of any key
+holding `password`/`passwd`/`pwd`/`secret`/`token`/`api_key`/`pairCode` (`dbPassword`, `DB_PASSWORD`, `X-Api-Key`,
+`secretKey` too) in `k=v`, `k: v`, `"k":"v"` and T-SQL `PASSWORD = N'…'` forms — a quoted value to its real end
+(`''` and `\"` inside it), an unquoted one to the next `;` or `&` or the end of the line, so a password with spaces
+goes whole — sqlcmd's `-P`, a URL's password (up to the last `@`), DPAPI blobs. A line longer than 256 KiB is not
+shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; at most 64 MiB is read backwards per
+answer.
+
+**`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
+the credential in `config.yaml` (an error says so when the daemon runs another one) — and only when the socket at
+`config.yaml`'s address belongs to the service's own process (the TCP table against the service manager's PID);
+otherwise it is not asked, and `daemon.error` says `not asked:` and who holds the port. Every run that sends that
+credential (the queue checks before writes and restarts, the proofs, `verify`) makes the same check first: a
+`config.yaml` written after the daemon's start can name a port a local user holds. `missingKeys` are the keys the
+model always writes that `config.yaml` lacks (their defaults apply); `unknownKeys` are keys it does not know (left from
+an older build, or misspelt). Index entries are read for their number and state only (a receipt's request never
+leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
 
 ## Behind the link (link mode)
 
@@ -253,7 +424,13 @@ the WinRM path is unchanged:
 - **Image folders** are outside those folders and outside any `AppData` (`image_folder_forbidden`): `/api/file` serves
   what is in them.
 
-These bound what a signed command can make a box do (Digitrade plan 083 §8 A16).
+These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
+takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login
+the client gave (`sa_link_mode`), and `firewall-remove` is allowed — it is how the old inbound rules close.
+
+`discover`'s suggested `dependOn` (and `verify`'s `dependency` check) names the instance that has the database's
+port: a database reached as `127.0.0.1:63501` belongs to `MSSQL$WIZSOFT2017` when that instance has the port, not to
+`MSSQLSERVER` (plan 083 §19).
 
 ## What it does not do
 
@@ -265,8 +442,8 @@ These bound what a signed command can make a box do (Digitrade plan 083 §8 A16)
   login, its current password is kept.
 - **It never turns a firewall profile on.** That would change the client's whole
   server.
-- **It does not replace `cutover-seed` yet.** `cutover-seed -receipt-seed N` is still
-  the only way to create the receipt number store (hasavshevet-send-receipt.md).
+- **`receipt-seed` creates the receipt number store**, as `cutover-seed -receipt-seed N`
+  does (hasavshevet-send-receipt.md); it never changes an existing one.
 
 `restore` also works when `config.yaml` no longer reads — that is what it is for — but
 then the running connector's order queue cannot be asked, so it needs

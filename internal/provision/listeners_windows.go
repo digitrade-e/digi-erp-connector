@@ -3,22 +3,11 @@
 package provision
 
 import (
-	"errors"
 	"path/filepath"
-	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
-)
 
-var (
-	modIphlpapi             = windows.NewLazySystemDLL("iphlpapi.dll")
-	procGetExtendedTcpTable = modIphlpapi.NewProc("GetExtendedTcpTable")
-)
-
-const (
-	tcpTableOwnerPIDListener = 3   // TCP_TABLE_OWNER_PID_LISTENER
-	errInsufficientBuffer    = 122 // ERROR_INSUFFICIENT_BUFFER
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/tcptable"
 )
 
 // Listeners reads the listening TCP sockets and their processes from the TCP
@@ -27,11 +16,11 @@ const (
 func (winSystem) Listeners() ([]Listener, error) {
 	var out []Listener
 	for _, family := range []uint32{afInet, afInet6} {
-		rows, err := tcpListeners(family)
+		rows, err := tcptable.Read(family, tcptable.OwnerPIDListener)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, rows...)
+		out = append(out, listenersOf(rows)...)
 	}
 	names := map[uint32]string{}
 	for i := range out {
@@ -42,28 +31,6 @@ func (winSystem) Listeners() ([]Listener, error) {
 		out[i].Process = names[pid]
 	}
 	return out, nil
-}
-
-func tcpListeners(family uint32) ([]Listener, error) {
-	var size uint32
-	var buf []byte
-	for attempt := 0; attempt < 5; attempt++ {
-		var p uintptr
-		if len(buf) > 0 {
-			p = uintptr(unsafe.Pointer(&buf[0]))
-		}
-		r, _, _ := procGetExtendedTcpTable.Call(p, uintptr(unsafe.Pointer(&size)), 0,
-			uintptr(family), tcpTableOwnerPIDListener, 0)
-		switch r {
-		case 0:
-			return parseTCPTable(buf, family)
-		case errInsufficientBuffer:
-			buf = make([]byte, size)
-		default:
-			return nil, syscall.Errno(r)
-		}
-	}
-	return nil, errors.New("the TCP table kept growing")
 }
 
 func processName(pid uint32) string {

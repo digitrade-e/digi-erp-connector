@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,8 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/api"
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/db"
+	"github.com/digitrade-e/digi-erp-connector/internal/link"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
@@ -49,15 +52,17 @@ type ApplyResult struct {
 // being re-implemented there (plan 068 §10.2). Procedures are created where
 // missing at apply; the check does not look.
 type CheckResult struct {
-	Config       string `json:"config"`                 // "unchanged", or configDiff's "changed: …"
-	Login        string `json:"login"`                  // given | keep | create | rotate
-	DBSecret     bool   `json:"dbSecret"`               // the stored DB password would change
-	TLS          string `json:"tls,omitempty"`          // keep | generate, when the spec asks for a pair
-	Firewall     string `json:"firewall,omitempty"`     // keep | set, when the spec names a rule
-	Dependencies bool   `json:"dependencies,omitempty"` // the service's dependencies would change
-	Recovery     bool   `json:"recovery"`               // the service's recovery actions would be set
-	OrderCounter bool   `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
-	Restart      bool   `json:"restart"`                // the service would restart
+	Config   string `json:"config"`             // "unchanged", or configDiff's "changed: …"
+	Login    string `json:"login"`              // given | keep | create | rotate | none
+	DBSecret bool   `json:"dbSecret"`           // the stored DB password would change
+	TLS      string `json:"tls,omitempty"`      // keep | generate, when the spec asks for a pair
+	Firewall string `json:"firewall,omitempty"` // keep | set, when the spec names a rule; remove (firewall-remove)
+	// Rules are the rules firewall-remove would remove.
+	Rules        []string `json:"rules,omitempty"`
+	Dependencies bool     `json:"dependencies,omitempty"` // the service's dependencies would change
+	Recovery     bool     `json:"recovery"`               // the service's recovery actions would be set
+	OrderCounter bool     `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
+	Restart      bool     `json:"restart"`                // the service would restart
 }
 
 // Step is one part of the change: whether it changed anything.
@@ -70,10 +75,18 @@ type Step struct {
 // Proof is the connector answering after a restart.
 type Proof struct {
 	Version string `json:"version,omitempty"`
-	// Health is GET /api/health: ok, db_unavailable, or the status.
+	// Health is GET /api/health: ok, db_unavailable, or the status; or
+	// HealthNoDatabase on a box without a database, where it is not asked
+	// (its 503 there is by design).
 	Health  string  `json:"health"`
 	Seconds float64 `json:"seconds"`
 }
+
+// HealthNoDatabase is Proof.Health on a box that has no database (plan 086 C6).
+const HealthNoDatabase = "no_database"
+
+// loginNone is the login plan of a box without a database (DBSpec.Mode none).
+const loginNone = "none"
 
 // orderNumberFile is the order counter, kept in sendOrderDir
 // (hasavshevet.OrderNumberStore). A missing one starts again at 1.
@@ -110,17 +123,24 @@ func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, erro
 
 // lockRuns holds provision\.lock for one run: two at once — a WinRM retry
 // over a run still restarting the service — would interleave the login's
-// password and the stored secret.
+// password and the stored secret. An upgrade over the link takes the same
+// lock (link.ProvisionLockPath), and while one is pending — its job written,
+// its runner alive or about to start — no run starts (review M1).
 func lockRuns(dataDir string) (func(), error) {
 	if err := os.MkdirAll(provisionDir(dataDir), 0o700); err != nil {
 		return nil, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "create the provision folder: %v", err)
 	}
 	held, err := filelock.Lock(filepath.Join(provisionDir(dataDir), ".lock"))
 	if errors.Is(err, filelock.ErrLocked) {
-		return nil, refuse(CodeBusy, "wait for the other run to finish", "another provisioning run is in progress on this machine")
+		return nil, refuse(CodeBusy, "wait for the other run to finish", "another provisioning run (or an upgrade) is in progress on this machine")
 	}
 	if err != nil {
 		return nil, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "lock the provision folder: %v", err)
+	}
+	if pending, ticket := link.UpgradePending(dataDir, time.Now()); pending {
+		_ = held.Unlock()
+		return nil, refuse(CodeUpgradeRunning, "wait for it to end: upgrade-result with its ticket",
+			"the upgrade of ticket %s is pending: its setup stops the services and replaces this program", ticket)
 	}
 	return func() { _ = held.Unlock() }, nil
 }
@@ -140,7 +160,7 @@ type applier struct {
 
 	running    bool          // the service ran before this run
 	fwBefore   *FirewallRule // the rule of the spec's name before this run (ours, or none)
-	loginPlan  string        // given | keep | create | rotate
+	loginPlan  string        // given | keep | create | rotate | none (loginNone)
 	moveOrders bool          // carry lastOrderNumber.json to the new sendOrderDir at the restart
 
 	dbPassword string // what the connector will log in to SQL with
@@ -149,6 +169,8 @@ type applier struct {
 	captured   bool   // this run's pre-image exists: a failure from here on is rolled back
 	wrote      bool   // something on the box changed
 	touched    bool   // this run stopped (or started) the service
+	// stoppedEarly: stopped before the login in use got a new password (stopBeforeRotation); it must be started again.
+	stoppedEarly bool
 }
 
 func (a *applier) step(name string, changed bool, detail string) {
@@ -170,6 +192,9 @@ func (a *applier) run(ctx context.Context) error {
 	dbUser := strings.TrimSpace(a.s.DB.User)
 	if a.s.DB.LeastPrivilege {
 		dbUser = a.s.DB.login()
+	}
+	if a.s.DB.None() {
+		dbUser = ""
 	}
 	a.tgt = buildTarget(a.cur, a.s, a.dir, dbUser)
 	if strings.TrimSpace(a.tgt.Auth.Secret) == "" {
@@ -194,16 +219,21 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
 	}
-	if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
-		return r
-	}
-	admin, err := a.openAdmin()
-	if err != nil {
-		return err
-	}
-	defer admin.Close()
-	if err := a.planLogin(ctx, admin); err != nil {
-		return err
+	var admin Database // nil on a box without a database: nothing is opened
+	if a.s.DB.None() {
+		a.loginPlan = loginNone
+	} else {
+		if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
+			return r
+		}
+		var err error
+		if admin, err = a.openAdmin(); err != nil {
+			return err
+		}
+		defer admin.Close()
+		if err := a.planLogin(ctx, admin); err != nil {
+			return err
+		}
 	}
 	if a.check {
 		a.res.Check = a.wouldDo()
@@ -244,6 +274,7 @@ func (a *applier) wouldDo() *CheckResult {
 	switch a.loginPlan {
 	case "create", "rotate":
 		c.DBSecret = true
+	case loginNone:
 	default:
 		cur, err := a.env.Sys.SecretGet(config.DBPasswordKey(a.tgt.ERP))
 		c.DBSecret = err != nil || string(cur) != a.dbPassword
@@ -579,6 +610,10 @@ func (a *applier) planLogin(ctx context.Context, admin Database) error {
 		return refuse(CodeLeastPrivilege, "set db.rotateLogin to give it a new password; anything else that logs in as it then needs the new one",
 			"%s's stored password does not log in: %v", login, last)
 	}
+	if admin == nil { // the db command without an administrator: only a login this box knows
+		return refuse(CodeLeastPrivilege, "send admin (an administrator's login, used once and never stored) to create or take over "+login,
+			"this box knows no password that logs in as %s", login)
+	}
 	exists, err := admin.LoginExists(ctx, login)
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "the given login needs VIEW ANY DEFINITION or to be an administrator", "look for %s: %v", login, err)
@@ -596,15 +631,23 @@ func (a *applier) planLogin(ctx context.Context, admin Database) error {
 
 func (a *applier) capture() error {
 	files := []string{configFile, secretFile(a.cur.ERP), secretFile(a.tgt.ERP), tlsCertFile, tlsKeyFile}
-	var svc *preService
+	var st preState
 	if a.s.Service != nil {
-		svc = &preService{Dependencies: slices.Clone(a.svc.Dependencies)}
+		st.Service = &preService{Dependencies: slices.Clone(a.svc.Dependencies)}
 	}
-	var fw *preFirewall
 	if a.s.Firewall != nil {
-		fw = &preFirewall{Name: ruleName(a.s.Firewall), Rule: a.fwBefore}
+		st.Firewall = &preFirewall{Name: ruleName(a.s.Firewall), Rule: a.fwBefore}
 	}
-	first, err := capturePreimage(a.dir, a.s.ChangeSet, files, svc, fw, a.env.Now())
+	return a.captureState(files, st)
+}
+
+// captureFiles takes the change set's (and the run's) pre-image of these files
+// only: a command that changes less than apply keeps less, so its restore puts
+// back exactly what it changed.
+func (a *applier) captureFiles(files ...string) error { return a.captureState(files, preState{}) }
+
+func (a *applier) captureState(files []string, st preState) error {
+	first, err := capturePreimage(a.dir, a.s.ChangeSet, files, st, a.env.Now())
 	if err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "the pre-image could not be written, so nothing was changed: %v", err)
 	}
@@ -614,7 +657,11 @@ func (a *applier) capture() error {
 }
 
 func (a *applier) procedures(ctx context.Context, admin Database) error {
-	if a.tgt.ERP != config.ERPHasavshevet {
+	if a.tgt.ERP != config.ERPHasavshevet || a.loginPlan == loginNone {
+		return nil
+	}
+	if admin == nil {
+		a.step("procedures", false, "not checked: no administrator was given")
 		return nil
 	}
 	results, err := admin.EnsureProcedures(ctx)
@@ -639,6 +686,9 @@ func (a *applier) procedures(ctx context.Context, admin Database) error {
 // applyLogin carries out planLogin's decision.
 func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 	switch a.loginPlan {
+	case loginNone:
+		a.step("login", false, "no database")
+		return nil
 	case "given":
 		a.step("login", false, "the given login")
 		return nil
@@ -652,6 +702,10 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 		a.step("login", false, a.s.DB.login()+" works with the stored password")
 		return nil
 	}
+	login := a.s.DB.login()
+	if err := a.stopBeforeRotation(ctx, login); err != nil {
+		return err
+	}
 	pw, err := NewSQLPassword()
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "run it again", "%v", err)
@@ -659,7 +713,6 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 	a.res.secrets = append(a.res.secrets, pw)
 	// From here the password may have reached SQL Server even if a step
 	// fails: treat it as set, so a rollback keeps the stored secret in step.
-	login := a.s.DB.login()
 	if err := a.env.Sys.SecretSet(loginKey(login), []byte(pw)); err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "keep %s's new password: %v", login, err)
 	}
@@ -679,6 +732,30 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 		what = "given a new password"
 	}
 	a.step("login", true, login+" "+what)
+	return nil
+}
+
+// stopBeforeRotation stops the service before login gets a new password on
+// SQL Server when the running connector logs in as it (review M2): its pool
+// keeps the old password until it restarts, so any failure after the rotation
+// — a refused queue check before the restart, a failed write — would leave it
+// on a password the server no longer accepts, failing every new connection
+// while the process lives on (SCM recovery never fires). The queue is asked
+// first; restartAndProve, or the rollback, starts the service again on what
+// the box ends with.
+func (a *applier) stopBeforeRotation(ctx context.Context, login string) error {
+	if !a.running || !strings.EqualFold(strings.TrimSpace(a.cur.DB.User), login) {
+		return nil
+	}
+	if err := a.idle(ctx, "before "+login+"'s password changes"); err != nil {
+		return err
+	}
+	a.touched = true
+	if err := a.env.Sys.StopService(ServiceName); err != nil {
+		return refuse(CodeServiceFailed, "stop it in services.msc and run it again", "stop the service before %s's password changes: %v", login, err)
+	}
+	a.stoppedEarly = true
+	a.step("stop", true, "before "+login+"'s password changes: the running connector logs in as it")
 	return nil
 }
 
@@ -714,6 +791,10 @@ func (a *applier) tlsCovered() bool {
 }
 
 func (a *applier) writeSecret() error {
+	if a.loginPlan == loginNone {
+		a.step("db_secret", false, "no database: the stored password, if any, is not read")
+		return nil
+	}
 	key := config.DBPasswordKey(a.tgt.ERP)
 	if cur, err := a.env.Sys.SecretGet(key); err == nil && string(cur) == a.dbPassword {
 		a.step("db_secret", false, "")
@@ -764,6 +845,10 @@ func configDiff(cur, tgt config.Config) string {
 	add("db", cur.DB != tgt.DB)
 	add("sendOrderDir", cur.SendOrderDir != tgt.SendOrderDir)
 	add("importer", cur.HasExePath != tgt.HasExePath || cur.HasParamFile != tgt.HasParamFile || cur.HasBatFile != tgt.HasBatFile)
+	add("orderModel", cur.SendOrderPickupDir != tgt.SendOrderPickupDir || cur.SendOrderFormat != tgt.SendOrderFormat)
+	add("receipts", cur.SendReceiptDir != tgt.SendReceiptDir || cur.HasReceiptBatFile != tgt.HasReceiptBatFile ||
+		cur.HasReceiptParamFile != tgt.HasReceiptParamFile || !maps.Equal(cur.ReceiptCardNames.Issuer, tgt.ReceiptCardNames.Issuer) ||
+		!maps.Equal(cur.ReceiptCardNames.Brand, tgt.ReceiptCardNames.Brand))
 	add("auth", cur.Auth != tgt.Auth)
 	add("tls", cur.TLS != tgt.TLS)
 	add("options", !slices.Equal(cur.ImageFolders, tgt.ImageFolders) || cur.ERPUser != tgt.ERPUser ||
@@ -854,7 +939,7 @@ func sameFold(a, b []string) bool {
 // the port with the new credential. A failure puts the run's pre-image back.
 func (a *applier) restartAndProve(ctx context.Context) error {
 	stale := configStale(a.curMod, a.svc.ProcessStart)
-	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders {
+	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders && !a.stoppedEarly {
 		a.step("restart", false, "nothing the service reads changed")
 		return nil
 	}
@@ -880,7 +965,7 @@ func (a *applier) restartAndProve(ctx context.Context) error {
 		return a.fail(refuse(CodePortProofFailed, "read server.log; the pre-image was put back", "%v", err))
 	}
 	a.res.Proof = proof
-	if proof.Health != "ok" {
+	if proof.Health != "ok" && proof.Health != HealthNoDatabase {
 		a.warn("the connector answers but its database does not (/api/health: %s)", proof.Health)
 	}
 	return nil
@@ -917,16 +1002,7 @@ func (a *applier) prove(ctx context.Context, cfg config.Config) (*Proof, error) 
 		if err == nil {
 			var p pingBody
 			if p, err = d.ping(ctx, tok); err == nil {
-				health := "ok"
-				switch status, herr := d.get(ctx, "/api/health", tok, nil); {
-				case herr != nil:
-					health = "error: " + herr.Error()
-				case status == http.StatusServiceUnavailable:
-					health = "db_unavailable"
-				case status != http.StatusOK:
-					health = "status " + strconv.Itoa(status)
-				}
-				return &Proof{Version: p.Version, Health: health, Seconds: a.env.Now().Sub(start).Seconds()}, nil
+				return &Proof{Version: p.Version, Health: d.health(ctx, cfg, tok), Seconds: a.env.Now().Sub(start).Seconds()}, nil
 			}
 		}
 		last = err
@@ -935,6 +1011,23 @@ func (a *applier) prove(ctx context.Context, cfg config.Config) (*Proof, error) 
 		}
 		a.env.Sleep(time.Second)
 	}
+}
+
+// health is GET /api/health as a Proof reports it. A box without a database
+// is not asked: its 503 there is by design.
+func (d daemon) health(ctx context.Context, cfg config.Config, tok string) string {
+	if !db.IsConfigured(cfg) {
+		return HealthNoDatabase
+	}
+	switch status, err := d.get(ctx, "/api/health", tok, nil); {
+	case err != nil:
+		return "error: " + err.Error()
+	case status == http.StatusServiceUnavailable:
+		return "db_unavailable"
+	case status != http.StatusOK:
+		return "status " + strconv.Itoa(status)
+	}
+	return "ok"
 }
 
 // fail puts this run's pre-image back when there is one and returns cause.
@@ -991,6 +1084,34 @@ func (a *applier) rollback() error {
 	if err := a.env.Sys.StartService(ServiceName); err != nil {
 		return fmt.Errorf("the service did not start on the restored config: %w", err)
 	}
+	if a.rotated {
+		return a.proveRestored()
+	}
+	return nil
+}
+
+// proveRestored proves the service a rollback started again after this run
+// gave a login a new password on SQL Server (review M2): the restored config
+// with the secret keepLoginPassword left — never a daemon silently on a
+// password the server no longer accepts.
+func (a *applier) proveRestored() error {
+	b, err := os.ReadFile(filepath.Join(a.dir, configFile))
+	if err != nil {
+		return fmt.Errorf("read the restored config.yaml to prove it: %w", err)
+	}
+	cfg, err := config.Parse(b)
+	if err != nil {
+		return fmt.Errorf("the restored config.yaml does not parse: %w", err)
+	}
+	proof, err := a.prove(context.Background(), cfg)
+	if err != nil {
+		return fmt.Errorf("the service started on the restored config but was not proved: %w", err)
+	}
+	if proof.Health != "ok" && proof.Health != HealthNoDatabase {
+		a.warn("the service runs on the restored config but its database does not answer (/api/health: %s); SQL Server keeps %s's new password, which the box stores", proof.Health, a.s.DB.login())
+		return nil
+	}
+	a.warn("the rollback started the service again and it was proved on the restored config (/api/health: %s): SQL Server keeps %s's new password, which the box stores", proof.Health, a.s.DB.login())
 	return nil
 }
 
@@ -1065,43 +1186,58 @@ func (a *applier) carryOrderCounter(from, to string) error {
 	return nil
 }
 
-// putBack restores a pre-image's files, firewall rule and dependencies.
-func putBack(env Env, p preimage) (bool, error) {
+// restored is what putBack changed. Only files are read by the service, so
+// only they call for a restart.
+type restored struct {
+	files, firewall, service bool
+}
+
+func (r restored) any() bool { return r.files || r.firewall || r.service }
+
+// putBack restores a pre-image's files, firewall rules and dependencies.
+func putBack(env Env, p preimage) (restored, error) {
+	var out restored
 	changed, err := restoreFiles(env.Sys.DataDir(), p)
+	out.files = changed
 	if err != nil {
-		return changed, err
+		return out, err
 	}
-	if fw := p.m.Firewall; fw != nil {
+	var rules []preFirewall
+	if p.m.Firewall != nil {
+		rules = append(rules, *p.m.Firewall)
+	}
+	rules = append(rules, p.m.Firewalls...)
+	for _, fw := range rules {
 		cur, err := env.Sys.FirewallRule(fw.Name)
 		if err != nil {
-			return changed, fmt.Errorf("read the firewall rule: %w", err)
+			return out, fmt.Errorf("read the firewall rule: %w", err)
 		}
 		switch {
 		case cur != nil && !cur.Ours:
 			// Not ours now: leave it alone, whatever the pre-image says.
 		case fw.Rule == nil && cur != nil:
 			if err := env.Sys.RemoveFirewallRule(fw.Name); err != nil {
-				return changed, fmt.Errorf("remove the firewall rule: %w", err)
+				return out, fmt.Errorf("remove the firewall rule: %w", err)
 			}
-			changed = true
+			out.firewall = true
 		case fw.Rule != nil && (cur == nil || !cur.Same(*fw.Rule)):
 			if err := env.Sys.SetFirewallRule(*fw.Rule); err != nil {
-				return changed, fmt.Errorf("restore the firewall rule: %w", err)
+				return out, fmt.Errorf("restore the firewall rule: %w", err)
 			}
-			changed = true
+			out.firewall = true
 		}
 	}
 	if svc := p.m.Service; svc != nil {
 		cur, err := env.Sys.Service(ServiceName)
 		if err != nil {
-			return changed, fmt.Errorf("read the service: %w", err)
+			return out, fmt.Errorf("read the service: %w", err)
 		}
 		if !sameFold(cur.Dependencies, svc.Dependencies) {
 			if err := env.Sys.SetServiceDependencies(ServiceName, svc.Dependencies); err != nil {
-				return changed, fmt.Errorf("restore the service's dependencies: %w", err)
+				return out, fmt.Errorf("restore the service's dependencies: %w", err)
 			}
-			changed = true
+			out.service = true
 		}
 	}
-	return changed, nil
+	return out, nil
 }

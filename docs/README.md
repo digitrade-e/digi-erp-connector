@@ -45,7 +45,7 @@
 **Running it**
 
 - [operations.md](operations.md) — install, upgrade, rollback, service hardening, verification
-- [provisioning.md](provisioning.md) — `digi-erp-connector-provision.exe`: discover, apply a spec, verify, restore — headless, JSON in and out
+- [provisioning.md](provisioning.md) — `digi-erp-connector-provision.exe`: discover, apply a spec, verify, restore, and auth / db / service / firewall-remove / daemon / receipts / orders / receipt-seed — headless, JSON in and out
 - [deployment-topologies.md](deployment-topologies.md) — single node, or a split read/write pair when the database and the import folder are on different servers
 - [troubleshooting.md](troubleshooting.md) — symptom → cause → fix, and where the logs are
 - [autostart.md](autostart.md) — Windows service registration

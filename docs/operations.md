@@ -112,6 +112,15 @@ What survives an upgrade:
 
 Re-running the hardening commands afterwards is harmless and worth it as a check.
 
+### Upgrading over the link (v1.0.29 on, plan 086)
+
+A box on the link is upgraded by digi-mcp (`connector_upgrade`), not over RDP: the link's `upgrade` command installs
+an official newer release only, after checking the release's `SHA256SUMS` and the signed envelope's digest, and only
+while no order is queued. A detached runner runs the setup silently and writes
+`%PROGRAMDATA%\digi-erp-connector\results\upgrade-<ticket>.json`; it starts the link (and the connector, if it ran)
+again when a failed setup left them stopped. Details: [link.md § Upgrade over the link](link.md#upgrade-over-the-link).
+v1.0.29 itself is installed by hand on a v1.0.28 box — the last time.
+
 ## Reboots
 
 A reboot does **not** give the daemon its graceful stop. On an OS shutdown
@@ -204,6 +213,10 @@ everything in the data directory and moves `server.log` aside (`server.log.<UTC 
 for `ui.log`). If a program is tailing it, the service logs to a new `server-<UTC time>.log` that time (a warning near its top says why) and moves
 `server.log` aside at the next start. If the service refuses to start (`sc query` shows `SERVICE_EXIT_CODE : 2`), the
 reason is in the Windows Event Log (Application, source `digi-erp-connectord`) — not in `server.log`.
+
+`link.log` (10 MB, then `link.log.1`) is the link's; each command it ran is also in the Event Log (Application,
+source `digi-erp-connector-link`). Over the link, digi-mcp reads every one of these (`logs`, plan 086), redacted on
+the box, and the box's state (`state`, `link-status`) — no RDP.
 
 Useful check — is anything failing to authenticate, and with which username?
 

@@ -2,7 +2,6 @@ package link
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,22 +47,12 @@ func (l *Link) handleStream(st *yamux.Stream) {
 	}
 }
 
-// pipe connects a data stream to the daemon's local API, byte for byte.
+// pipe connects a data stream to the daemon's local API, byte for byte. The address is read per stream (plan 086
+// C5: daemonTargets), so an apply that moves the port or turns TLS on does not strand the data path.
 func (l *Link) pipe(st net.Conn) {
-	api, err := net.DialTimeout("tcp", l.cfg.APIAddr, 5*time.Second)
-	if err != nil {
+	api := l.dialTargets()
+	if api == nil {
 		return // the relay answers 504 forwarded-no-answer, or 503 if nothing was written
-	}
-	if l.cfg.APITLS {
-		// Only the daemon's own certificate, read from its certFile, is trusted — never "skip verification", even on
-		// loopback (CodeQL go/disabled-certificate-check). Unreadable, the data stream is not served.
-		conf, err := APITLSConfig(l.cfg.APICert)
-		if err != nil {
-			_ = api.Close()
-			l.cfg.Log.Error("link: the connector's TLS certificate", err)
-			return
-		}
-		api = tls.Client(api, conf)
 	}
 	defer func() { _ = api.Close() }()
 	var wg sync.WaitGroup
@@ -78,6 +67,49 @@ func (l *Link) pipe(st net.Conn) {
 	_, _ = io.Copy(st, api)
 	_ = st.Close()
 	wg.Wait()
+}
+
+// dialTargets connects to the first target that answers (review B1): an unusable certificate ends the search — no other
+// address, never plaintext — and a target whose far end is not the connector's process is skipped. The current
+// target answering retires the previous one (DaemonWatch.Answered). nil when none answered.
+func (l *Link) dialTargets() net.Conn {
+	var owner func(net.Conn) error
+	if l.cfg.Daemon != nil {
+		owner = l.cfg.Daemon.Owner
+	}
+	for i, t := range l.daemonTargets() {
+		api, err := dialDaemon(t, owner)
+		switch {
+		case err == nil:
+			if i == 0 && l.cfg.Daemon != nil {
+				l.cfg.Daemon.Answered(t)
+			}
+			return api
+		case errors.Is(err, errDaemonCert):
+			l.logEvery("cert", func() { l.cfg.Log.Error("link: the connector's TLS certificate; no data stream is served", err) })
+			return nil
+		case errors.Is(err, errDaemonOwner):
+			l.logEvery("owner", func() { l.cfg.Log.Warn(fmt.Sprintf("link: %s refused for data streams: %v", t.Addr, err)) })
+		}
+	}
+	return nil
+}
+
+// logEvery runs log at most once a minute per kind: a refusal repeated on every data stream (a squatter answering
+// for minutes) must not flood link.log and the Event Log.
+func (l *Link) logEvery(kind string, log func()) {
+	l.logMu.Lock()
+	now := l.cfg.Now()
+	if last, ok := l.loggedAt[kind]; ok && now.Sub(last) < time.Minute {
+		l.logMu.Unlock()
+		return
+	}
+	if l.loggedAt == nil {
+		l.loggedAt = map[string]time.Time{}
+	}
+	l.loggedAt[kind] = now
+	l.logMu.Unlock()
+	log()
 }
 
 // frameWait bounds the wait for each frame of a command: a relay that announces a frame and stalls holds the stream no
@@ -112,6 +144,9 @@ func (l *Link) command(st net.Conn) {
 		}
 		_ = st.SetDeadline(time.Now().Add(CommandDeadline + time.Minute))
 		refusal = l.checkInput(env, stdin)
+		if refusal == "" {
+			refusal = l.checkUpgrade(env)
+		}
 		if refusal == "" {
 			if env.Sealed {
 				plain, err := linkproto.Open(l.cfg.Keys, stdin)
@@ -190,6 +225,23 @@ func (l *Link) checkInput(env linkproto.Envelope, stdin []byte) string {
 	if _, err := l.argv(env); err != nil {
 		return refusalCode(err)
 	}
+	if !env.Sealed && MustBeSealedInput(env.Command, stdin) {
+		// plan 086, review m5: refused, never run — a sender's mistake; the stdin has crossed the relay already
+		return CodeInputNotSealed
+	}
+	return ""
+}
+
+// checkUpgrade refuses a provision command while an upgrade is pending (review M1): its setup stops the services and
+// replaces provision.exe, which a running command would hold open. The link's own commands still answer
+// (upgrade-result above all).
+func (l *Link) checkUpgrade(env linkproto.Envelope) string {
+	if _, self := selfCommands[env.Command]; self {
+		return ""
+	}
+	if busy, _ := runningTicket(l.upgradeDataDir(), l.cfg.Now()); busy {
+		return CodeUpgradeRunning
+	}
 	return ""
 }
 
@@ -207,7 +259,7 @@ func (l *Link) refusedUnverified(code string) {
 }
 
 func (l *Link) argv(env linkproto.Envelope) ([]string, error) {
-	if env.Command == CommandHashes {
+	if _, self := selfCommands[env.Command]; self {
 		if len(env.Args) != 0 {
 			return nil, &linkproto.Refusal{Code: linkproto.CodeMalformed}
 		}
@@ -217,8 +269,8 @@ func (l *Link) argv(env linkproto.Envelope) ([]string, error) {
 }
 
 func (l *Link) run(env linkproto.Envelope, stdin []byte) ([]byte, int) {
-	if env.Command == CommandHashes {
-		return Hashes(l.cfg.InstallDir), 0
+	if self, ok := selfCommands[env.Command]; ok {
+		return self(l, env, stdin)
 	}
 	argv, _ := Argv(env) // checked already
 	ctx, cancel := context.WithTimeout(context.Background(), CommandDeadline)

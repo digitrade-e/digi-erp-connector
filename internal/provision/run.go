@@ -1,10 +1,13 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/buildinfo"
@@ -34,8 +37,18 @@ const Usage = `usage:
   digi-erp-connector-provision discover [--spec -]      read the box (stdin: optional {"db":{...}} to fingerprint the named database)
   digi-erp-connector-provision apply [--check] --spec - make the connector match the spec on stdin; --check stops before the first write
   digi-erp-connector-provision options [--check] --spec - set config.yaml options only (image folders, query limits, ...); no credential on stdin
+  digi-erp-connector-provision auth [--check] --spec -    set the API credential only (and, with rotateSecret, a new signing secret); no DB credential
+  digi-erp-connector-provision daemon <restart|stop|start> [--assume-idle]   control the service (the order queue is asked first; start/restart end with the proof)
+  digi-erp-connector-provision service [--check] --spec - set the service's SQL Server dependencies and recovery only; no restart
+  digi-erp-connector-provision db [--check] --spec -     change the database login and settings only (or turn the database off); no API credential
+  digi-erp-connector-provision firewall-remove [--check] --spec -   remove inbound rules this tool made (the connector's group); no restart
+  digi-erp-connector-provision receipt-seed <N>         create the receipt number store with N as the next receipt (write-if-absent)
+  digi-erp-connector-provision receipts [--check] --spec - set the receipt settings only (sendReceiptDir, model (b) importer, card names)
+  digi-erp-connector-provision orders [--check] --spec -   set the order settings only (sendOrderDir, importer, model (a) pickup folder and layout)
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
+  digi-erp-connector-provision state [--spec -]         read the box's state: services, order queue, counters, indexes, TLS, link.yaml, disk (read-only; stdin {} or empty)
+  digi-erp-connector-provision logs --spec -            read a log's tail, redacted (stdin: {"source":"server|link|ui|events-daemon|events-link",...})
   digi-erp-connector-provision version
 Secrets travel on stdin only. The output is one JSON object; exit 0 ok, 1 refused, 2 usage.`
 
@@ -71,6 +84,31 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			return []byte(Usage + "\n"), ExitUsage
 		}
 		result = map[string]string{"version": buildinfo.Version}
+	// plan 086 C4: read-only diagnostics (logs.go, state.go)
+	case "logs":
+		var in LogsInput
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		if r := decodeInput(stdin, &in); r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		var res *LogsResult
+		res, err = Logs(env, in)
+		result = res
+		if res != nil {
+			secrets = append(secrets, res.secrets...)
+		}
+	case "state":
+		var in StateInput
+		if ok, u := readSpecFlag(rest); !u {
+			return []byte(Usage + "\n"), ExitUsage
+		} else if ok {
+			if r := decodeOptional(stdin, &in); r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+		}
+		result, err = State(ctx, env, in)
 	case "discover":
 		var in DiscoverInput
 		if ok, u := readSpecFlag(rest); !u {
@@ -123,6 +161,117 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			return envelope(cmd, nil, r, nil), ExitRefused
 		}
 		result, err = ApplyOptions(ctx, env, in, check)
+	case "auth":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeAuth(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		secrets = append(secrets, in.secrets()...)
+		var res *ApplyResult
+		res, err = ApplyAuth(ctx, env, in, check)
+		result = res
+		if res != nil {
+			secrets = append(secrets, res.secrets...)
+		}
+	case "daemon":
+		in := DaemonInput{}
+		for i, a := range rest {
+			switch {
+			case i == 0 && (a == DaemonRestart || a == DaemonStop || a == DaemonStart):
+				in.Action = a
+			case i == 1 && a == "--assume-idle":
+				in.AssumeIdle = true
+			default:
+				return []byte(Usage + "\n"), ExitUsage
+			}
+		}
+		if in.Action == "" {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		var res *ApplyResult
+		res, err = ControlDaemon(ctx, env, in)
+		result = res
+	case "service":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeService(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		result, err = ApplyService(ctx, env, in, check)
+	case "db":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeDB(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		secrets = append(secrets, in.secrets()...)
+		var res *ApplyResult
+		res, err = ApplyDB(ctx, env, in, check)
+		result = res
+		if res != nil {
+			secrets = append(secrets, res.secrets...)
+		}
+	case "firewall-remove":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeFirewallRemove(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		result, err = RemoveFirewallRules(ctx, env, in, check)
+	case "receipt-seed":
+		if len(rest) != 1 || !receiptSeedArg.MatchString(rest[0]) {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		n, _ := strconv.ParseInt(rest[0], 10, 64) // nine digits at most: it parses
+		var res *ApplyResult
+		res, err = SeedReceipts(ctx, env, n)
+		result = res
+	case "receipts", "orders":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		if cmd == "receipts" {
+			in, r := DecodeReceipts(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyReceipts(ctx, env, in, check)
+		} else {
+			in, r := DecodeOrders(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyOrders(ctx, env, in, check)
+		}
 	case "verify":
 		var in VerifyInput
 		if ok, u := readSpecFlag(rest); !u {
@@ -171,6 +320,9 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 	return envelope(cmd, result, refusal, secrets), code
 }
 
+// receiptSeedArg is receipt-seed's N: 1 to 9 digits, no sign, no leading zero.
+var receiptSeedArg = regexp.MustCompile(`^[1-9][0-9]{0,8}$`)
+
 // readSpecFlag accepts nothing or exactly "--spec -". ok: input comes on
 // stdin; usageOK: the flags were understood.
 func readSpecFlag(args []string) (ok, usageOK bool) {
@@ -183,8 +335,18 @@ func readSpecFlag(args []string) (ok, usageOK bool) {
 	return false, false
 }
 
+// decodeInput reads discover's and verify's optional input. An empty stdin
+// is {} (plan 086 C10): over the link a command always has a stdin, and one
+// with nothing to say should not have to send a body.
 func decodeInput(stdin io.Reader, v any) *Refusal {
-	if err := decodeStrict(io.LimitReader(stdin, MaxInput), v); err != nil {
+	b, err := io.ReadAll(io.LimitReader(stdin, MaxInput))
+	if err == nil && len(bytes.TrimSpace(b)) == 0 {
+		return nil
+	}
+	if err == nil {
+		err = decodeStrict(bytes.NewReader(b), v)
+	}
+	if err != nil {
 		return refuse(CodeSpecInvalid, "send one JSON object with only the documented fields", "the input does not decode: %v", err)
 	}
 	return nil

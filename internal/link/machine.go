@@ -79,11 +79,17 @@ func (m Machine) Config() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	daemon, err := m.LoadDaemon()
-	if err != nil {
-		return Config{}, fmt.Errorf("the connector's config.yaml: %w", err)
+	// The daemon's address is read per data stream (plan 086 C5), not here: a config.yaml written later — by an apply
+	// over this very link on a fresh install, or one that moves the port — reaches the data path without a restart.
+	// On Windows a stream goes only to a socket the connector's service owns (review B1), and the certificate is
+	// trusted only where users cannot change it (review m8).
+	watch := &DaemonWatch{Load: m.LoadDaemon, ConfigPath: filepath.Join(m.DataDir, "config.yaml"), Log: m.Log,
+		Owner: DaemonOwnerCheck(), CertSafe: CertWriters}
+	if _, err := m.LoadDaemon(); err != nil && m.Log != nil {
+		m.Log.Warn("link: the connector's config.yaml cannot be read yet (" + err.Error() + "); commands work, data streams wait for it")
 	}
-	hc, err := HTTPClientVia(&ProxyFinder{Explicit: st.Proxy, Log: m.Log})
+	proxy := &ProxyFinder{Explicit: st.Proxy, Log: m.Log}
+	hc, err := HTTPClientVia(proxy)
 	if err != nil {
 		return Config{}, err
 	}
@@ -93,7 +99,7 @@ func (m Machine) Config() (Config, error) {
 	}
 	return Config{
 		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
-		APIAddr: LocalAddr(daemon.APIListen), APITLS: daemon.TLS.Enabled(), APICert: readCert(daemon.TLS.CertFile),
+		Daemon: watch, Proxy: proxy, Upgrade: UpgradeConfig{DataDir: m.DataDir, Protect: m.Protect},
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,
 	}, nil
@@ -159,6 +165,20 @@ func HTTPClientVia(f *ProxyFinder) (*http.Client, error) {
 		TLSHandshakeTimeout: 15 * time.Second,
 		ForceAttemptHTTP2:   false, // a WebSocket upgrade is HTTP/1.1
 	}}, nil
+}
+
+// CertWriters refuses a certificate or key file that accounts besides the administrators can change, or whose folders
+// they can rename away (dataacl.Writers, every folder up to the root; review m8). Off Windows nobody is named.
+func CertWriters(path string) error {
+	who, err := dataacl.Writers(path)
+	if err != nil {
+		return fmt.Errorf("who can change %s cannot be read: %w", path, err)
+	}
+	if len(who) > 0 {
+		return fmt.Errorf("%s can be changed, or a folder above it swapped, by %s: keep the pair where only the administrators can write (the data directory)",
+			path, strings.Join(who, ", "))
+	}
+	return nil
 }
 
 // readCert is the daemon's certificate file, nil when unset or unreadable (the data path then refuses: APITLSConfig).

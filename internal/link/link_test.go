@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -594,8 +595,10 @@ func TestTheFixedCommandSet(t *testing.T) {
 		"version": "version", "discover": "discover --spec -", "apply-check": "apply --check --spec -",
 		"apply": "apply --spec -", "options-check": "options --check --spec -", "options": "options --spec -",
 		"verify": "verify --spec -",
+		// plan 086 (B2)
+		"logs": "logs --spec -", "state": "state --spec -",
 	}
-	if len(commands) != len(want)+1 { // + restore
+	if len(commands) != len(want)+1+len(provisionCommands086) { // + restore, + plan 086 B1's (commands_086_provision_test.go)
 		t.Fatalf("the command set has %d entries", len(commands))
 	}
 	for name, line := range want {
@@ -606,6 +609,15 @@ func TestTheFixedCommandSet(t *testing.T) {
 	}
 	if argv, err := Argv(linkproto.Envelope{Command: "restore", Args: []string{"cs-bfl-0001", "--assume-idle"}}); err != nil || strings.Join(argv, " ") != "restore cs-bfl-0001 --assume-idle" {
 		t.Errorf("restore: %v %v", argv, err)
+	}
+	// the ones the link answers itself
+	var self []string
+	for name := range selfCommands {
+		self = append(self, name)
+	}
+	slices.Sort(self)
+	if strings.Join(self, " ") != "hashes link-status upgrade upgrade-result" {
+		t.Errorf("the link answers %v itself", self)
 	}
 }
 
@@ -633,7 +645,7 @@ func TestARelayCannotPassOffARefusalAsTheAnswer(t *testing.T) {
 	priv, kr := team(t, 1)
 	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
 	stdin := []byte(`{}`)
-	raw, e := envelope(priv, "team-1", "bfl-read", "apply", nil, stdin, time.Now())
+	raw, e := envelope(priv, "team-1", "bfl-read", "options", nil, stdin, time.Now()) // apply must be sealed (review m5)
 	var s linkproto.Signed
 	_ = json.Unmarshal(raw, &s)
 	sig := []byte(s.Sig)

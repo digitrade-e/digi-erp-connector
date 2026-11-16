@@ -101,6 +101,10 @@ const (
 
 // DBSpec is the database and the credential the client gave (plan 068 D2).
 type DBSpec struct {
+	// Mode "none" is a box without a database (plan 086 C6: BFL's write node
+	// DIGI): config.yaml names none, nothing is opened, the proof does not ask
+	// /api/health. Every other field must then be left out. "" is a database.
+	Mode string `json:"mode,omitempty"`
 	// Host is a host or host\instance. With an instance and no Port the
 	// connector finds the instance through the SQL Server Browser.
 	Host     string `json:"host"`
@@ -127,6 +131,23 @@ type DBSpec struct {
 	// person may use it, or its password was changed. Without it Apply only
 	// creates the login, or keeps one that works.
 	RotateLogin bool `json:"rotateLogin,omitempty"`
+}
+
+// DBModeNone is DBSpec.Mode for a box without a database.
+const DBModeNone = "none"
+
+// None reports a box without a database.
+func (d DBSpec) None() bool { return d.Mode == DBModeNone }
+
+// validateDBMode checks a DBSpec that names a mode: only "none", alone.
+func validateDBMode(d DBSpec) *Refusal {
+	if d.Mode != DBModeNone {
+		return refuse(CodeSpecInvalid, `use "mode": "none" for a box without a database, or leave mode out`, "db.mode %q is not known", d.Mode)
+	}
+	if d != (DBSpec{Mode: DBModeNone}) {
+		return refuse(CodeSpecInvalid, `with "mode": "none" leave every other db field out`, "db.mode none carries other db fields")
+	}
+	return nil
 }
 
 // login is the least-privilege login's name.
@@ -264,8 +285,8 @@ func (s Spec) Validate() *Refusal {
 	if r := validateTLS(s.TLS); r != nil {
 		return r
 	}
-	if s.Expect != nil && s.Expect.ConfigSHA256 != nil && *s.Expect.ConfigSHA256 != "" && !sha256HexRe.MatchString(*s.Expect.ConfigSHA256) {
-		return refuse(CodeSpecInvalid, "send 64 lower-case hex digits, or an empty string for no file", "expect.configSha256 is not a sha256")
+	if r := validateExpect(s.Expect); r != nil {
+		return r
 	}
 	return validateOptions(s.Options)
 }
@@ -329,7 +350,17 @@ func validateListen(addr string) *Refusal {
 }
 
 func (s Spec) validateDB() *Refusal {
-	d := s.DB
+	if s.DB.Mode != "" {
+		return validateDBMode(s.DB)
+	}
+	return validateDBSpec(s.DB, true, true)
+}
+
+// validateDBSpec checks a database target and its credential. needUser and
+// needPassword: apply always has both; the db command keeps a login the box
+// knows (no credential) or the stored password of the login in use (no
+// password), and checks what it was given.
+func validateDBSpec(d DBSpec, needUser, needPassword bool) *Refusal {
 	server, instance := db.SplitInstance(d.Host)
 	if !serverRe.MatchString(server) {
 		return refuse(CodeSpecInvalid, `use a host name or IP, optionally host\instance`, "db.host %q is not a host", d.Host)
@@ -345,7 +376,8 @@ func (s Spec) validateDB() *Refusal {
 		return refuse(CodeSpecInvalid, "use the database's name: letters, digits and _ only",
 			"db.database %q is not a database name this connector can use", d.Database)
 	}
-	if strings.TrimSpace(d.User) == "" || hasControl(d.User) || d.Password == "" || hasControl(d.Password) {
+	if ((needUser || d.User != "") && (strings.TrimSpace(d.User) == "" || hasControl(d.User))) ||
+		((needPassword || d.Password != "") && (d.Password == "" || hasControl(d.Password))) {
 		return refuse(CodeSpecInvalid, "send the login the client gave, and its password", "db.user or db.password is missing or not text")
 	}
 	if strings.EqualFold(strings.TrimSpace(d.User), "sa") && !d.AllowSa && !d.LeastPrivilege {
@@ -424,8 +456,15 @@ func (s Spec) validateAuth() *Refusal {
 	if !authUserRe.MatchString(s.Auth.Username) {
 		return refuse(CodeSpecInvalid, "use up to 64 letters, digits, . _ @ or -", "auth.username is not a valid user name")
 	}
-	if len(s.Auth.Password) < MinAuthPassword || len(s.Auth.Password) > 256 || hasControl(s.Auth.Password) ||
-		strings.TrimSpace(s.Auth.Password) != s.Auth.Password {
+	return validateAuthPassword(s.Auth.Password)
+}
+
+// validateAuthPassword is the one guard on a connector credential that comes
+// from outside (apply's spec, the auth command): long enough to have been
+// generated, plain text, no edge spaces. The daemon's own guard
+// (config.AuthConfig.Validate, via api.CheckConfig) refuses blanks on top.
+func validateAuthPassword(pw string) *Refusal {
+	if len(pw) < MinAuthPassword || len(pw) > 256 || hasControl(pw) || strings.TrimSpace(pw) != pw {
 		return refuse(CodeAuthPasswordWeak, fmt.Sprintf("send a generated password of %d to 256 characters", MinAuthPassword),
 			"auth.password is too short, too long or not plain text")
 	}
@@ -508,6 +547,15 @@ func hasControl(s string) bool {
 // a host that is not a host would make the driver's URL parser quote the DSN,
 // password included, in its error.
 func (d DiscoverDB) Validate() *Refusal {
+	if d.Mode != "" {
+		if d.Mode != DBModeNone {
+			return refuse(CodeSpecInvalid, `use "mode": "none" for a box without a database, or leave mode out`, "db.mode %q is not known", d.Mode)
+		}
+		if d != (DiscoverDB{Mode: DBModeNone}) {
+			return refuse(CodeSpecInvalid, `with "mode": "none" leave every other db field out`, "db.mode none carries other db fields")
+		}
+		return nil
+	}
 	if d.Host != "" {
 		server, instance := db.SplitInstance(d.Host)
 		if !serverRe.MatchString(server) || (instance != "" && !instanceRe.MatchString(instance)) {

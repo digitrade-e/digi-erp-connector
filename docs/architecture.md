@@ -149,7 +149,7 @@ Windows, `/etc/digi-erp-connector/` on Linux:
 | `config.yaml` | GUI, cutover-seed, provision | 0600; holds the API credentials in plaintext |
 | `queries.json` | the CRUD endpoints | drop-in compatible with electron-mssql-app |
 | `secrets/db_password_<erp>.bin` | GUI, cutover-seed, provision | DPAPI machine scope |
-| `provision/<changeSet>/` | provision | pre-images (the last five): config.yaml, the DB secret, the TLS pair, the firewall rule, the dependencies |
+| `provision/<changeSet>/` | provision | pre-images (the last five): config.yaml, the DB secret, the TLS pair, the firewall rule(s), the dependencies |
 | `tls/cert.pem`, `tls/key.pem` | provision | a self-signed pair when the spec asks for one |
 | `server.log`, `ui.log` | daemon, GUI | no secrets, ever |
 | `orders/index/<sha256>.json` | the order queue | one per `historyId`: its order number and outcome (DIG-1291) |

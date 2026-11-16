@@ -211,7 +211,12 @@ Create it once, before the first receipt, with the service stopped or running:
 
 ```powershell
 cutover-seed.exe -receipt-seed 5000000
+# or, from v1.0.29, with what the installer ships (also a link command, plan 086):
+.\digi-erp-connector-provision.exe receipt-seed 5000000
 ```
+
+`provision receipt-seed N` has the same rules (write-if-absent, N 1–999999999) and also
+refuses an N at or below a receipt already in `history/receipts/` (`receipt_seed_low`).
 
 `-receipt-seed` is a mode of its own, chosen by the flag being given — so
 `-receipt-seed 0` (an empty script variable) is refused, not taken for
