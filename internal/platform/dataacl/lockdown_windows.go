@@ -414,7 +414,10 @@ func (s *summary) add(e lockdownEntry) {
 		if _, ok := s.before[ace.SID]; !ok {
 			s.order = append(s.order, ace.SID)
 		}
-		was, now := GrantedTo(b, ace.SID), GrantedTo(a, ace.SID)
+		// A carried-over writer had (at least) what was carried — through a
+		// group, which its own entries do not show: the approval form reads
+		// "modify → modify", not a grant.
+		was, now := GrantedTo(b, ace.SID)|e.carried[ace.SID], GrantedTo(a, ace.SID)
 		s.before[ace.SID] |= was
 		s.after[ace.SID] |= now
 		if was != now {
