@@ -34,10 +34,15 @@ type ReceiptsInput struct {
 	HasReceiptParamFile *string `json:"hasReceiptParamFile,omitempty"`
 	// ReceiptCardNames replaces the whole receiptCardNames block; {} clears it.
 	ReceiptCardNames *config.ReceiptCardNamesConfig `json:"receiptCardNames,omitempty"`
-	// AllowWritable is apply's importer.allowWritable (WinRM only).
-	AllowWritable bool    `json:"allowWritable,omitempty"`
-	AssumeIdle    bool    `json:"assumeIdle,omitempty"`
-	Expect        *Expect `json:"expect,omitempty"`
+	// AllowWritable is apply's importer.allowWritable (WinRM only): it
+	// accepts a receipt importer — and a receipt folder (plan 087 review M1)
+	// — that accounts besides the administrators can change.
+	AllowWritable bool `json:"allowWritable,omitempty"`
+	// AcceptUnreadable is documents' (review R7): the unreadable receipt index
+	// entries a human checked, when the receipt folder moves.
+	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
+	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
+	Expect           *Expect `json:"expect,omitempty"`
 }
 
 // OrdersInput is the orders command's stdin. Each field left out keeps the
@@ -55,8 +60,13 @@ type OrdersInput struct {
 	// with a pickup folder.
 	SendOrderPickupDir *string `json:"sendOrderPickupDir,omitempty"`
 	SendOrderFormat    *string `json:"sendOrderFormat,omitempty"`
-	AssumeIdle         bool    `json:"assumeIdle,omitempty"`
-	Expect             *Expect `json:"expect,omitempty"`
+	// AllowWritable accepts, over WinRM only, a sendOrderDir or pickup folder
+	// that accounts besides the administrators can write to (plan 087 review
+	// M1); the importer keeps importer.allowWritable. Behind the link it is
+	// refused.
+	AllowWritable bool    `json:"allowWritable,omitempty"`
+	AssumeIdle    bool    `json:"assumeIdle,omitempty"`
+	Expect        *Expect `json:"expect,omitempty"`
 }
 
 // DecodeReceipts and DecodeOrders read one JSON input, strictly like
@@ -113,6 +123,9 @@ func (in ReceiptsInput) Validate(linked bool, systemDirs []string) *Refusal {
 	if in.SendReceiptDir == nil && in.HasReceiptBatFile == nil && in.HasReceiptParamFile == nil && in.ReceiptCardNames == nil {
 		return refuse(CodeSpecInvalid, "name at least one receipt setting", "the input changes nothing")
 	}
+	if r := validAcceptUnreadable(in.AcceptUnreadable); r != nil {
+		return r
+	}
 	for field, p := range map[string]*string{"sendReceiptDir": in.SendReceiptDir, "hasReceiptBatFile": in.HasReceiptBatFile,
 		"hasReceiptParamFile": in.HasReceiptParamFile} {
 		if r := absOrEmpty(field, p, linked); r != nil {
@@ -160,6 +173,9 @@ func (in OrdersInput) Validate(linked bool, systemDirs []string) *Refusal {
 		}
 	}
 	if linked {
+		if r := refuseAllowWritableLinked(in.AllowWritable); r != nil {
+			return r
+		}
 		for field, p := range map[string]*string{"sendOrderDir": in.SendOrderDir, "sendOrderPickupDir": in.SendOrderPickupDir} {
 			if p != nil && winUnder(*p, systemDirs) {
 				return refuse(CodeSpecInvalid, "name a folder outside the system folders", "%s %s is in a system folder", field, strings.TrimSpace(*p))
@@ -177,7 +193,7 @@ func ApplyReceipts(ctx context.Context, env Env, in ReceiptsInput, check bool) (
 		return res, r
 	}
 	a := &applier{env: env, s: Spec{Version: in.Version, ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle, Expect: in.Expect},
-		dir: env.Sys.DataDir(), res: res, check: check}
+		dir: env.Sys.DataDir(), res: res, check: check, acceptUnreadable: in.AcceptUnreadable}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -198,17 +214,38 @@ func ApplyReceipts(ctx context.Context, env Env, in ReceiptsInput, check bool) (
 
 // checkReceipts: receipts are Hasavshevet's; the folder and the importer are
 // on this machine; and the importer — run as LocalSystem once per receipt —
-// is one only the administrators can change (allowWritable, WinRM only).
+// and the receipt folder (review M1: receipts are written there for an
+// importer, which may run with it as its working directory) are ones only the
+// administrators can change (allowWritable, WinRM only).
 func (a *applier) checkReceipts(in ReceiptsInput) error {
 	t := a.tgt
 	if strings.TrimSpace(t.SendReceiptDir) != "" && t.ERP != config.ERPHasavshevet {
 		return refuse(CodeSpecInvalid, "leave sendReceiptDir empty: only Hasavshevet takes receipt files", "sendReceiptDir is set for erp %s", t.ERP)
 	}
+	// A reserved receipt is finished into the receipt folder in use: it does
+	// not move under one (review m5, as the documents command).
+	if err := a.documentsIdle(a.cur, t); err != nil {
+		return err
+	}
+	if err := a.checkSetFolderPaths(); err != nil { // review T3, behind the link
+		return err
+	}
 	if !t.ReceiptsConfigured() {
 		return nil
 	}
-	if info, err := os.Stat(t.SendReceiptDir); err != nil || !info.IsDir() {
-		return refuse(CodeReceiptDirMissing, "create the folder the receipt importer reads", "sendReceiptDir %s is not a folder on this machine", t.SendReceiptDir)
+	// The receipt folder: documents.receipts.folder's path when bound (plan
+	// 087), else sendReceiptDir.
+	if dir := t.ReceiptDir(); dir != "" {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			return refuse(CodeReceiptDirMissing, "create the folder the receipt importer reads", "the receipt folder %s is not a folder on this machine", dir)
+		}
+		// Review R1a: refused only when the receipt folder moves (or receipts
+		// start); left where it was, it is reported, not refused.
+		if cur := a.cur.ReceiptDir(); cur == "" || !sameFolder(cur, dir) {
+			if err := a.checkFolderWriters("the receipt folder", dir, in.AllowWritable); err != nil {
+				return err
+			}
+		}
 	}
 	runs := []string{t.HasReceiptBatFile}
 	if t.HasReceiptParamFile != "" {
@@ -240,6 +277,7 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 		return refuse(CodeImporterWritable, "let only the administrators change it and its folder, or set allowWritable once a human accepted the risk",
 			"%s can be changed by %s, and the connector would run it as LocalSystem for every receipt", p, strings.Join(who, ", "))
 	}
+	a.reportWritableFolders(t)
 	return nil
 }
 
@@ -273,12 +311,17 @@ func ApplyOrders(ctx context.Context, env Env, in OrdersInput, check bool) (*App
 		setTrimmed(&t.SendOrderPickupDir, in.SendOrderPickupDir)
 		setTrimmed(&t.SendOrderFormat, in.SendOrderFormat)
 	}
-	err = a.runConfigChange(ctx, set, func() error { return a.checkOrders() })
+	err = a.runConfigChange(ctx, set, func() error { return a.checkOrders(in.AllowWritable) })
 	a.settle()
 	return res, err
 }
 
-func (a *applier) checkOrders() error {
+// checkOrders is apply's order checks, model (a)'s pickup folder on this
+// machine, and sendOrderDir and the pickup folder ones only the
+// administrators can write to (review M1; allowWritable, WinRM only):
+// sendOrderDir holds the order counter and the history the recovery reads,
+// and has.exe runs there.
+func (a *applier) checkOrders(allowWritable bool) error {
 	a.s.ERP = string(a.tgt.ERP)
 	if r := a.s.validateOrders(); r != nil {
 		return r
@@ -287,6 +330,7 @@ func (a *applier) checkOrders() error {
 	if !a.tgt.OrdersPickup() { // model (a): the ERP's scheduler imports
 		checks = append([]func() error{a.checkImporterStated}, checks...)
 	}
+	checks = append([]func() error{a.checkSetFolderPaths}, checks...) // review T3, behind the link
 	for _, f := range checks {
 		if err := f(); err != nil {
 			return err
@@ -296,6 +340,34 @@ func (a *applier) checkOrders() error {
 		if info, err := os.Stat(d); err != nil || !info.IsDir() {
 			return refuse(CodeSendOrderDirMissing, "create the folder the ERP's scheduler reads", "sendOrderPickupDir %s is not a folder on this machine", d)
 		}
+	}
+	for _, f := range a.tgt.WriteFolders() {
+		if f.Typed || f.Receipts {
+			continue // the documents and receipts commands' to check
+		}
+		// Review R1a: refused only for a folder this command sets or moves.
+		cur := ""
+		switch {
+		case f.Name == "sendOrderDir" && a.cur.OrdersConfigured():
+			cur = a.cur.SendOrderDir
+		case f.Name == "sendOrderPickupDir" && a.cur.OrdersPickup():
+			cur = a.cur.SendOrderPickupDir
+		}
+		if strings.TrimSpace(cur) == "" || !sameFolder(cur, f.Path) {
+			if err := a.checkFolderWriters(f.Name, f.Path, allowWritable); err != nil {
+				return err
+			}
+		}
+	}
+	a.reportWritableFolders(a.tgt)
+	return nil
+}
+
+// validAcceptUnreadable refuses an acceptUnreadable that is not a count.
+func validAcceptUnreadable(n *int) *Refusal {
+	if n != nil && *n < 1 {
+		return refuse(CodeSpecInvalid, "give the number of unreadable index entries a human checked (1 or more), or leave it out",
+			"acceptUnreadable %d is not a count", *n)
 	}
 	return nil
 }
@@ -327,6 +399,9 @@ func (a *applier) runConfigChange(ctx context.Context, set func(*config.Config),
 		if err := f(); err != nil {
 			return err
 		}
+	}
+	if r := a.unreadableSettled(); r != nil { // review m3: the command's one total
+		return r
 	}
 	out, err := config.Marshal(a.tgt)
 	if err != nil {

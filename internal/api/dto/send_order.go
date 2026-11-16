@@ -47,6 +47,29 @@ type SendOrderRequest struct {
 	// duplicate and wrong-case keys by name (the body itself is decoded
 	// leniently, as before).
 	Header json.RawMessage `json:"header,omitempty"`
+
+	// DocumentRule (plan 087, DIG-1563) is read on POST /api/v2/sendOrder
+	// only — /api/sendOrder ignores it, as every connector before v1.0.30
+	// did. An object whose keys are exactly SendOrderDocumentRule's
+	// (case-sensitive, each once): {"v": 1, "temporary": bool, "folder":
+	// "<key>", "counter": "<key>"}. Absent or null = today's counter and
+	// destination. Raw, so the handler can refuse a key or a value by name.
+	DocumentRule json.RawMessage `json:"documentRule,omitempty"`
+}
+
+// SendOrderDocumentRule is the documentRule object (plan 087): keys only,
+// never a path or a file name — the box says what each key means.
+//
+//	v         — the rule's contract version: 1 (required)
+//	temporary — true: the folder's temporary prefix ({prefix}, e.g. TMP_);
+//	            absent, null or false: none
+//	folder    — a typed orders folder on the box (required)
+//	counter   — an orders counter on the box (required)
+type SendOrderDocumentRule struct {
+	V         json.RawMessage `json:"v"`
+	Temporary json.RawMessage `json:"temporary"`
+	Folder    json.RawMessage `json:"folder"`
+	Counter   json.RawMessage `json:"counter"`
 }
 
 // SendOrderHeader is the "header" object of POST /api/sendOrder (DIG-1315).
@@ -115,6 +138,16 @@ type SendOrderAccepted struct {
 	// sends a header and gets no headerApplied knows its fields were not
 	// written. On a replay the document is the first request's, as for every
 	// other field.
-	HeaderApplied *[]string     `json:"headerApplied,omitempty"`
-	Meta          SendOrderMeta `json:"meta"`
+	HeaderApplied *[]string `json:"headerApplied,omitempty"`
+	// Counter, Number, FileName and Folder (plan 087) are present exactly when
+	// the order's number was reserved under a documentRule (POST
+	// /api/v2/sendOrder): the counter that issued the number, the number
+	// (= jobId), the file name in the folder, and the folder's key — the
+	// rule frozen at reservation on a replay. Absent for an order without a
+	// rule, so that answer keeps its shape.
+	Counter  string        `json:"counter,omitempty"`
+	Number   int64         `json:"number,omitempty"`
+	FileName string        `json:"fileName,omitempty"`
+	Folder   string        `json:"folder,omitempty"`
+	Meta     SendOrderMeta `json:"meta"`
 }

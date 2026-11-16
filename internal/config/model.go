@@ -203,6 +203,11 @@ type Config struct {
 	// receipt's card name (KUPAIN F17), keyed by the raw HYP code.
 	ReceiptCardNames ReceiptCardNamesConfig `yaml:"receiptCardNames,omitempty"`
 
+	// Documents (plan 087, DIG-1563): typed folders and named counters, the
+	// meaning on this box of the keys a documentRule names. Empty = today's
+	// behaviour. Written by the provision commands counters and documents.
+	Documents DocumentsConfig `yaml:"documents,omitempty"`
+
 	DB      DBConfig      `yaml:"db"`
 	TLS     TLSConfig     `yaml:"tls"`
 	Auth    AuthConfig    `yaml:"auth"`
@@ -259,7 +264,16 @@ func (c Config) OrdersPickup() bool {
 // Folders compare as in ValidateReceipts.
 //
 // The daemon (api.NewServer, api.CheckConfig) and the GUI save path call it.
+// It ends with ValidateDocuments (plan 087), so the three callers check the
+// documents block too, whether or not orders are configured.
 func (c Config) ValidateOrders() error {
+	if err := c.validateOrderKeys(); err != nil {
+		return err
+	}
+	return c.ValidateDocuments()
+}
+
+func (c Config) validateOrderKeys() error {
 	if !c.OrdersConfigured() {
 		return nil
 	}
@@ -288,7 +302,7 @@ func (c Config) ValidateOrders() error {
 	if sameDir(order, pickup, fold) || insideDir(order, pickup, fold) {
 		return fmt.Errorf("sendOrderPickupDir %q holds the sendOrderDir: the order counter and history copies must not sit in the folder the scheduler reads", pickup)
 	}
-	if receipt := strings.TrimSpace(c.SendReceiptDir); receipt != "" && sameDir(receipt, pickup, fold) {
+	if receipt := c.ReceiptDir(); receipt != "" && sameDir(receipt, pickup, fold) {
 		return fmt.Errorf("sendOrderPickupDir %q is the sendReceiptDir: orders and receipts need folders of their own", pickup)
 	}
 	if strings.TrimSpace(c.HasBatFile) != "" || strings.TrimSpace(c.HasParamFile) != "" {
@@ -299,10 +313,11 @@ func (c Config) ValidateOrders() error {
 }
 
 // ReceiptsConfigured reports whether this installation writes receipts: it
-// needs erp: hasavshevet and a sendReceiptDir. Derived, like orders, so a
-// switch and the folder can never disagree.
+// needs erp: hasavshevet and a receipt folder (ReceiptDir: the typed folder
+// documents.receipts.folder names, else sendReceiptDir). Derived, like
+// orders, so a switch and the folder can never disagree.
 func (c Config) ReceiptsConfigured() bool {
-	return c.ERP == ERPHasavshevet && strings.TrimSpace(c.SendReceiptDir) != ""
+	return c.ERP == ERPHasavshevet && c.ReceiptDir() != ""
 }
 
 // ValidateReceipts — only when receipts are configured (erp: hasavshevet and a
@@ -326,20 +341,28 @@ func (c Config) ValidateReceipts() error {
 	if err := c.validateReceiptImport(); err != nil {
 		return err
 	}
-	order, receipt := strings.TrimSpace(c.SendOrderDir), strings.TrimSpace(c.SendReceiptDir)
+	order, receipt := strings.TrimSpace(c.SendOrderDir), c.ReceiptDir()
 	// A relative folder would resolve against the service's working
 	// directory — System32 under the service manager — not where the
 	// operator meant.
 	if !filepath.IsAbs(receipt) {
-		return fmt.Errorf("sendReceiptDir %q must be an absolute path", receipt)
+		return fmt.Errorf("%s %q must be an absolute path", c.receiptDirName(), receipt)
 	}
 	if order == "" {
 		return nil
 	}
 	if sameDir(order, receipt, runtime.GOOS == "windows") {
-		return fmt.Errorf("sendReceiptDir %q is the sendOrderDir: receipts need a folder of their own", receipt)
+		return fmt.Errorf("%s %q is the sendOrderDir: receipts need a folder of their own", c.receiptDirName(), receipt)
 	}
 	return nil
+}
+
+// receiptDirName names where ReceiptDir comes from, for an error.
+func (c Config) receiptDirName() string {
+	if k := strings.TrimSpace(c.Documents.Receipts.Folder); k != "" {
+		return "documents.receipts.folder " + k + "'s path"
+	}
+	return "sendReceiptDir"
 }
 
 // validateReceiptImport checks the model-(b) keys: at most one runner, and

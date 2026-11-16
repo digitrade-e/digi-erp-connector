@@ -3,16 +3,40 @@ package provision
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 )
 
+// preimageConfig is the config.yaml a pre-image holds, parsed; ok is false
+// when it holds none (it removes config.yaml, or has no file at all).
+func preimageConfig(p preimage) (cfg config.Config, ok bool, err error) {
+	for _, f := range p.m.Files {
+		if f.Path != configFile || !f.Present {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(p.dir, "files", configFile))
+		if err != nil {
+			return cfg, false, fmt.Errorf("read the pre-image of %s: %w", configFile, err)
+		}
+		if cfg, err = config.Parse(b); err != nil {
+			return cfg, false, fmt.Errorf("the pre-image of %s does not parse: %w", configFile, err)
+		}
+		return cfg, true, nil
+	}
+	return cfg, false, nil
+}
+
 // RestoreInput names the change set whose pre-image Restore puts back.
 type RestoreInput struct {
 	ChangeSet  string `json:"changeSet"`
 	AssumeIdle bool   `json:"assumeIdle,omitempty"`
+	// AcceptUnreadable (review R7; --accept-unreadable=N) is the number of
+	// unreadable index entries a human checked: the counters and documents
+	// guards refuse them otherwise.
+	AcceptUnreadable *int `json:"acceptUnreadable,omitempty"`
 }
 
 // Restore puts a change set's pre-image back — the files, the firewall rule,
@@ -30,6 +54,9 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	if !changeSetRe.MatchString(in.ChangeSet) {
 		return res, refuse(CodeChangeSetID, "use the change set's id", "changeSet is not a valid id")
 	}
+	if r := validAcceptUnreadable(in.AcceptUnreadable); r != nil {
+		return res, r
+	}
 	dir := env.Sys.DataDir()
 	p, err := loadPreimage(preimageDir(dir, in.ChangeSet))
 	if errors.Is(err, os.ErrNotExist) {
@@ -45,7 +72,7 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	}
 	defer unlock()
 
-	a := &applier{env: env, s: Spec{ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle}, dir: dir, res: res}
+	a := &applier{env: env, s: Spec{ChangeSet: in.ChangeSet, AssumeIdle: in.AssumeIdle}, dir: dir, res: res, acceptUnreadable: in.AcceptUnreadable}
 	// A pre-image of no file (the service or firewall-remove commands) changes
 	// nothing the service reads: no restart, so no queue to ask.
 	files := len(p.m.Files) > 0
@@ -67,6 +94,30 @@ func Restore(ctx context.Context, env Env, in RestoreInput) (*ApplyResult, error
 	if files {
 		if err := a.idle(ctx, "before the restore"); err != nil {
 			return res, err
+		}
+	}
+	// Plan 087 review m9: a restore that changes the documents block runs the
+	// counters and documents commands' guards first, so it can neither strand
+	// unfinished work nor leave a counter that refuses every document.
+	if restored, ok, err := preimageConfig(p); err != nil {
+		return res, refuse(CodePreimageMissing, "restore by hand from the folder", "%v", err)
+	} else if ok {
+		if a.curBytes == nil {
+			a.warn("config.yaml did not read: the counters and documents guards were not run (--assume-idle)")
+		} else {
+			// Review m3: both guards note what they cannot read; the one total is
+			// settled after them.
+			a.unreadableDeferred = true
+			if err := a.documentsIdle(a.cur, restored); err != nil {
+				return res, err
+			}
+			if err := a.countersRestorable(a.cur, restored); err != nil {
+				return res, err
+			}
+			a.unreadableDeferred = false
+			if r := a.unreadableSettled(); r != nil {
+				return res, r
+			}
 		}
 	}
 	// The DB secret in use now: a login both configs use keeps it

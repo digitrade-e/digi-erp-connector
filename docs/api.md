@@ -73,6 +73,65 @@ Optional `header` object (DIG-1315): `accountNameDetail` (≤ 49, line5 as `<acc
 With `sendOrderFormat: legacy` (DIG-1297) a number the legacy layout's narrower fields would change is also `400 VALIDATION_ERROR`, `details.field` one of `vatPercent`, `discount`, `details[i].quantity`, `details[i].originalPrice`, `details[i].discount`, before a number is reserved; a cut of trailing zeros only (`18.00` → `18.0`) passes. With `sendOrderPickupDir` (model a) `writtenFiles` lists the published pickup file first, then the history copies; no fixed `IMOVEIN.doc/.prm`. See [§ Model (a)](hasavshevet-send-order.md#model-a--sendorderpickupdir-dig-1297).
 `historyId` is the idempotency key (DIG-1291): a repeat answers `202 {"status":"queued|running|done|failed|unknown","jobId":"<first orderNumber>","replay":true,...}` and writes nothing — except an order that failed before any file was written, which it queues again under the same number (`"status":"queued"`). See [hasavshevet-send-order.md](hasavshevet-send-order.md#idempotency--historyid-dig-1291).
 `GET /api/sendOrder/{jobId}` → `{"jobId","status":"queued|running|done|failed|unknown","orderNumber","writtenFiles"}`; `NOT_FOUND`. After a restart a jobId is answered from the order index. `failed` covers both a final failure and one a resend will write (nothing was written yet): resend once on `failed` with the same `historyId` — a second `failed` is final.
+### `POST /api/v2/sendOrder` — documentRule (plan 087, v1.0.30)
+
+Today's body plus an optional `documentRule` — which counter numbers the order and which typed folder it goes to,
+**by key only** (the box says what each key means; never a path or a file name):
+
+```json
+"documentRule": {"v": 1, "temporary": false, "folder": "herp", "counter": "b2b"}
+```
+
+- No rule (absent or `null`) = exactly `/api/sendOrder`'s answer and output.
+- Strict: an unknown, duplicate or wrong-case key, a value of the wrong type (`folder` / `counter` non-empty strings;
+  `temporary` a JSON boolean, or — review R8, as the B2B sends ERP-manager's BOOL constants — exactly the string
+  `"true"` or `"false"` in any case, `"1"` or `"0"`, normalised so a repeat in the other spelling is the same rule),
+  `v` other than the number `1` → `400 VALIDATION_ERROR`, `details.field`
+  `documentRule/<key>`. An unknown folder or counter, one of the wrong kind, a test counter into a folder that is not
+  a test folder or a production counter into a test folder (`documentRule/counter`, review m10), `temporary: true` on
+  a folder without a temporary prefix, a retired counter → 400 the same way (for a new order: a repeat is answered by
+  its frozen rule).
+  Nothing is reserved or written.
+- `202` adds `{"counter","number","fileName","folder"}`: the counter that issued the number, the number (= `jobId`),
+  the file name in the folder (the folder's pattern; `temporary` applies its prefix) and the folder's key. On a
+  replay, the rule frozen at reservation.
+- A repeat of a `historyId` with another rule (or none, through `/api/sendOrder`) → `409 DOCUMENT_RULE_CONFLICT`,
+  nothing written: the rule is fixed when the number is reserved. A repeat is looked up **before** the rule's keys are
+  checked: a known key replays (or re-queues, or answers 409) by its frozen rule even when its folder or counter key
+  no longer exists on the box; the keys-and-layout 400s are for new orders only (both routes: a v1 repeat no longer
+  meets today's layout check either).
+- The counter's next number outside its range → `503 COUNTER_EXHAUSTED`; its store missing → `503 COUNTER_MISSING`.
+- Behind the link, a folder accounts besides the administrators can write to → `503 FOLDER_WRITABLE`, nothing
+  reserved (the daemon checks at its start; a re-queue into it waits the same way).
+- Behind the link, an order without a rule whose importer (has.exe or the BAT — the file, its folder or one above) can
+  be changed by accounts besides the administrators → `503 IMPORTER_WRITABLE`, nothing reserved; an order the worker
+  meets it on stays retryable (review T1).
+- A resend of a retryable order whose folder's test flag changed since its reservation → `503 FOLDER_TEST_CHANGED`,
+  nothing written; it stays retryable until the flag is back (review R2).
+- A connector older than v1.0.30 answers the route `404 NOT_FOUND` (nothing written). `/api/sendOrder` ignores
+  `documentRule`, as every older connector did.
+
+See [hasavshevet-send-order.md § documentRule](hasavshevet-send-order.md#documentrule--post-apiv2sendorder-plan-087).
+
+### `GET /api/counters`, `GET /api/documents/capabilities` (plan 087)
+
+Read-only. `GET /api/counters` → `[{"key","kind":"orders|receipts","min","max","last","highestIssued","remaining","test"}]`
+(+ `"retired":true`, and `"error"` when something could not be read — a **code**, never text: `store_missing` (the
+store file does not exist, or has no folder), `store_damaged` (it holds no usable number or cannot be read) — `last`
+is then 0 — or `issued_unreadable` (the range's index or history could not be read: `highestIssued` is not known).
+The text, with its paths, is in the connector's log (review m7)). The answer comes from a cache of at most 3 s, read
+again at once after any number this connector reserves (review m13: each read lists the history and the indexes, and
+`/api/*` has no rate limit); a store edited by hand shows within 3 s. `last` is the last number
+issued, one meaning for both kinds; `highestIssued` the highest number an index entry or a history folder holds in the
+range (the index can run ahead of the store); `remaining` = `max − max(last, highestIssued)`. With no counter configured
+the box lists today's two under the keys `orders` and `receipts` (range 1–999 999 999).
+
+`GET /api/documents/capabilities` → `{"contract":1,"folders":[{"key","kind","test"}],"counters":[{"key","kind","test"}],"placeholders":["prefix","n"]}`
+— what a rule may name (retired counters are left out).
+
+Counters and folders change only through the signed provision commands `counters` and `documents` (digi-mcp), never
+on this API.
+
 `GET /api/sendOrder` → `{"queued","running"}`: orders accepted (202) and not written yet. The queue is in memory, so a restart with either above 0 loses them; `digi-erp-connector-provision` asks before it restarts the service. `QUEUE_UNAVAILABLE` (503).
 
 ## Receipts (Hasavshevet)
@@ -85,7 +144,7 @@ strictly: a missing or `null` key, an unknown field, a wrong type, a duplicate k
 or a key in the wrong case is a 400. Only a 400 is final for the backend; it
 retries anything else with the same key. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
-`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` (503), `RECEIPT_CONFIG_INVALID` /
+`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` / `FOLDER_WRITABLE` / `IMPORTER_WRITABLE` (503), `RECEIPT_CONFIG_INVALID` /
 `RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
 `RECEIPT_WRITE_FAILED` (500). Full contract, field
 table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
@@ -133,6 +192,12 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `ORDER_INDEX_UNREADABLE` | 500 | The order index entry for this `historyId` is damaged. Nothing queued, no number given; other keys are unaffected. A person must look ([troubleshooting.md](troubleshooting.md#a-damaged-order-index-entry)); never just delete index files. |
 | `ORDER_COUNTER_UNREADABLE` | 503 | `lastOrderNumber.json` exists but holds no usable number; no new order until a person repairs it (known keys are still answered). |
 | `ORDER_NOT_QUEUED` | 503 | The order index could not be written or recovered. Nothing reserved; retry with the same `historyId`. |
+| `DOCUMENT_RULE_CONFLICT` | 409 | Plan 087: this `historyId` was accepted with another `documentRule` (or none). Nothing written; the rule is fixed at reservation. |
+| `COUNTER_EXHAUSTED` | 503 | Plan 087: the counter's next number is outside its range (orders and receipts; also the order counter past 999 999 999). Nothing reserved; resend with the same key once the range is widened (`counters range`). |
+| `COUNTER_MISSING` | 503 | Plan 087: the counter's store does not exist where it fails closed (a counter of its own, or `lastOrderNumber.json` once counters are configured). Never 1 again; restore it or set it (`counters start-from` with `expectLast: -1`). |
+| `FOLDER_TEST_CHANGED` | 503 | Plan 087 review R2: the resend of a retryable order whose folder's test flag is no longer the one frozen at its reservation. Nothing written; the order stays retryable; resend once the flag is back (`state`'s `orders.folderTestChanged`). |
+| `FOLDER_WRITABLE` | 503 | Plan 087 review M1: behind the link, the order's typed folder (or the bound receipt folder) can be written by accounts besides the administrators, so the connector writes nothing there. Nothing reserved; resend with the same key once the folder is locked down and the service restarted ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). |
+| `IMPORTER_WRITABLE` | 503 | Plan 087 review T1: behind the link, the importer the order or receipt would run (has.exe or a BAT: the file, its folder or a folder above) can be changed by accounts besides the administrators — `trustedWriters` included — so the connector runs nothing and reserves nothing. Read before each run (the daemon's guard; a refused one again at most once a minute when needed). A queued order stays retryable. |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |

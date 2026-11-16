@@ -45,8 +45,11 @@ const Usage = `usage:
   digi-erp-connector-provision receipt-seed <N>         create the receipt number store with N as the next receipt (write-if-absent)
   digi-erp-connector-provision receipts [--check] --spec - set the receipt settings only (sendReceiptDir, model (b) importer, card names)
   digi-erp-connector-provision orders [--check] --spec -   set the order settings only (sendOrderDir, importer, model (a) pickup folder and layout)
+  digi-erp-connector-provision counters [--check] --spec - create a named counter, set its range, move it forward (start-from), or retire it (plan 087)
+  digi-erp-connector-provision documents [--check] --spec - set the typed folders documentRule names, and the receipts' folder and counter (plan 087)
+  digi-erp-connector-provision folder-acl [--check] --spec - lock down a document folder (only administrators, SYSTEM and trusted writers write), or restore what a lock-down recorded
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
-  digi-erp-connector-provision restore <changeSet> [--assume-idle]
+  digi-erp-connector-provision restore <changeSet> [--assume-idle] [--accept-unreadable=N]
   digi-erp-connector-provision state [--spec -]         read the box's state: services, order queue, counters, indexes, TLS, link.yaml, disk (read-only; stdin {} or empty)
   digi-erp-connector-provision logs --spec -            read a log's tail, redacted (stdin: {"source":"server|link|ui|events-daemon|events-link",...})
   digi-erp-connector-provision version
@@ -272,6 +275,34 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			}
 			result, err = ApplyOrders(ctx, env, in, check)
 		}
+	// plan 087: named counters and typed folders
+	case "counters", "documents", "folder-acl":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		if cmd == "folder-acl" { // plan 087 review R1c
+			in, r := DecodeFolderACL(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyFolderACL(ctx, env, in, check)
+		} else if cmd == "counters" {
+			in, r := DecodeCounters(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyCounters(ctx, env, in, check)
+		} else {
+			in, r := DecodeDocuments(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyDocuments(ctx, env, in, check)
+		}
 	case "verify":
 		var in VerifyInput
 		if ok, u := readSpecFlag(rest); !u {
@@ -293,6 +324,12 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			switch {
 			case a == "--assume-idle":
 				in.AssumeIdle = true
+			case strings.HasPrefix(a, "--accept-unreadable="): // review R7
+				n, err := strconv.Atoi(strings.TrimPrefix(a, "--accept-unreadable="))
+				if err != nil || in.AcceptUnreadable != nil {
+					return []byte(Usage + "\n"), ExitUsage
+				}
+				in.AcceptUnreadable = &n
 			case strings.HasPrefix(a, "-") || in.ChangeSet != "":
 				return []byte(Usage + "\n"), ExitUsage
 			default:

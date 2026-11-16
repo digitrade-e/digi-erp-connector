@@ -55,6 +55,12 @@ type orderIndexEntry struct {
 	Retries     int        `json:"retries,omitempty"` // times a repeat queued it again
 	ReservedAt  string     `json:"reservedAt"`
 	FinishedAt  string     `json:"finishedAt,omitempty"`
+	// Rule (plan 087) is the documentRule frozen when the number was
+	// reserved: the counter, the folder, temporary, and the file name. Absent
+	// for an order without a rule, so such an entry reads as before. A build
+	// older than v1.0.30 refuses an entry with it (strict decode): never
+	// downgrade a box that has taken an order with a rule.
+	Rule *storedRule `json:"rule,omitempty"`
 }
 
 // OrderIndexDir is where the historyId → order number index lives inside the
@@ -196,6 +202,9 @@ func decodeOrderIndexEntry(b []byte, stem string) (*orderIndexEntry, error) {
 	}
 	if e.Retries < 0 {
 		return nil, fmt.Errorf("retries %d is negative", e.Retries)
+	}
+	if err := e.Rule.validate(); err != nil {
+		return nil, err
 	}
 	return &e, nil
 }

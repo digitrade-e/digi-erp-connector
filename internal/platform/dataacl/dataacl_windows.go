@@ -618,6 +618,28 @@ func writersChain(path string) []writerCheck {
 	return out
 }
 
+// folderWritersChain is what FolderWriters reads for dir: the folder itself (adding an entry, deleting one, renaming
+// it away, its ACL or owner) and every folder above it to the volume's root (renaming one away). Adding an entry to a
+// folder above changes nothing in dir — Users may create files and folders in most folders an administrator makes
+// under C:\ — so, unlike writersChain's file case, the parent is judged by ancestorWrite, not folderWrite.
+func folderWritersChain(dir string) []writerCheck {
+	dir = filepath.Clean(dir)
+	out := []writerCheck{{dir, folderWrite}}
+	for {
+		up := filepath.Dir(dir)
+		if up == dir {
+			break
+		}
+		mask := uint32(ancestorWrite)
+		if filepath.Dir(up) == up {
+			mask = rootWrite
+		}
+		out = append(out, writerCheck{up, mask})
+		dir = up
+	}
+	return out
+}
+
 // Writers names who, besides SYSTEM, the Administrators, TrustedInstaller and
 // this process's own account, can change what path runs: an owner outside
 // them, and every account an allow entry gives a write-class right on the
@@ -630,13 +652,31 @@ func writersChain(path string) []writerCheck {
 // the daemon's certificate file (review m8). Empty: only the administrators
 // control it.
 func Writers(path string) ([]string, error) {
+	who, err := writers(writersChain(path))
+	return names(who), err
+}
+
+// FolderWriters names who, besides the same trusted accounts, can change what is in the folder dir: an owner outside
+// them, and every account an allow entry gives a right on dir to add a file or a folder, delete an entry, rename dir
+// away or rewrite its ACL or owner (folderWrite), or a right on a folder above it to rename that one away
+// (ancestorWrite). The connector writes documents there for an ERP importer, as LocalSystem (plan 087 review M1):
+// whoever can add a file can pre-create the next document's name, drop a document the importer takes into the
+// books, or — where an importer runs with the folder as its working directory — plant a program or DLL it loads.
+// Empty: only the administrators control it. Existing files are not read: a file someone created before the folder
+// was locked down is still theirs (docs/troubleshooting.md).
+//
+// Each writer comes with its SID, so a caller can trust named accounts by SID (plan 087 review R1b: the ERP's own
+// scheduler account, documents' trustedWriters).
+func FolderWriters(dir string) ([]Writer, error) { return writers(folderWritersChain(dir)) }
+
+func writers(chain []writerCheck) ([]Writer, error) {
 	t, err := newTrust()
 	if err != nil {
 		return nil, err
 	}
-	out := []string{}
+	out := []Writer{}
 	seen := map[string]bool{}
-	for _, o := range writersChain(path) {
+	for _, o := range chain {
 		sd, err := windows.GetNamedSecurityInfo(longPath(o.path), windows.SE_FILE_OBJECT,
 			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
@@ -654,21 +694,15 @@ func Writers(path string) ([]string, error) {
 		if dacl == nil { // no DACL at all: every right to everyone
 			if !seen["S-1-1-0"] {
 				seen["S-1-1-0"] = true
-				out = append(out, "Everyone (no DACL on "+o.path+")")
+				out = append(out, Writer{SID: "S-1-1-0", Name: "Everyone (no DACL on " + o.path + ")"})
 			}
 			continue
 		}
-		for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-			var ace *windows.ACCESS_ALLOWED_ACE
-			if err := windows.GetAce(dacl, i, &ace); err != nil {
-				return nil, fmt.Errorf("dataacl: read entry %d of %s: %w", i, o.path, err)
-			}
-			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 ||
-				uint32(ace.Mask)&o.mask == 0 {
-				continue
-			}
-			who = append(who, (*windows.SID)(unsafe.Pointer(&ace.SidStart)))
+		granted, err := daclGrants(dacl, o.mask)
+		if err != nil {
+			return nil, fmt.Errorf("dataacl: read the DACL of %s: %w", o.path, err)
 		}
+		who = append(who, granted...)
 		for _, sid := range who {
 			s := sid.String()
 			switch s {
@@ -682,10 +716,121 @@ func Writers(path string) ([]string, error) {
 				continue
 			}
 			seen[s] = true
-			out = append(out, accountName(sid))
+			out = append(out, Writer{SID: s, Name: accountName(sid)})
 		}
 	}
 	return out, nil
+}
+
+// LookupAccount resolves an account name (DOMAIN\name, name@domain, or a
+// local name) to its SID, its canonical DOMAIN\name and its type, as the
+// security system does (plan 087 review R1b). A name that maps to no account
+// wraps ErrAccountUnknown. Resolving a domain account may need the domain
+// controller.
+func LookupAccount(name string) (Account, error) {
+	sid, _, use, err := windows.LookupSID("", name)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+			return Account{}, fmt.Errorf("%w: %s", ErrAccountUnknown, name)
+		}
+		return Account{}, fmt.Errorf("dataacl: look up %s: %w", name, err)
+	}
+	return Account{SID: sid.String(), Name: accountName(sid), Type: sidUseName(use)}, nil
+}
+
+// sidUseName is a SID_NAME_USE as Account.Type says it.
+func sidUseName(use uint32) string {
+	switch use {
+	case windows.SidTypeUser:
+		return AccountUser
+	case windows.SidTypeGroup:
+		return "group"
+	case windows.SidTypeDomain:
+		return "domain"
+	case windows.SidTypeAlias:
+		return "alias"
+	case windows.SidTypeWellKnownGroup:
+		return "wellKnownGroup"
+	case windows.SidTypeDeletedAccount:
+		return "deletedAccount"
+	case windows.SidTypeComputer:
+		return "computer"
+	case windows.SidTypeLabel:
+		return "label"
+	case windows.SidTypeLabel + 1: // SidTypeLogonSession, not named by x/sys
+		return "logonSession"
+	}
+	return "unknown"
+}
+
+// The allow ACE types besides ACCESS_ALLOWED_ACE_TYPE (winnt.h). An object
+// ACE carries one or two GUIDs before its SID (flags say which); a callback
+// ACE — a conditional one is a callback ACE — carries data after it.
+const (
+	aceAllowedCompound       = 0x4
+	aceAllowedObject         = 0x5
+	aceAllowedCallback       = 0x9
+	aceAllowedCallbackObject = 0xB
+	aceObjectTypePresent     = 0x1
+	aceInheritedTypePresent  = 0x2
+)
+
+// daclGrants is every SID an allow ACE of dacl gives one of mask's rights,
+// inherit-only ACEs aside (review R4): plain, object, callback and
+// conditional (callback) allow ACEs alike — a condition may hold, so it
+// counts (fail closed). Deny ACEs are not subtracted (they fail closed the
+// other way: a writer reported that a deny stops). A compound ACE (reserved,
+// never seen on a file) refuses the read rather than guess its SIDs.
+func daclGrants(dacl *windows.ACL, mask uint32) ([]*windows.SID, error) {
+	var out []*windows.SID
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || uint32(ace.Mask)&mask == 0 {
+			continue
+		}
+		sid, err := allowedSID(ace)
+		if err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if sid != nil {
+			out = append(out, sid)
+		}
+	}
+	return out, nil
+}
+
+// allowedSID is the SID an allow ACE gives its rights to; nil for any other
+// ACE type (deny, audit, alarm, label).
+func allowedSID(ace *windows.ACCESS_ALLOWED_ACE) (*windows.SID, error) {
+	base := unsafe.Pointer(ace)
+	off := uintptr(8) // header + mask
+	switch ace.Header.AceType {
+	case windows.ACCESS_ALLOWED_ACE_TYPE, aceAllowedCallback:
+	case aceAllowedObject, aceAllowedCallbackObject:
+		flags := *(*uint32)(unsafe.Add(base, 8))
+		off = 12
+		if flags&aceObjectTypePresent != 0 {
+			off += 16
+		}
+		if flags&aceInheritedTypePresent != 0 {
+			off += 16
+		}
+	case aceAllowedCompound:
+		return nil, errors.New("a compound allow ACE (reserved): its grantees are not read")
+	default:
+		return nil, nil
+	}
+	if off+8 > uintptr(ace.Header.AceSize) {
+		return nil, fmt.Errorf("an allow ACE of type %d is too short for its SID", ace.Header.AceType)
+	}
+	sid := (*windows.SID)(unsafe.Add(base, off))
+	if off+8+4*uintptr(sid.SubAuthorityCount()) > uintptr(ace.Header.AceSize) || !sid.IsValid() {
+		return nil, fmt.Errorf("an allow ACE of type %d holds no valid SID", ace.Header.AceType)
+	}
+	return sid, nil
 }
 
 // accountName is a SID as DOMAIN\name, or the SID itself when it names no

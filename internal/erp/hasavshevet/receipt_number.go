@@ -99,6 +99,28 @@ func (s *ReceiptNumberStore) Seed(next int64) error {
 	return s.write(next, time.Now().UTC().Format(time.RFC3339))
 }
 
+// raiseTo makes last the last receipt issued — the store's next becomes
+// last+1 — creating the store when it does not exist (as Seed does). It never
+// lowers it: ErrCounterLower. The counters command calls it with the service
+// stopped.
+func (s *ReceiptNumberStore) raiseTo(last int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := os.Lstat(s.path); errors.Is(err, os.ErrNotExist) {
+		return s.write(last+1, time.Now().UTC().Format(time.RFC3339))
+	}
+	next, f, err := s.read()
+	switch {
+	case err != nil:
+		return err
+	case next-1 == last:
+		return nil
+	case next-1 > last:
+		return fmt.Errorf("%w: %s's last receipt is %d, asked %d", ErrCounterLower, s.path, next-1, last)
+	}
+	return s.write(last+1, f.SeededAt)
+}
+
 // read loads and validates the store. Every failure wraps ErrStoreUnavailable.
 func (s *ReceiptNumberStore) read() (int64, receiptNumberFile, error) {
 	var f receiptNumberFile

@@ -153,11 +153,38 @@ func waitForStatus(t *testing.T, q *OrderQueue, jobID string, want JobStatus) *J
 
 type recordingLogger struct {
 	mu     sync.Mutex
+	infos  []string
 	warns  []string
 	errors []string
 }
 
-func (*recordingLogger) Info(string)    {}
+func (l *recordingLogger) loggedInfo(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, m := range l.infos {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *recordingLogger) errored(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, m := range l.errors {
+		if strings.Contains(m, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *recordingLogger) Info(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.infos = append(l.infos, msg)
+}
 func (*recordingLogger) Success(string) {}
 func (*recordingLogger) Close() error   { return nil }
 func (l *recordingLogger) Warn(msg string) {

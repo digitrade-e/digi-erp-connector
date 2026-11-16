@@ -11,6 +11,7 @@ import (
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 )
 
@@ -34,6 +35,32 @@ import (
 // them with 202 and failing inside the worker looks like success to the caller
 // and only surfaces on a status poll nobody makes.
 func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) http.HandlerFunc {
+	return newSendOrderHandler(queue, ordersConfigured, nil)
+}
+
+// NewSendOrderV2Handler is POST /api/v2/sendOrder (plan 087, DIG-1563):
+// today's sendOrder plus an optional documentRule — which counter numbers the
+// order and which typed folder it goes to, by key — resolved against the
+// box's documents block before anything is reserved (a repeat of a known
+// historyId is answered against its frozen rule instead: review m3). No rule = exactly
+// /api/sendOrder's answer and output. A connector older than v1.0.30 answers
+// this route 404 (nothing written), so a caller never has its rule dropped.
+//
+// Refusals: a malformed rule (an unknown, duplicate or wrong-case key, a
+// value of the wrong type, v other than 1), an unknown folder or counter, one
+// of the wrong kind, a test counter into a production folder or a production
+// counter into a test folder (review m10), temporary
+// without a prefix, a retired counter: 400 VALIDATION_ERROR with
+// details.field documentRule/<key>, nothing written. A repeat of a historyId
+// with another rule than its first: 409 DOCUMENT_RULE_CONFLICT. The counter's
+// next number outside its range: 503 COUNTER_EXHAUSTED. The 202 echoes
+// {counter, number, fileName, folder}.
+func NewSendOrderV2Handler(queue *hasavshevet.OrderQueue, cfg config.Config) http.HandlerFunc {
+	return newSendOrderHandler(queue, cfg.OrdersConfigured(), &cfg)
+}
+
+// newSendOrderHandler is both routes: v2 (rules from cfg) when cfg is set.
+func newSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool, v2 *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -175,16 +202,20 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 			return
 		}
 
-		// The layout this connector writes (sendOrderFormat legacy, DIG-1297)
-		// may be narrower than a number: refused here too, never cut.
-		if err := queue.ValidateLayout(orderReq); err != nil {
-			field := "body"
-			var fe *hasavshevet.FieldError
-			if errors.As(err, &fe) {
-				field = fe.Field
+		// The documentRule (plan 087, v2 only): parsed strictly here. Its keys
+		// — and the layout this connector writes (sendOrderFormat legacy,
+		// DIG-1297, or the rule's folder's layout), which may be narrower than
+		// a number: refused, never cut — are checked against the box by
+		// Accept, and only for a new order (review m3): a repeat of a known
+		// historyId is answered against the rule frozen at its reservation,
+		// even when the folder or counter key is gone.
+		if v2 != nil {
+			rule, fe := parseDocumentRule(req.DocumentRule)
+			if fe != nil {
+				respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
+				return
 			}
-			respond.Error(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR", map[string]any{"field": field})
-			return
+			orderReq.Rule = rule
 		}
 
 		// Customer details supplied with the order skip the [dbo].[Accounts]
@@ -216,8 +247,86 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 		if headerApplied != nil {
 			answer.HeaderApplied = &headerApplied
 		}
+		if a := acc.Rule; a != nil {
+			answer.Counter, answer.Number, answer.FileName, answer.Folder = a.Counter, a.Number, a.FileName, a.Folder
+		}
 		respond.JSON(w, http.StatusAccepted, answer)
 	}
+}
+
+// parseDocumentRule reads the documentRule object (plan 087): nil for absent
+// or null; otherwise every key known, given once and in its case, v the
+// number 1, folder and counter non-empty strings, temporary a boolean or its
+// text (parseTemporary; absent or null = false). A *FieldError names "documentRule" or
+// "documentRule/<key>"; a value is never echoed.
+func parseDocumentRule(raw json.RawMessage) (*hasavshevet.DocumentRule, *hasavshevet.FieldError) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] != '{' {
+		return nil, &hasavshevet.FieldError{Field: "documentRule", Reason: "must be a JSON object"}
+	}
+	if err := checkJSONKeys(raw, reflect.TypeOf(dto.SendOrderDocumentRule{})); err != nil {
+		var ke *jsonKeyError
+		if errors.As(err, &ke) {
+			reason := "is not a documentRule field (keys are case-sensitive; allowed: v, temporary, folder, counter)"
+			if ke.Duplicate {
+				reason = "is given more than once"
+			} else if ke.TooDeep {
+				reason = "is nested too deeply"
+			}
+			return nil, &hasavshevet.FieldError{Field: capEchoedField("documentRule/" + ke.Path), Reason: reason}
+		}
+	}
+	var in dto.SendOrderDocumentRule
+	if json.Unmarshal(raw, &in) != nil {
+		return nil, &hasavshevet.FieldError{Field: "documentRule", Reason: "must be a JSON object"}
+	}
+	if string(in.V) != "1" {
+		return nil, &hasavshevet.FieldError{Field: "documentRule/v", Reason: "must be 1, the documentRule version this connector reads"}
+	}
+	rule := &hasavshevet.DocumentRule{}
+	for _, f := range []struct {
+		name string
+		raw  json.RawMessage
+		dst  *string
+	}{{"folder", in.Folder, &rule.Folder}, {"counter", in.Counter, &rule.Counter}} {
+		if len(f.raw) == 0 || f.raw[0] != '"' || json.Unmarshal(f.raw, f.dst) != nil || *f.dst == "" {
+			return nil, &hasavshevet.FieldError{Field: "documentRule/" + f.name, Reason: "is required: a key configured on this connector, as a string"}
+		}
+	}
+	t, ok := parseTemporary(in.Temporary)
+	if !ok {
+		return nil, &hasavshevet.FieldError{Field: "documentRule/temporary", Reason: `must be true or false (a JSON boolean, or one of the strings "true", "false", "1", "0")`}
+	}
+	rule.Temporary = t
+	return rule, nil
+}
+
+// parseTemporary reads documentRule.temporary (review R8): absent or null is
+// false; a JSON boolean; or — because the B2B casts only INT, FLOAT and
+// BOOLEAN outbound values, and ERP-manager's boolean constant type is BOOL —
+// a string that is exactly "true" or "false" in any case, "1" or "0". It is
+// normalised here: the frozen rule keeps the boolean, so "true" and true are
+// the same rule on a repeat. Anything else is refused, never guessed.
+func parseTemporary(raw json.RawMessage) (temporary, ok bool) {
+	switch string(raw) {
+	case "", "null", "false":
+		return false, true
+	case "true":
+		return true, true
+	}
+	var s string
+	if raw[0] != '"' || json.Unmarshal(raw, &s) != nil {
+		return false, false
+	}
+	switch {
+	case strings.EqualFold(s, "true") || s == "1":
+		return true, true
+	case strings.EqualFold(s, "false") || s == "0":
+		return false, true
+	}
+	return false, false
 }
 
 // applyDocumentFields parses the optional document fields of the wire request
@@ -299,9 +408,14 @@ func asciiDigits(s string) bool {
 }
 
 // writeSendOrderError maps an Accept error to a status. Messages are fixed
-// text: the errors name files under the data directory (the queue logs them).
+// text: the errors name files under the data directory (the queue logs them)
+// — except a *FieldError, the request's own fault (its rule's keys, a number
+// the layout cannot hold), which names a field and never a value.
 func writeSendOrderError(w http.ResponseWriter, err error) {
+	var fe *hasavshevet.FieldError
 	switch {
+	case errors.As(err, &fe):
+		respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
 	case errors.Is(err, hasavshevet.ErrOrderIndexUnreadable):
 		// Only ever this key's own entry: recovery skips other damaged files.
 		respond.Error(w, http.StatusInternalServerError,
@@ -314,6 +428,37 @@ func writeSendOrderError(w http.ResponseWriter, err error) {
 		respond.Error(w, http.StatusServiceUnavailable,
 			"The order counter (lastOrderNumber.json) cannot be read; no new order is accepted until a person repairs it — see the connector log",
 			"ORDER_COUNTER_UNREADABLE", nil)
+	// Plan 087.
+	case errors.Is(err, hasavshevet.ErrDocumentRuleConflict):
+		respond.Error(w, http.StatusConflict,
+			"This historyId was accepted with another documentRule; the rule is fixed when the number is reserved — nothing was written",
+			"DOCUMENT_RULE_CONFLICT", nil)
+	case errors.Is(err, hasavshevet.ErrCounterExhausted):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The counter's next number is outside its range; nothing was reserved — retry with the same historyId once the range is widened",
+			"COUNTER_EXHAUSTED", nil)
+	case errors.Is(err, hasavshevet.ErrCounterMissing):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The counter's store does not exist; no new number is issued from it until a person restores or sets it — see the connector log",
+			"COUNTER_MISSING", nil)
+	case errors.Is(err, hasavshevet.ErrCounterRetired):
+		respond.Error(w, http.StatusBadRequest, "documentRule/counter: the counter is retired and issues no new number",
+			"VALIDATION_ERROR", map[string]any{"field": "documentRule/counter"})
+	case errors.Is(err, hasavshevet.ErrImporterWritable):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The importer this order would run can be changed by accounts besides the administrators, and this connector is behind the link: it is not run — nothing was reserved; see the connector log",
+			"IMPORTER_WRITABLE", nil)
+	case errors.Is(err, hasavshevet.ErrFolderTestChanged):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The test flag of the folder this order was reserved for has changed since; it is not written there — nothing was written, the order stays retryable; see the connector log",
+			"FOLDER_TEST_CHANGED", nil)
+	case errors.Is(err, hasavshevet.ErrFolderWritable):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The folder this order goes to can be written by accounts besides the administrators, and this connector is behind the link: it writes nothing there until the folder is locked down and the service restarted — nothing was reserved; see the connector log",
+			"FOLDER_WRITABLE", nil)
+	case errors.Is(err, hasavshevet.ErrDocumentRuleInvalid):
+		respond.Error(w, http.StatusBadRequest, "documentRule: names what this connector does not have",
+			"VALIDATION_ERROR", map[string]any{"field": "documentRule"})
 	default:
 		respond.Error(w, http.StatusServiceUnavailable,
 			"The order was not queued: the order index could not be written or recovered; nothing was reserved — retry with the same historyId (see the connector log)",

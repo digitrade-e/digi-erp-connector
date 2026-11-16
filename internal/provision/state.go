@@ -48,10 +48,117 @@ type StateResult struct {
 	Orders   StateOrders   `json:"orders"`
 	Receipts StateReceipts `json:"receipts"`
 	Pickup   *StatePickup  `json:"pickup,omitempty"`
-	TLS      *StateTLS     `json:"tls,omitempty"`
-	Link     StateLink     `json:"link"`
-	Disk     StateDisk     `json:"disk"`
-	Errors   []string      `json:"errors,omitempty"`
+	// Counters (plan 087) are every counter the daemon would build from
+	// config.yaml — today's two under their implicit keys while none is
+	// configured — read from their stores, with the index and history
+	// scanned per range.
+	Counters []hasavshevet.CounterStatus `json:"counters"`
+	// Folders (plan 087) are the typed folders of config.yaml's documents
+	// block, each read like the pickup folder.
+	Folders []StateFolder `json:"folders"`
+	// WritableFolders (plan 087 review M1) are the folders the connector
+	// writes documents into that accounts besides the administrators can
+	// write to — or whose writers could not be read (error). Empty when every
+	// one is the administrators' only. Behind the link the daemon writes into
+	// no typed folder listed here (503 FOLDER_WRITABLE), and the documents,
+	// receipts and orders commands refuse them (folder_writable).
+	WritableFolders []StateWritableFolder `json:"writableFolders"`
+	// FolderACL (plan 087 review T5) lists the folder-acl pre-images recorded
+	// on the box: a lock-down killed between recording and answering (the
+	// link's deadline, a crash, a reboot) leaves one whose sha256 digi-mcp
+	// never got, and a restore needs it.
+	FolderACL StateFolderACL `json:"folderAcl"`
+	TLS       *StateTLS      `json:"tls,omitempty"`
+	Link      StateLink      `json:"link"`
+	Disk      StateDisk      `json:"disk"`
+	Errors    []string       `json:"errors,omitempty"`
+}
+
+// StateWritableFolder is one folder others can write to (config.WriteFolder):
+// Writers are the accounts that count; Trusted (review R1b) are the
+// documents.trustedWriters accounts that can write there too, which never
+// count.
+type StateWritableFolder struct {
+	config.WriteFolder
+	Writers []string `json:"writers"`
+	Trusted []string `json:"trusted,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
+// StateFolderACL is DataDir\folder-acl.
+type StateFolderACL struct {
+	Preimages []StatePreimage `json:"preimages"`
+	Error     string          `json:"error,omitempty"`
+}
+
+// StatePreimage is one recorded pre-image: the folder name and path it was
+// recorded for, its sha256 (restore's preimage), when (UTC) and how many
+// entries it holds. Error: the file could not be read or does not match its
+// name (a restore of it is refused).
+type StatePreimage struct {
+	Folder    string `json:"folder,omitempty"`
+	Path      string `json:"path,omitempty"`
+	SHA256    string `json:"sha256"`
+	At        string `json:"at,omitempty"`
+	ChangeSet string `json:"changeSet,omitempty"`
+	Entries   int    `json:"entries"`
+	Error     string `json:"error,omitempty"`
+}
+
+// maxStatePreimages bounds the list (the newest files).
+const maxStatePreimages = 50
+
+// folderACLState reads the pre-images under DataDir\folder-acl, newest first
+// (at most maxStatePreimages files are read).
+func folderACLState(dir string) StateFolderACL {
+	out := StateFolderACL{Preimages: []StatePreimage{}}
+	names, err := os.ReadDir(folderACLDir(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return out
+	}
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	type file struct {
+		sha string
+		mod time.Time
+	}
+	var files []file
+	for _, n := range names {
+		sha := strings.TrimSuffix(n.Name(), ".json")
+		if n.IsDir() || !strings.HasSuffix(n.Name(), ".json") || !preimageSHA.MatchString(sha) {
+			continue
+		}
+		f := file{sha: sha}
+		if info, err := n.Info(); err == nil {
+			f.mod = info.ModTime()
+		}
+		files = append(files, f)
+	}
+	slices.SortStableFunc(files, func(a, b file) int { return b.mod.Compare(a.mod) })
+	if len(files) > maxStatePreimages {
+		files = files[:maxStatePreimages]
+	}
+	for _, f := range files {
+		sha := f.sha
+		p := StatePreimage{SHA256: sha}
+		b, err := readSmall(filepath.Join(folderACLDir(dir), sha+".json"), 64<<20)
+		var pre folderACLPreimage
+		sum := sha256.Sum256(b)
+		switch {
+		case err != nil:
+			p.Error = err.Error()
+		case hex.EncodeToString(sum[:]) != sha:
+			p.Error = "the file does not match its sha256: it was changed"
+		case json.Unmarshal(b, &pre) != nil:
+			p.Error = "the file does not decode"
+		default:
+			p.Folder, p.Path, p.At, p.ChangeSet, p.Entries = pre.Folder, pre.Path, pre.Created, pre.ChangeSet, len(pre.Entries)
+		}
+		out.Preimages = append(out.Preimages, p)
+	}
+	return out
 }
 
 // StateServices are both Windows services.
@@ -119,6 +226,10 @@ type StateOrders struct {
 	HighestHistory int64       `json:"highestHistory"`
 	HistoryError   string      `json:"historyError,omitempty"`
 	Index          *StateIndex `json:"index"`
+	// FolderTestChanged (plan 087 review R2) are the unfinished orders whose
+	// rule froze another test flag than their folder has now: a resend writes
+	// nothing (503 FOLDER_TEST_CHANGED) until the flag is back.
+	FolderTestChanged []int64 `json:"folderTestChanged,omitempty"`
 }
 
 // StateReceipts are the receipt numbers (Hasavshevet KUPAIN).
@@ -134,6 +245,30 @@ type StateReceipts struct {
 	Index             *StateIndex `json:"index"`
 	// ByImport counts the index's entries by what the receipt importer did (model b).
 	ByImport map[string]*StateNumbers `json:"byImport,omitempty"`
+	// Dir and Counter (plan 087) are the folder receipts are written to
+	// (documents.receipts.folder's, else sendReceiptDir) and the counter that
+	// numbers them.
+	Dir     string `json:"dir,omitempty"`
+	Counter string `json:"counter,omitempty"`
+}
+
+// StateFolder is one typed folder (plan 087).
+type StateFolder struct {
+	Key         string `json:"key"`
+	Kind        string `json:"kind"`
+	Path        string `json:"path"`
+	NamePattern string `json:"namePattern"`
+	TempPrefix  string `json:"tempPrefix,omitempty"`
+	Layout      string `json:"layout,omitempty"`
+	Test        bool   `json:"test"`
+	// Receipts: documents.receipts.folder names it.
+	Receipts bool `json:"receipts,omitempty"`
+	// Pending are files waiting for the folder's importer (its pattern, with
+	// and without the temporary prefix, any case).
+	Pending StateNumbers `json:"pending"`
+	// Imported are the files Masofon renamed (*.MASOFON2.BAK).
+	Imported int    `json:"imported"`
+	Error    string `json:"error,omitempty"`
 }
 
 // StatePickup is the pickup folder of model (a) (DIG-1297).
@@ -232,6 +367,18 @@ func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
 	if cfg != nil && strings.TrimSpace(cfg.SendOrderPickupDir) != "" {
 		res.Pickup = pickupState(cfg.SendOrderPickupDir)
 	}
+	res.Counters, res.Folders = []hasavshevet.CounterStatus{}, []StateFolder{}
+	if cfg != nil {
+		res.Counters = hasavshevet.ReportCounters(hasavshevet.NewCounterSet(*cfg, dir), nil, nil, dir, strings.TrimSpace(cfg.SendOrderDir))
+		if res.Counters == nil {
+			res.Counters = []hasavshevet.CounterStatus{}
+		}
+		for _, k := range cfg.FolderKeys() {
+			res.Folders = append(res.Folders, folderState(k, cfg.Documents.Folders[k], cfg.Documents.Receipts.Folder == k))
+		}
+	}
+	res.WritableFolders = writableFolders(env.Sys, cfg)
+	res.FolderACL = folderACLState(dir)
 	if cfg != nil && cfg.TLS.Enabled() {
 		res.TLS = tlsState(cfg.TLS.CertFile, env.Now())
 	}
@@ -347,11 +494,15 @@ func orderState(dir string, cfg *config.Config) StateOrders {
 		out.LastOrderNumber = next - 1
 	}
 	out.HighestHistory, out.HistoryError = highestNumbered(filepath.Join(cfg.SendOrderDir, "history"))
+	out.FolderTestChanged, _ = hasavshevet.FolderTestChanged(dir, *cfg)
 	return out
 }
 
 func receiptState(dir string, cfg *config.Config) StateReceipts {
-	out := StateReceipts{Configured: cfg != nil && strings.TrimSpace(cfg.SendReceiptDir) != ""}
+	out := StateReceipts{Configured: cfg != nil && cfg.ReceiptsConfigured()}
+	if out.Configured {
+		out.Dir, out.Counter = cfg.ReceiptDir(), cfg.ReceiptCounterKey()
+	}
 	byImport := map[string]*StateNumbers{}
 	out.Index = indexState(filepath.Join(dir, "receipts", "index"), func(b []byte) (int64, string, string, error) {
 		var e struct {
@@ -511,6 +662,67 @@ func pickupState(dir string) *StatePickup {
 	slices.Sort(out.Pending.Numbers)
 	if len(out.Pending.Numbers) > maxStateNumbers {
 		out.Pending.Numbers = out.Pending.Numbers[len(out.Pending.Numbers)-maxStateNumbers:]
+	}
+	return out
+}
+
+// folderState counts a typed folder's files: waiting (its pattern, with and without the temporary prefix, any case) and
+// imported (renamed *.MASOFON2.BAK).
+func folderState(key string, f config.FolderConfig, receipts bool) StateFolder {
+	out := StateFolder{Key: key, Kind: f.Kind, Path: f.Path, NamePattern: f.NamePattern, TempPrefix: f.TempPrefix, Layout: f.Layout,
+		Test: f.Test, Receipts: receipts, Pending: StateNumbers{Numbers: []int64{}}}
+	hasPrefix, stem, err := config.ParseNamePattern(f.NamePattern, f.TempPrefix)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	stems := []string{strings.ToLower(stem)}
+	if hasPrefix {
+		stems = append(stems, strings.ToLower(f.TempPrefix+stem))
+	}
+	entries, err := os.ReadDir(f.Path)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, e := range entries {
+		lower := strings.ToLower(e.Name())
+		if strings.HasSuffix(lower, ".masofon2.bak") {
+			out.Imported++
+			continue
+		}
+		for _, s := range stems {
+			if digits, ok := strings.CutSuffix(strings.TrimPrefix(lower, s), ".doc"); ok && strings.HasPrefix(lower, s) {
+				if n, err := strconv.ParseInt(digits, 10, 64); err == nil && n > 0 {
+					out.Pending.Count++
+					out.Pending.Numbers = append(out.Pending.Numbers, n)
+					break
+				}
+			}
+		}
+	}
+	slices.Sort(out.Pending.Numbers)
+	if len(out.Pending.Numbers) > maxStateNumbers {
+		out.Pending.Numbers = out.Pending.Numbers[len(out.Pending.Numbers)-maxStateNumbers:]
+	}
+	return out
+}
+
+// writableFolders reads who besides the administrators can write to each folder the connector writes documents into.
+func writableFolders(sys System, cfg *config.Config) []StateWritableFolder {
+	out := []StateWritableFolder{}
+	if cfg == nil {
+		return out
+	}
+	for _, f := range cfg.WriteFolders() {
+		all, err := sys.FolderWriters(f.Path)
+		who, trusted := splitTrusted(all, cfg.TrustedSIDsFor(f.Path)) // none where an importer runs (review T1)
+		switch {
+		case err != nil:
+			out = append(out, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})
+		case len(who) > 0 || len(trusted) > 0:
+			out = append(out, StateWritableFolder{WriteFolder: f, Writers: who, Trusted: trusted})
+		}
 	}
 	return out
 }

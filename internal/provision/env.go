@@ -12,6 +12,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 )
 
 // System is everything provisioning touches outside the data directory's
@@ -47,6 +48,30 @@ type System interface {
 	// Writers names who besides the administrators can change what a file
 	// runs (dataacl.Writers); empty when nobody can.
 	Writers(path string) ([]string, error)
+	// FolderWriters names who besides the administrators can add to, delete
+	// from or rename away a folder the connector writes documents into
+	// (dataacl.FolderWriters; plan 087 review M1), each with its SID (review
+	// R1b: trusted writers are matched by SID); empty when nobody can.
+	FolderWriters(dir string) ([]dataacl.Writer, error)
+	// LookupAccount resolves an account name to its SID, canonical name and
+	// type (dataacl.LookupAccount; review R1b); dataacl.ErrAccountUnknown
+	// when it names no account.
+	LookupAccount(name string) (dataacl.Account, error)
+	// PlanFolderLockdown, ApplyFolderLockdown and RestoreFolderACL are the
+	// folder-acl command's (dataacl; review R1c): read what a lock-down of a
+	// folder would do, write it, put a recorded pre-image back.
+	PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error)
+	// FolderRules are what a document folder may not be in or hold on this
+	// machine (review T3): its Windows, Program Files and ProgramData folders,
+	// the profiles' folder, the connector's install folder; AppData, System
+	// Volume Information and $Recycle.Bin as parts.
+	FolderRules() FolderRules
+	// ReparsePointOn is the first part of path, from its drive down to path
+	// itself, that is a reparse point (a junction, a symbolic link, a mount
+	// point); "" when none is (review T3).
+	ReparsePointOn(path string) (string, error)
+	ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error)
+	RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (restored, skipped int, err error)
 }
 
 // Database is the SQL Server work provisioning does, as fixed operations.

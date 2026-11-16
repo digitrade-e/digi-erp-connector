@@ -11,8 +11,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
@@ -89,6 +92,27 @@ type ReceiptWriterConfig struct {
 	HasReceiptParamFile string
 	// CardNames overrides the built-in card-name table for F17.
 	CardNames ReceiptCardNames
+	// Counter numbers the receipts (plan 087: config.yaml's receipt counter);
+	// nil = today's receipt store under the implicit key, 1-999 999 999.
+	Counter *Counter
+	// NamePattern is the receipt file's name in SendReceiptDir (the bound
+	// typed folder's); "" = KUPAIN_{n}.doc. KUPAIN.prm keeps its name, and
+	// the history copies keep KUPAIN_<n>.doc.
+	NamePattern string
+	// FolderCheck, when set, is asked before anything is written into
+	// SendReceiptDir: on a box behind the link, the bound typed folder must be
+	// one only the administrators (and trusted writers) can write to (plan
+	// 087 review M1, R3: FolderGuard.ReceiptCheck). While it refuses, a new
+	// receipt and the finishing of a reserved one are ErrFolderWritable, a
+	// repeat of a written one is still answered, and Recover finishes none
+	// (the next Write recovers again, once it is allowed).
+	FolderCheck func() error
+	// ImporterCheck, when set, is asked before a receipt that runs the
+	// model (b) importer is reserved or finished: behind the link an importer
+	// others can change is not run (plan 087 review T1;
+	// FolderGuard KeyReceiptImporter). A refusal is ErrImporterWritable,
+	// nothing reserved.
+	ImporterCheck func() error
 }
 
 // ReceiptResult is what a Write produced or, on a repeat, what the key's first
@@ -134,10 +158,19 @@ type ReceiptResult struct {
 // number the index owns.
 type ReceiptWriter struct {
 	cfg        ReceiptWriterConfig
-	store      *ReceiptNumberStore
+	counter    *Counter
 	index      receiptIndex
 	historyDir string
 	log        logger.LoggerService
+
+	// issuedMu guards issued: every number the index holds, read at recovery
+	// and added at each reservation, for the read routes (HighestIssued)
+	// without the import lock.
+	issuedMu sync.Mutex
+	issued   []int64
+	// gen counts reservations and recoveries, for GET /api/counters' cache
+	// (review m13; Generation).
+	gen atomic.Uint64
 
 	// recovered is guarded by importLock. False until Recover succeeds, and
 	// set back to false when the store could not be moved past a reserved
@@ -171,9 +204,23 @@ func NewReceiptWriter(cfg ReceiptWriterConfig, log logger.LoggerService) (*Recei
 			return nil, errors.New("receipt writer: a receipt has.exe parameter file is set but hasExePath is not")
 		}
 	}
+	counter := cfg.Counter
+	if counter == nil {
+		p := ReceiptNumberStorePath(cfg.DataDir)
+		counter = &Counter{Key: config.ImplicitReceiptCounterKey, Kind: config.DocumentKindReceipts, Min: 1, Max: maxReceiptNumber,
+			Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: NewReceiptNumberStore(p)}
+	}
+	if counter.Kind != config.DocumentKindReceipts {
+		return nil, fmt.Errorf("receipt writer: counter %s is a counter for %s", counter.Key, counter.Kind)
+	}
+	if p := strings.TrimSpace(cfg.NamePattern); p != "" {
+		if hasPrefix, _, err := config.ParseNamePattern(p, ""); err != nil || hasPrefix {
+			return nil, fmt.Errorf("receipt writer: name pattern %q is not KUPAIN-like <stem>{n}.doc", p)
+		}
+	}
 	return &ReceiptWriter{
 		cfg:        cfg,
-		store:      NewReceiptNumberStore(ReceiptNumberStorePath(cfg.DataDir)),
+		counter:    counter,
 		index:      receiptIndex{dir: filepath.Join(cfg.DataDir, "receipts", "index")},
 		historyDir: filepath.Join(cfg.DataDir, "history", "receipts"),
 		log:        log,
@@ -199,17 +246,27 @@ func (w *ReceiptWriter) recoverLocked() error {
 	if err := w.lockDataLocked(); err != nil {
 		return err
 	}
+	defer w.gen.Add(1) // review R5: once the store moved (or not), never before
 	entries, err := w.index.all()
 	if err != nil {
 		return fmt.Errorf("recover receipts: %w", err)
 	}
-	if len(entries) == 0 {
+	w.setIssued(entries)
+	// Plan 087: recovery is over the counter's range only. A receipt of
+	// another counter (another range: ranges never overlap) neither moves
+	// this counter nor is finished into this counter's folder.
+	var highest *receiptIndexEntry
+	for _, e := range entries { // sorted by number
+		if w.counter.InRange(e.Number) {
+			highest = e
+		}
+	}
+	if highest == nil {
 		w.recovered = true
 		return nil
 	}
 
-	highest := entries[len(entries)-1]
-	next, err := w.store.Peek()
+	next, err := w.counter.Peek()
 	if err != nil {
 		return fmt.Errorf("recover receipts: %w", err)
 	}
@@ -220,13 +277,24 @@ func (w *ReceiptWriter) recoverLocked() error {
 			// person should know.
 			w.log.Warn(fmt.Sprintf("receipt number store offered %d but receipt %d is already written; moving the store past it", next, highest.Number))
 		}
-		if err := w.store.advancePast(highest.Number); err != nil {
+		if err := w.counter.advancePast(highest.Number); err != nil {
 			return fmt.Errorf("recover receipts: %w", err)
 		}
 	}
 
+	skipped := false
 	for _, e := range entries {
 		if e.State != receiptReserved {
+			continue
+		}
+		if err := w.folderRefused(); err != nil {
+			w.log.Warn(fmt.Sprintf("receipt %d (key %s) is reserved but not finished yet: %v", e.Number, e.Key, err))
+			skipped = true
+			continue
+		}
+		if !w.counter.InRange(e.Number) {
+			w.log.Warn(fmt.Sprintf("receipt %d (key %s) is reserved but outside the range of the receipt counter in use (%s, %d-%d): it is not finished into this folder; switch back to its counter to finish it, or finish it by hand",
+				e.Number, e.Key, w.counter.Key, w.counter.Min, w.counter.Max))
 			continue
 		}
 		// Model (b): Recover never runs the BAT and no repeat will either, so
@@ -249,7 +317,9 @@ func (w *ReceiptWriter) recoverLocked() error {
 		}
 		w.log.Warn(msg)
 	}
-	w.recovered = true
+	// A reserved receipt left in a refused folder: the next Write recovers
+	// again (and finishes it once the folder is allowed).
+	w.recovered = !skipped
 	return nil
 }
 
@@ -321,7 +391,15 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 	defer unlockImport()
 
 	if !w.recovered {
-		if err := w.recoverLocked(); err != nil {
+		// Review m2: while the folder is refused, no full index scan on every
+		// request — a reserved receipt cannot be finished there anyway. A
+		// repeat of a written key is still answered from its own entry
+		// (below); anything else is refused before a number is touched.
+		if refused := w.folderRefused(); refused != nil {
+			if err := w.lockDataLocked(); err != nil {
+				return nil, err
+			}
+		} else if err := w.recoverLocked(); err != nil {
 			return nil, err
 		}
 	}
@@ -337,6 +415,13 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 			w.log.Warn(fmt.Sprintf("receipt key=%s repeated with a different body; answering receipt %d as first written", key, e.Number))
 		}
 		if e.State == receiptReserved {
+			if err := w.folderRefused(); err != nil {
+				return nil, err
+			}
+			if !w.counter.InRange(e.Number) {
+				return nil, fmt.Errorf("%w: receipt %d of key %s is reserved under another counter's range than the one in use (%s, %d-%d); it is not finished into this folder",
+					ErrStoreUnavailable, e.Number, key, w.counter.Key, w.counter.Min, w.counter.Max)
+			}
 			if err := w.complete(e); err != nil {
 				return nil, err
 			}
@@ -345,7 +430,13 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 		return w.result(e, true, notes), nil
 	}
 
-	n, err := w.store.Peek()
+	if err := w.folderRefused(); err != nil {
+		return nil, err
+	}
+	if w.counter.Retired {
+		return nil, fmt.Errorf("%w: receipt counter %s issues no new number", ErrCounterRetired, w.counter.Key)
+	}
+	n, err := w.counter.next()
 	if err != nil {
 		return nil, err
 	}
@@ -369,8 +460,11 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 	if err := w.index.save(e); err != nil {
 		return nil, err
 	}
+	w.addIssued(n)
 	w.crash(crashAfterIndexReserved)
-	if err := w.store.advancePast(n); err != nil {
+	err = w.counter.advancePast(n)
+	w.gen.Add(1) // review R5: after the store moved, never before
+	if err != nil {
 		// The index owns n but the store still offers it. Issue nothing more
 		// until Recover has moved the store past it.
 		w.recovered = false
@@ -411,6 +505,9 @@ func (w *ReceiptWriter) complete(e *receiptIndexEntry, notes ...string) error {
 	histPrm := filepath.Join(histDir, base+".prm")
 	prmPath := filepath.Join(w.cfg.SendReceiptDir, KUPAINPRMName)
 	docPath := filepath.Join(w.cfg.SendReceiptDir, base+".doc")
+	if p := strings.TrimSpace(w.cfg.NamePattern); p != "" {
+		docPath = filepath.Join(w.cfg.SendReceiptDir, config.DocumentFileName(p, "", false, e.Number))
+	}
 
 	// History first and the .doc last: its rename is the moment the importer
 	// can see the receipt, so everything it depends on is in place before it.
@@ -497,6 +594,69 @@ func (w *ReceiptWriter) runImport(ctx context.Context, e *receiptIndexEntry) []s
 		return []string{fmt.Sprintf("the import outcome (%s) could not be recorded; a repeat of this key will report the import as started", e.Import)}
 	}
 	return nil
+}
+
+// folderRefused is FolderCheck's refusal (ErrFolderWritable) — or, when a
+// model (b) importer would run, ImporterCheck's (ErrImporterWritable) — else
+// nil.
+func (w *ReceiptWriter) folderRefused() error {
+	if w.cfg.FolderCheck != nil {
+		if err := w.cfg.FolderCheck(); err != nil {
+			return err
+		}
+	}
+	if w.cfg.ImporterCheck != nil && w.importer() != importerNone {
+		return w.cfg.ImporterCheck()
+	}
+	return nil
+}
+
+// Counter is the counter the writer numbers receipts from.
+func (w *ReceiptWriter) Counter() *Counter { return w.counter }
+
+// HighestIssued is the highest receipt number issued in min-max: an index
+// entry known to this writer (read at recovery, added at each reservation) or
+// a history folder. known is false before the first recovery read the index.
+func (w *ReceiptWriter) HighestIssued(min, max int64) (highest int64, known bool, err error) {
+	w.issuedMu.Lock()
+	known = w.issued != nil
+	for _, n := range w.issued {
+		if n >= min && n <= max && n > highest {
+			highest = n
+		}
+	}
+	w.issuedMu.Unlock()
+	h, err := highestHistoryInRange(w.historyDir, min, max)
+	if h > highest {
+		highest = h
+	}
+	return highest, known, err
+}
+
+func (w *ReceiptWriter) setIssued(entries []*receiptIndexEntry) {
+	ns := make([]int64, 0, len(entries))
+	for _, e := range entries {
+		ns = append(ns, e.Number)
+	}
+	w.issuedMu.Lock()
+	w.issued = ns
+	w.issuedMu.Unlock()
+}
+
+func (w *ReceiptWriter) addIssued(n int64) {
+	w.issuedMu.Lock()
+	w.issued = append(w.issued, n)
+	w.issuedMu.Unlock()
+}
+
+// Generation changes whenever this writer reserves a receipt number or
+// recovers: GET /api/counters' cache answers again only while it is the same
+// (review m13).
+func (w *ReceiptWriter) Generation() uint64 {
+	if w == nil {
+		return 0
+	}
+	return w.gen.Load()
 }
 
 // historyPath is DataDir/history/receipts/{n}.

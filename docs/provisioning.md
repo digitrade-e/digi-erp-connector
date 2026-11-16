@@ -28,10 +28,13 @@ same way in an elevated PowerShell. The code is
 | `receipts [--check] --spec -` | `{"version":1,"changeSet","sendReceiptDir"?,"hasReceiptBatFile"?,"hasReceiptParamFile"?,"receiptCardNames"?,"allowWritable"?,"assumeIdle"?,"expect"?}` | The receipt settings only (below) | `config.yaml` |
 | `orders [--check] --spec -` | `{"version":1,"changeSet","sendOrderDir"?,"importer"?,"sendOrderPickupDir"?,"sendOrderFormat"?,"assumeIdle"?,"expect"?}` | The order settings only, model (a) included (below) | `config.yaml`, the order counter |
 | `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
+| `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
+| `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
+| `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`?, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
-| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk. Plan 086 C4 | nothing |
+| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
@@ -319,13 +322,29 @@ restart only on change, the proof with the box's own credential, the rollback). 
 - **`receipts`**: `sendReceiptDir` (`""` turns receipts off), model (b)'s `hasReceiptBatFile` or
   `hasReceiptParamFile` (`""` clears one), `receiptCardNames` (the whole block; `{}` clears it). Refused: a folder or
   file that is not on the machine (`receipt_dir_missing`, `importer_missing`), a runner others can change
-  (`importer_writable`; `allowWritable` over WinRM only — it runs as LocalSystem once per receipt), anything the
+  (`importer_writable`; `allowWritable` over WinRM only — it runs as LocalSystem once per receipt), a receipt folder
+  others can write to (`folder_writable`, plan 087 review M1 — the same `allowWritable` over WinRM), anything the
   daemon's own receipt guard refuses (`config_refused`: the order folder, both runners). Behind the link: plain local
-  paths outside the system folders, a `.bat`/`.cmd` only.
+  paths outside the system folders, a `.bat`/`.cmd` only, never `allowWritable`.
 - **`orders`**: `sendOrderDir` and `importer` with `apply`'s checks (the importer stated, its files present and
   administrators-only, the counter carried to a new folder at the restart, two counters refused), and model (a)'s
   `sendOrderPickupDir` (`""` off) and `sendOrderFormat` (`official` / `legacy`; required with a pickup folder —
-  the daemon's `ValidateOrders`). Behind the link: `apply`'s importer rules, folders outside the system folders.
+  the daemon's `ValidateOrders`). `sendOrderDir` and the pickup folder must be ones only the administrators can write
+  to (`folder_writable`, plan 087 review M1; a top-level `allowWritable` accepts them over WinRM — the importer keeps
+  `importer.allowWritable`). Behind the link: `apply`'s importer rules, folders outside the system folders, never
+  `allowWritable`.
+
+**The scope of `folder_writable`** (review R1a): `orders`, `receipts` and `documents` refuse only a folder the
+command *adds, moves* (a new path), or newly makes typed or bound. Every other folder the box writes documents into
+that others can write to is reported — a `folder_writable:` warning and an entry in the result's `writableFolders`
+(`{name, path, writers, …}`, as `state`'s) — never refused, as the daemon treats it: a box upgraded with folders never
+locked down keeps taking these commands. `apply` only reports. Behind the link a scheduler account that must write
+there is trusted by name (`documents`' `trustedWriters`), or the folder is locked down by `folder-acl`
+([troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to)). **Not where an
+importer runs** (review T1): in `sendOrderDir` when the connector runs an order importer, in the receipt folder when it
+runs a receipt importer, and in the folders of has.exe, the BATs and the parameter files, a trusted writer counts like
+anyone else — it could plant what the importer loads or runs as LocalSystem. `state`'s `writableFolders` marks such a
+folder `executes: true`.
 
 ## `receipt-seed <N>`
 
@@ -335,6 +354,203 @@ existing store, valid or damaged, is never touched (`receipt_store_exists`), so 
 numbering nor hide a damaged file; a seed at or below a receipt already written (`history\receipts\<n>`) is refused
 (`receipt_seed_low`). No pre-image (there was no file) and no restart: the receipt writer reads the store on every
 request.
+
+## `counters`: named counters (plan 087, DIG-1563)
+
+The only way a counter is created, given a range, moved or retired — signed, run by digi-mcp over the link (approval
+form, audit, pre-image). The data path only reads counters (`GET /api/counters`): the B2B shop holds the same
+credential, and one bad "start from max" would block every order for good. Not sealed: no secret.
+
+```json
+{"version":1,"changeSet":"cs-bfl-ctr-01","op":"create","key":"b2b","kind":"orders",
+ "min":1000000,"max":1999999,"store":"lastOrderNumber"}
+{"version":1,"changeSet":"cs-bfl-ctr-02","op":"create","key":"b2b_test","kind":"orders",
+ "min":9000000,"max":9099999,"test":true}
+{"version":1,"changeSet":"cs-bfl-ctr-03","op":"range","key":"b2b","min":1000000,"max":2999999}
+{"version":1,"changeSet":"cs-bfl-ctr-04","op":"start-from","key":"b2b","from":1000500,"expectLast":1000295}
+{"version":1,"changeSet":"cs-bfl-ctr-05","op":"retire","key":"b2b_test"}
+```
+
+Each op takes exactly its fields (another one is `spec_invalid`): `create` kind, min, max, test?, store?, from?;
+`range` min, max; `start-from` from, expectLast; `retire` nothing — and every op `acceptUnreadable?`. Every op scans
+the kind's index; an entry it cannot read refuses (`index_unreadable`, review m8: its number would not be counted in
+the floor, the range checks or the in-flight count, so it could be issued again) unless `acceptUnreadable` is exactly
+the number of such entries a human checked (another number refuses too; then a warning) — [one total per
+command](#acceptunreadable-one-total-per-command). Keys `[a-z][a-z0-9_]{0,31}` and never a Windows
+device name (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`: a store `aux.json` names a device; folder keys
+too); `1 ≤ min ≤ max ≤ 999 999 999`.
+
+- **`create`** adds `documents.counters.<key>` to `config.yaml`. `store` adopts one of today's stores **in place**:
+  `lastOrderNumber` (`sendOrderDir\lastOrderNumber.json`, kind orders) or `receiptNumber`
+  (`DataDir\receipts\receiptNumber.json`, kind receipts); otherwise the counter has a store of its own,
+  `DataDir\counters\<key>.json` `{"last": N}`. `lastOrderNumber` needs orders configured (an absolute
+  `sendOrderDir`; otherwise `counter_store` — its store would have no folder, and a store path is never relative:
+  such a counter fails closed). Within a kind, today's store is adopted **before any other counter of
+  that kind** (the daemon's own check, `config_refused`): the order counter numbers the orders sent without a
+  documentRule. A kind with no configured counter keeps today's store under its implicit key (`orders` /
+  `receipts`, range 1–999 999 999), so a box writing both adopts one store, then the other, in either order. The
+  keys `orders` and `receipts` are for a counter of that kind only. The store is written while the service
+  is stopped (after `config.yaml`, before the start) — only when it is missing or below the start: `from` is the
+  next number, by default the lowest one above `min`, the adopted store's last and every number already issued in
+  the range (order or receipt index, and history, scanned). `from` at or below one of those is `counter_lower`, past
+  `max` `counter_range`; a store already above `max` is `counter_range`.
+- **`range`** sets min/max: the counter's last stays inside (`last ≥ min-1`, `last ≤ max`; otherwise
+  `counter_range` — move it with `start-from` first), no number already issued in the old range is above the new
+  max, and no unfinished entry of the old range — an order reserved (unknown) or waiting for a resend, a receipt
+  reserved — is left outside it (`counter_in_flight`, review m4: a receipt reserved at the store's last number would
+  otherwise be answered 503 and never finished).
+- **`start-from`** moves the store **forward only**: `from` is the number the next document gets, inside the range,
+  above the last and above every number issued in the range (`counter_lower`, `counter_range`); `expectLast` is the
+  last number as the plan read it (`-1` = the store is missing; a missing store is then created): another value on
+  the box is `counter_moved`. With the service running: the queue is asked (`orders_pending`), the service stopped,
+  the store read again (`counter_moved` if an order slipped in), set — a receipt counter only under the receipt
+  writer's OS lock (`DataDir\receipts\writer.lock`), so a process still alive refuses instead of racing it — the
+  service started and proved. No pre-image: **a counter never moves back**, not even by `restore`.
+- **`retire`** marks it retired: it issues no new number and its range stays reserved (no other counter may take it).
+  Refused while orders (reserved, or waiting for a resend) or receipts (reserved) of its range are unfinished
+  (`counter_in_flight`); the daemon refuses retiring the counter of rule-less orders or of receipts.
+
+`create`, `range` and `retire` run the config-command flow (every check first, the pre-image of `config.yaml`, the
+queue, the restart, the proof, the rollback). Ranges never overlap on one box — test and production, orders and
+receipts, retired ones included (`config_refused`): an order's job id, status, history folder and re-queue check are
+keyed by its number alone. `--check` answers `check.counter`: `{key, last, highestIssued, setLast?, inFlight}`.
+`restore` of a `create`/`range`/`retire` puts `config.yaml` back and leaves every store where it is, after the same
+guards as the command (review m9): a restored range that would leave out an unfinished entry is `counter_in_flight`;
+one that would exclude the counter's last number or a number already issued is `counter_range` (it would answer every
+document 503 `COUNTER_EXHAUSTED`, and nothing lowers a counter); and a restore that leaves a kind with no counter —
+back on today's store — is `counter_range` when that kind's counters issued numbers above the store (its recovery
+over 1–999 999 999 would jump into their ranges: retire them instead). `receipt-seed` stays for a box without counters; with counters, `counters create` adopts or creates
+the receipt store.
+
+## `documents`: typed folders and the receipts binding (plan 087)
+
+```json
+{"version":1,"changeSet":"cs-bfl-doc-01",
+ "folders":{
+   "herp":          {"kind":"orders","path":"C:\\xampp\\htdocs\\herp","namePattern":"{prefix}IMOVEIN_{n}.doc","tempPrefix":"TMP_","layout":"legacy"},
+   "herp_receipts": {"kind":"receipts","path":"C:\\xampp\\htdocs\\herp\\receipts","namePattern":"KUPAIN_{n}.doc"},
+   "herp_test":     {"kind":"orders","path":"C:\\xampp\\htdocs\\herp_test","namePattern":"{prefix}IMOVEIN_{n}.doc","tempPrefix":"TMP_","layout":"legacy","test":true}},
+ "receipts":{"folder":"herp_receipts","counter":"receipts"}}
+```
+
+Each folder named is set whole (an object) or removed (`null`); folders not named are kept.
+
+**`trustedWriters`** (plan 087 review R1b): `"trustedWriters": ["BFL\\wizsched"]` replaces the box's list (`[]` clears it,
+absent keeps it) — at most 8 accounts, for the ERP's own importer and scheduler, which must write into the folders
+(Masofon renames what it imported). The box resolves each name to a SID at check time: one that does not resolve is
+`writer_unknown`; anything but a single user account — a group, an alias, a computer, a well-known SID (Everyone,
+Authenticated Users, Users, Guests, INTERACTIVE, NETWORK, ANONYMOUS, Domain Users/Guests/Computers, LOCAL SERVICE,
+NETWORK SERVICE) — is `writer_too_broad`. `--check` answers `check.trustedWriters: [{name, sid, resolved, type}]` for
+the approval form. Stored in `config.yaml` as `documents.trustedWriters: [{sid, name}]`; the commands, the daemon and
+`state` never count those SIDs as writers (`state.writableFolders[].trusted` shows them). It is an ordinary `documents`
+change (pre-image, restore), the same over WinRM and behind the link. `receipts.folder` /
+`receipts.counter` bind `POST /api/sendReceipt` (a field left out keeps the box's, `""` clears it); the bound
+folder's path replaces `sendReceiptDir`, its pattern the receipt file's name (`KUPAIN.prm` keeps its name).
+
+Checked before any write: the name pattern's closed grammar (`{prefix}` optional and first, a stem of ASCII letters,
+digits and `_` starting with a letter and ending in a letter or `_` (review m11: `IMOVEIN_1{n}` with n = 23 is `IMOVEIN_123`), `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
+is `COM1.doc`), `tempPrefix` exactly with `{prefix}` (orders only), `layout` `official`/`legacy` for orders; the
+folder exists (`folder_missing`; the connector never creates it), has no junction, link or mount point anywhere on its
+path, its own name included (`folder_reparse`, review T3), is not inside the data directory (`folder_forbidden`), and
+behind the link is none of the [document folder places](#where-a-document-folder-may-be) (`folder_forbidden`); and —
+when the command adds or moves it, and for the receipt folder a binding newly
+names — only the administrators can write to it (`folder_writable`, plan 087 review M1/R1a: `allowWritable` accepts it
+over WinRM with a warning; a folder left where it was is reported in `writableFolders`); behind the link a plain local
+path outside the system folders (link mode's rules), never `allowWritable`.
+The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
+distinct; a test folder never the pickup or receipt folder, and never inside a production folder (typed, pickup or receipt) nor holding one (review m11); a test counter only into a test folder, and a test receipt
+folder only from a test counter (review m10; a documentRule is held to the same at the route); no model (b)
+receipt importer with a test receipt folder (it would import test receipts into the books). A folder with
+unfinished orders frozen for it (reserved, or waiting for a resend) is not removed and not changed at all — path,
+kind, name pattern, temporary prefix, layout or test (`folder_in_flight`, review m5: the pattern decides the "number
+taken" scan, the layout the record, the test flag whether production may write there). The receipt binding — the
+receipt folder, its name pattern or test flag, the receipt counter — does not change while a receipt is reserved
+(`receipts_in_flight`: Recover finishes it into the folder in use, under its pattern; a file already written under
+the old name would be written again under the new one). The `receipts` command makes the same check when it moves or
+clears `sendReceiptDir`. An index entry these guards cannot read refuses (`index_unreadable`, review R7: an unfinished
+one among them would be stranded unseen) unless `acceptUnreadable` is the number of such entries a human checked —
+`documents` and `receipts` take it in their input, `restore` as `--accept-unreadable=N` (the link takes it after
+`--assume-idle`).
+
+#### `acceptUnreadable`: one total per command
+
+Plan 087 review m3. Every guard a command runs notes the unreadable entries of the index it reads — each index, the
+order index and the receipt index, counted **once** (every scan reads it whole, so all see the same entries) — and the
+command checks the **total** once, after its guards and before its first write: unless it is 0, `acceptUnreadable` must
+be exactly that total (`index_unreadable` otherwise; the refusal's fix names the number, and its message the split,
+e.g. `2 order and 1 receipt`). A `restore` that runs both the documents guards and the counters guards — the
+implicit-store trap's scan included — takes the one sum (before, each guard wanted its own count, and no value got
+through). An accepted total is one warning (`index_unreadable: N index entries could not be read (…) and were
+accepted`).
+
+Config-command flow; `restore` puts
+`config.yaml` back, after the same in-flight guards (`folder_in_flight`, `receipts_in_flight`; review m9). Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
+`documents` (and refuses index entries holding a frozen rule), its recovery pushes the production counters into the
+test ranges, and its GUI save drops the block —
+[troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).
+
+## `folder-acl`: lock a document folder down (plan 087 review R1c)
+
+digi-mcp locks down a folder the connector writes documents into itself — no human running `icacls` on the box.
+Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
+
+```json
+{"version":1,"changeSet":"cs-bfl-acl-01","op":"lockdown","folders":["herp","sendOrderDir"]}
+{"version":1,"changeSet":"cs-bfl-acl-02","op":"restore","folder":"herp","preimage":"<the sha256 the lockdown answered>"}
+```
+
+- **Named folders only**: a typed folder's key, or the roles `sendOrderDir`, `pickup`, `sendReceiptDir`, resolved from
+  `config.yaml` — never a path (`spec_invalid`); one the box does not have is `folder_unknown`. At most 8 per run.
+- **Judged where Windows resolves it** (review T3), link or WinRM: a junction, link or mount point anywhere on the
+  configured path is `folder_reparse`; a folder in or holding one of the
+  [places a document folder may not be](#where-a-document-folder-may-be) is `folder_forbidden`. Once the folder is
+  opened by handle, the path the handle resolves to (`GetFinalPathNameByHandle`) is judged the same way and must be the
+  configured path itself (`folder_reparse` otherwise); the write re-opens it and refuses a folder that resolves anywhere
+  else than the check read. A `restore` is never blocked by these: it puts back only a recorded pre-image, on the
+  objects recorded.
+- **Never a folder code runs from** (review T1): a folder holding an importer file (has.exe, a BAT, a parameter file)
+  or a file Windows runs — PATHEXT's extensions (never fewer than Windows' defaults), `.dll`, `.ps1`, `.scr`, `.cpl`,
+  `.ocx`, `.sys`, `.drv`; never `.php` — anywhere beneath is `folder_has_executables`. Where an importer runs or reads
+  the document (`sendOrderDir` with has.exe or a BAT, the receipt folder with a receipt importer, the importers'
+  folders), `trustedWriters` count like anyone else: the lock-down caps them at read & execute too.
+- **A lock-down never grants anything, to anyone, on any entry** (review T2). On the folder and on every entry beneath
+  — walked **by handle**, never following anything — it masks the DACL the entry already has: an allow entry, explicit
+  or inherited, of any type, for SYSTEM, Administrators or TrustedInstaller stays as it is; one for a `trustedWriters`
+  account keeps at most Modify; one for anyone else (CREATOR OWNER and OWNER RIGHTS included) keeps at most read &
+  execute — generic rights mapped first, an entry left with nothing beyond SYNCHRONIZE dropped. Conditional, callback
+  and object entries keep their condition and type; deny entries stay; flags and order are kept. **No entry is ever
+  added**: a trusted writer with no right before keeps none (write it had only through a group is capped with the
+  group: `trusted_writer_no_write:` warns, on `--check` too), and an account that could only add files gains no read.
+  The folder's link to its parent is cut (its DACL protected, its inherited entries kept as explicit and masked the
+  same way); every other entry keeps its own protection. An owner that is not SYSTEM, an administrator or
+  TrustedInstaller is handed to Administrators.
+- **The bound**: at most 20 000 entries (the folder included), counted before anything is written: more is
+  `folder_too_large` (move old `*.MASOFON2.BAK` files out first). A reparse point or a multiply-linked file anywhere
+  beneath is `folder_reparse`: never followed, never written through. No path-based propagation (as LocalSystem a path
+  can be redirected). **Folders above are never changed**: who can still rename the folder away through one is
+  reported — a `parent_writable:` warning and the folder's `parentWritable` (the lock-down of the folder itself still
+  applies).
+- **The pre-image**, recorded before the first write: the folder's and every entry's owner and DACL (SDDL) with its file
+  ID, in a protected file `DataDir\folder-acl\<sha256>.json` — the sha256 of the file's bytes, answered as the
+  folder's `preimage`. Kept on the box.
+- **`restore`** takes `folder` and `preimage` and puts back **only** a pre-image this box recorded, for that folder, at
+  its configured path, whose bytes still match the sha256 (otherwise `preimage_missing`) — never an SDDL from the input:
+  a stolen team key can only tighten a configured folder or put back an ACL it had. Each entry is restored only if it is
+  still the same object (file ID) at the same place; the others (gone, replaced, a link now) are counted as `skipped`.
+  The folder itself must be the object recorded (`folder_reparse` otherwise).
+- **`--check`** reads and writes nothing: per folder `{name, path, entries, entriesChanged, principals: [{sid, name,
+  before, after, entries}], owners: [{sid, name, entries}], parentWritable}` — every principal with an allow entry
+  **anywhere in the tree**, the strongest rights it has anywhere before and after (`full`, `modify`, `write`, `read`,
+  `special`, `none`) and on how many entries they change (review T4), the owners handed to Administrators, and how many
+  entries change: the approval form shows exactly who loses write — at BFL, the legacy PHP site's account if it writes
+  into the folder.
+- **Unfinished work**: `folder_in_flight` (as the `documents` command) — orders frozen for a typed folder, rule-less
+  orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
+  unless `acceptUnreadable` is their total over both indexes (review m3).
+- **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
+- The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, parentWritable?,
+  preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
+  pre-image listed in `state`'s `folderAcl.preimages` (review T5).
 
 ## `restore` and pre-images without files
 
@@ -377,6 +593,19 @@ actually changed.
 | `dependency_disabled` | `service`: a dependency whose start type is Disabled |
 | `receipt_dir_missing` | `receipts`: `sendReceiptDir` is not a folder on this machine |
 | `receipt_store_exists`, `receipt_seed_low` | `receipt-seed`: the store exists already / N is at or below a receipt already written |
+| `counter_unknown`, `counter_exists`, `counter_retired` | `counters`: no configured counter of that key / the key is taken (create) / the counter is retired |
+| `counter_moved` | `counters start-from`: the last number is not `expectLast` (a number was issued in between) |
+| `counter_lower` | `counters`: a number at or below one already issued, or below the range — a counter never moves back |
+| `counter_range` | `counters`: the range would exclude the counter's last or an issued number, or `from` is outside it |
+| `counter_in_flight` | `counters retire`: orders or receipts of its range are not finished; `counters range`: the new range would leave one of them out |
+| `counter_store` | `counters`: the counter's store cannot be read; `create`: `store: lastOrderNumber` on a box that writes no orders |
+| `index_unreadable` | `counters`: index entries of the kind cannot be read, and `acceptUnreadable` is not their number; `documents`, `receipts`, `restore`, `folder-acl` (review R7): the same, for the order and receipt index entries their guards read (`acceptUnreadable`; `restore --accept-unreadable=N`) — review m3: one total per command, each index counted once |
+| `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`, `folder-acl`: no folder of that key / the path is not a folder here / inside the data directory, not a path link mode takes, or one of the [places a document folder may not be](#where-a-document-folder-may-be) (review T3: typed folders behind the link, every `folder-acl` target, and behind the link the `sendOrderDir`, pickup and receipt folders `apply`, `orders` and `receipts` set or move) |
+| `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
+| `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through), or — with `documents` and, behind the link, `apply`/`orders`/`receipts` — a junction, link or mount point on the configured path, or a folder whose handle resolves to another path (review T3) / more than 20 000 entries |
+| `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
+| `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
+| `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
 
@@ -415,6 +644,16 @@ credential (the queue checks before writes and restarts, the proofs, `verify`) m
 model always writes that `config.yaml` lacks (their defaults apply); `unknownKeys` are keys it does not know (left from
 an older build, or misspelt). Index entries are read for their number and state only (a receipt's request never
 leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
+`writableFolders` (plan 087 review M1) lists every folder the connector writes documents into that accounts besides
+the administrators can write to: `{name, path, key?, typed?, receipts?, executes?, writers, trusted?, error?}` — `[]`
+when there is none (`executes`: an importer runs in or from it, so `trustedWriters` count there too; review T1).
+`folderAcl.preimages` (review T5) lists the `folder-acl` pre-images recorded on the box, newest first (at most 50):
+`{folder, path, sha256, at, changeSet, entries, error?}` — a lock-down killed before it answered (the link's
+deadline, a crash, a reboot) still leaves the sha256 a `restore` takes; `error` marks a file that no longer matches its
+sha256 or does not decode (its restore is refused).
+`orders.folderTestChanged` (review R2) lists the unfinished orders whose rule froze another test flag than their
+folder has now. `counters[].error` is a code (`store_missing`, `store_damaged`, `issued_unreadable`, as `GET /api/counters`) and
+`counters[].detail` its text (review m7).
 
 ## Behind the link (link mode)
 
@@ -430,6 +669,31 @@ the WinRM path is unchanged:
   `%ProgramFiles(x86)%` and `%ProgramData%` (`importer_not_erp`): it runs as LocalSystem once per order.
 - **Image folders** are outside those folders and outside any `AppData` (`image_folder_forbidden`): `/api/file` serves
   what is in them.
+- **A folder documents are written into** (`documents`, `receipts`, `orders`) is one only the administrators can write
+  to when the command adds or moves it (`folder_writable`; never `allowWritable`; review R1a), and the daemon writes into
+  no typed folder others can write to (`503 FOLDER_WRITABLE`) — plan 087 review M1. The ERP's own accounts are trusted
+  by name (`documents`' `trustedWriters`), and `folder-acl` locks a folder down without a human on the box (R1b, R1c).
+
+Every path a command takes behind the link is a plain path on a local drive with no `.`/`..`/empty part and none of
+cmd.exe's characters, and — since the system-folder rules compare text — none Windows resolves to another folder
+(plan 087 review m6): no `~` (an 8.3 short name, `C:\PROGRA~1`), no `:` after the drive letter (a stream), no part
+ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`).
+
+### Where a document folder may be
+
+Plan 087 review T3. A typed folder (`documents`, behind the link), every `folder-acl` target (link or WinRM), and —
+behind the link — the `sendOrderDir`, `sendOrderPickupDir` and `sendReceiptDir` that `apply`, `orders` or `receipts`
+set or move, are refused (`folder_forbidden`) when they are, are in, or hold:
+- a drive's root;
+- the Windows folder (`%SystemRoot%`), `%ProgramFiles%`, `%ProgramFiles(x86)%`, all of `%ProgramData%`;
+- the profiles' folder (`%SystemDrive%\Users` and the registry's `ProfilesDirectory`): every profile, `Public`,
+  `Default`, `All Users` — and `C:\Documents and Settings`;
+- the connector's install folder and its data directory;
+- or when any part of the path is `AppData`, `System Volume Information` or `$Recycle.Bin`.
+
+And none has a junction, a symbolic link or a mount point anywhere on its path (`folder_reparse`): `C:\Users\All
+Users` is a link to `C:\ProgramData`, which a rule reading only text would never see. `C:\xampp\htdocs\herp` and
+`C:\xampp\htdocs\herp\receipts` (BFL) pass. Folders left where they were are not judged again.
 
 These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
 takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login

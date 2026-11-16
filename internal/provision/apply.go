@@ -40,6 +40,13 @@ type ApplyResult struct {
 	Proof            *Proof   `json:"proof,omitempty"`
 	RolledBack       bool     `json:"rolledBack,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
+	// WritableFolders (plan 087 review R1a) are the folders the connector
+	// writes documents into that accounts besides the administrators can
+	// write to and the command did not refuse: ones it left as they were
+	// (a warning, as the daemon gives) and ones allowWritable accepted.
+	WritableFolders []StateWritableFolder `json:"writableFolders,omitempty"`
+	// FolderACL (plan 087 review R1c) is the folder-acl command's answer.
+	FolderACL *FolderACLResult `json:"folderAcl,omitempty"`
 	// Check is what the run would do, when it was apply --check.
 	Check *CheckResult `json:"check,omitempty"`
 
@@ -62,7 +69,24 @@ type CheckResult struct {
 	Dependencies bool     `json:"dependencies,omitempty"` // the service's dependencies would change
 	Recovery     bool     `json:"recovery"`               // the service's recovery actions would be set
 	OrderCounter bool     `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
-	Restart      bool     `json:"restart"`                // the service would restart
+	// Counter (plan 087, counters --check) is the counter's store as the
+	// command would leave it.
+	Counter *CounterCheck `json:"counter,omitempty"`
+	// TrustedWriters (plan 087 review R1b, documents --check) are the
+	// accounts the input's trustedWriters resolve to on the box, for the
+	// approval form.
+	TrustedWriters []TrustedWriterCheck `json:"trustedWriters,omitempty"`
+	Restart        bool                 `json:"restart"` // the service would restart
+}
+
+// TrustedWriterCheck is one trusted writer as the box resolved it.
+type TrustedWriterCheck struct {
+	Name string `json:"name"` // as given
+	SID  string `json:"sid"`
+	// Resolved is the canonical DOMAIN\name; Type is "user" (only a user is
+	// trusted).
+	Resolved string `json:"resolved"`
+	Type     string `json:"type"`
 }
 
 // Step is one part of the change: whether it changed anything.
@@ -151,6 +175,18 @@ type applier struct {
 	dir   string
 	res   *ApplyResult
 	check bool // apply --check: stop before the first write
+	// folderChecked are the folders a command checked as one it adds, moves
+	// or newly makes typed or bound (plan 087 review R1a), by folderKey: the
+	// others are only reported (reportWritableFolders).
+	folderChecked map[string]bool
+	// acceptUnreadable is the command's acceptUnreadable; unreadable and
+	// unreadableWhy what its guards could not read, by index (review m3:
+	// one total, settled once — unreadableSettled); unreadableDeferred: a
+	// later guard settles it.
+	acceptUnreadable   *int
+	unreadable         map[string]int
+	unreadableWhy      []string
+	unreadableDeferred bool
 
 	cur      config.Config
 	curBytes []byte // nil: there is no config.yaml
@@ -162,6 +198,10 @@ type applier struct {
 	fwBefore   *FirewallRule // the rule of the spec's name before this run (ours, or none)
 	loginPlan  string        // given | keep | create | rotate | none (loginNone)
 	moveOrders bool          // carry lastOrderNumber.json to the new sendOrderDir at the restart
+	// whileStopped run between the stop and the start of restartAndProve,
+	// when no writer holds a counter (plan 087: a counter's store set by the
+	// counters command).
+	whileStopped []func() error
 
 	dbPassword string // what the connector will log in to SQL with
 	rotated    bool   // this run set the least-privilege login's password in SQL Server
@@ -211,11 +251,12 @@ func (a *applier) run(ctx context.Context) error {
 	if err := api.CheckConfig(check); err != nil {
 		return refuse(CodeConfigRefused, "fix the spec: the connector would refuse to start on this config", "%v", err)
 	}
-	for _, f := range []func() error{a.checkImporterStated, a.checkFilesExist, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
+	for _, f := range []func() error{a.checkSetFolderPaths, a.checkImporterStated, a.checkFilesExist, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
 		if err := f(); err != nil {
 			return err
 		}
 	}
+	a.reportWritableFolders(a.tgt) // apply only warns (plan 087 review R1a)
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
 	}
@@ -853,6 +894,8 @@ func configDiff(cur, tgt config.Config) string {
 	add("tls", cur.TLS != tgt.TLS)
 	add("options", !slices.Equal(cur.ImageFolders, tgt.ImageFolders) || cur.ERPUser != tgt.ERPUser ||
 		cur.Debug != tgt.Debug || cur.Queries != tgt.Queries)
+	add("counters", !maps.Equal(cur.Documents.Counters, tgt.Documents.Counters))
+	add("documents", !maps.Equal(cur.Documents.Folders, tgt.Documents.Folders) || cur.Documents.Receipts != tgt.Documents.Receipts)
 	if len(out) == 0 {
 		return "rewritten in the connector's format"
 	}
@@ -939,7 +982,7 @@ func sameFold(a, b []string) bool {
 // the port with the new credential. A failure puts the run's pre-image back.
 func (a *applier) restartAndProve(ctx context.Context) error {
 	stale := configStale(a.curMod, a.svc.ProcessStart)
-	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders && !a.stoppedEarly {
+	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders && !a.stoppedEarly && len(a.whileStopped) == 0 {
 		a.step("restart", false, "nothing the service reads changed")
 		return nil
 	}
@@ -952,6 +995,11 @@ func (a *applier) restartAndProve(ctx context.Context) error {
 	}
 	if a.moveOrders {
 		if err := a.moveOrderCounter(); err != nil {
+			return a.fail(err)
+		}
+	}
+	for _, f := range a.whileStopped {
+		if err := f(); err != nil {
 			return a.fail(err)
 		}
 	}
