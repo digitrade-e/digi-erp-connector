@@ -19,7 +19,7 @@ import (
 // start, the proof and a rollback) is about 25 minutes.
 const CommandDeadline = 30 * time.Minute
 
-func (l *Link) handleStream(st *yamux.Stream) {
+func (l *Link) handleStream(c *conn, st *yamux.Stream) {
 	defer func() { _ = st.Close() }()
 	_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var kind [1]byte
@@ -27,11 +27,14 @@ func (l *Link) handleStream(st *yamux.Stream) {
 		return
 	}
 	_ = st.SetReadDeadline(time.Time{})
-	// Streams the relay may hold at once: two commands, 64 data calls; more are closed at once (review 2026-11-15:
-	// 500 idle command streams held 500 MiB on the client's SQL Server host).
+	// Streams the relay may hold at once: two commands, 64 data calls, one policy delivery (plan 088); more are closed
+	// at once (review 2026-11-15: 500 idle command streams held 500 MiB on the client's SQL Server host).
 	slots := l.dataSlots
-	if kind[0] == linkproto.StreamCommand {
+	switch kind[0] {
+	case linkproto.StreamCommand:
 		slots = l.cmdSlots
+	case linkproto.StreamPolicy:
+		slots = l.policySlots
 	}
 	select {
 	case slots <- struct{}{}:
@@ -44,6 +47,8 @@ func (l *Link) handleStream(st *yamux.Stream) {
 		l.pipe(st)
 	case linkproto.StreamCommand:
 		l.command(st)
+	case linkproto.StreamPolicy:
+		l.policyStream(c, st)
 	}
 }
 
