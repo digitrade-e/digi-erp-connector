@@ -1,6 +1,12 @@
 package provision
 
-import "strings"
+import (
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+)
 
 // Plan 087 review M1: who can write to a folder the connector writes
 // documents into. The connector writes there as LocalSystem and an ERP
@@ -19,10 +25,34 @@ import "strings"
 // allowWritable accepts it as a risk a human was shown — the importer's rule
 // (checkImporterWriters).
 
-// checkFolderWriters refuses folder path (named what) when accounts besides
-// the administrators can write to it; over WinRM allow accepts it with a
+// The scope (review R1a): a command refuses only a folder it adds, moves (a
+// new path), or newly makes typed or bound — checkFolderWriters. Every other
+// folder the box writes documents into that others can write to is reported
+// as the daemon reports it, a warning and an entry in the result's
+// writableFolders (reportWritableFolders): a box upgraded with folders never
+// locked down keeps taking the plan-086 commands, and behind the link the
+// ERP's own scheduler, which must write there, is trusted by name
+// (documents' trustedWriters) or the folder locked down by folder-acl.
+
+// folderKey compares folders as the file system does (cleaned, without case
+// on Windows) for the folderChecked set.
+func folderKey(p string) string {
+	p = filepath.Clean(strings.TrimSpace(p))
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
+
+// checkFolderWriters refuses folder path (named what), one the command adds,
+// moves, or newly makes typed or bound, when accounts besides the
+// administrators can write to it; over WinRM allow accepts it with a
 // warning.
 func (a *applier) checkFolderWriters(what, path string, allow bool) error {
+	if a.folderChecked == nil {
+		a.folderChecked = map[string]bool{}
+	}
+	a.folderChecked[folderKey(path)] = true
 	who, err := a.env.Sys.FolderWriters(path)
 	if err != nil {
 		return refuse(CodeFolderWritable, "run it elevated (as an administrator)", "read who can write to %s (%s): %v", what, path, err)
@@ -34,6 +64,7 @@ func (a *applier) checkFolderWriters(what, path string, allow bool) error {
 	if allow && !linked {
 		a.warn("folder_writable: %s (%s) can be written by %s, and an importer reads it as the connector writes it (LocalSystem)",
 			what, path, strings.Join(who, ", "))
+		a.res.WritableFolders = append(a.res.WritableFolders, StateWritableFolder{WriteFolder: config.WriteFolder{Name: what, Path: path}, Writers: who})
 		return nil
 	}
 	fix := "let only the administrators (and SYSTEM) write to it and rename it — docs/troubleshooting.md § A folder others can write to"
@@ -43,6 +74,27 @@ func (a *applier) checkFolderWriters(what, path string, allow bool) error {
 	return refuse(CodeFolderWritable, fix,
 		"%s (%s) can be written by %s: any of them could pre-create the next document's file, drop a document the importer takes into the books, or plant what an importer running there loads",
 		what, path, strings.Join(who, ", "))
+}
+
+// reportWritableFolders adds to the result every folder of cfg that others
+// can write to and no checkFolderWriters looked at: a warning and a
+// writableFolders entry, never a refusal (review R1a).
+func (a *applier) reportWritableFolders(cfg config.Config) {
+	for _, f := range cfg.WriteFolders() {
+		if a.folderChecked[folderKey(f.Path)] {
+			continue
+		}
+		who, err := a.env.Sys.FolderWriters(f.Path)
+		switch {
+		case err != nil:
+			a.res.WritableFolders = append(a.res.WritableFolders, StateWritableFolder{WriteFolder: f, Writers: []string{}, Error: err.Error()})
+			a.warn("folder_writable: who can write to %s (%s) could not be read: %v", f.Name, f.Path, err)
+		case len(who) > 0:
+			a.res.WritableFolders = append(a.res.WritableFolders, StateWritableFolder{WriteFolder: f, Writers: who})
+			a.warn("folder_writable: %s (%s) can be written by %s; this command leaves it as it is, so it is a warning (docs/troubleshooting.md § A folder others can write to)",
+				f.Name, f.Path, strings.Join(who, ", "))
+		}
+	}
 }
 
 // refuseAllowWritableLinked is Validate's refusal of allowWritable behind the

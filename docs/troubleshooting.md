@@ -151,7 +151,8 @@ with the accounts, and:
 
 - **Behind the link** the daemon writes nothing into a typed folder others can write to (orders with a rule naming it,
   receipts when it is the bound receipt folder: `503 FOLDER_WRITABLE`, nothing reserved; server.log `FOLDER REFUSED`);
-  the `documents`, `receipts` and `orders` commands refuse such a folder (`folder_writable`), `allowWritable` with it.
+  the `documents`, `receipts` and `orders` commands refuse such a folder when they add or move it (`folder_writable`),
+  `allowWritable` with it — one they leave as it is is a warning in their result's `writableFolders` (review R1a).
   `sendOrderDir`, the pickup folder and `sendReceiptDir` predate plan 087: the daemon only warns about them (server.log
   `FOLDER WRITABLE`), so a box upgraded from v1.0.29 keeps taking orders until they are locked down.
 - **Over WinRM** the commands refuse it unless `allowWritable` (a human accepted the risk: a `folder_writable:` warning),

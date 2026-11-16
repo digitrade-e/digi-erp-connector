@@ -236,8 +236,12 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 			return refuse(CodeReceiptDirMissing, "create the folder the receipt importer reads", "the receipt folder %s is not a folder on this machine", dir)
 		}
-		if err := a.checkFolderWriters("the receipt folder", dir, in.AllowWritable); err != nil {
-			return err
+		// Review R1a: refused only when the receipt folder moves (or receipts
+		// start); left where it was, it is reported, not refused.
+		if cur := a.cur.ReceiptDir(); cur == "" || !sameFolder(cur, dir) {
+			if err := a.checkFolderWriters("the receipt folder", dir, in.AllowWritable); err != nil {
+				return err
+			}
 		}
 	}
 	runs := []string{t.HasReceiptBatFile}
@@ -270,6 +274,7 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 		return refuse(CodeImporterWritable, "let only the administrators change it and its folder, or set allowWritable once a human accepted the risk",
 			"%s can be changed by %s, and the connector would run it as LocalSystem for every receipt", p, strings.Join(who, ", "))
 	}
+	a.reportWritableFolders(t)
 	return nil
 }
 
@@ -336,10 +341,21 @@ func (a *applier) checkOrders(allowWritable bool) error {
 		if f.Typed || f.Receipts {
 			continue // the documents and receipts commands' to check
 		}
-		if err := a.checkFolderWriters(f.Name, f.Path, allowWritable); err != nil {
-			return err
+		// Review R1a: refused only for a folder this command sets or moves.
+		cur := ""
+		switch {
+		case f.Name == "sendOrderDir" && a.cur.OrdersConfigured():
+			cur = a.cur.SendOrderDir
+		case f.Name == "sendOrderPickupDir" && a.cur.OrdersPickup():
+			cur = a.cur.SendOrderPickupDir
+		}
+		if strings.TrimSpace(cur) == "" || !sameFolder(cur, f.Path) {
+			if err := a.checkFolderWriters(f.Name, f.Path, allowWritable); err != nil {
+				return err
+			}
 		}
 	}
+	a.reportWritableFolders(a.tgt)
 	return nil
 }
 

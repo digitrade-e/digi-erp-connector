@@ -171,7 +171,6 @@ func ApplyDocuments(ctx context.Context, env Env, in DocumentsInput, check bool)
 // unfinished work uses, nor the receipt binding, changes under it
 // (documentsIdle).
 func (a *applier) checkDocuments(in DocumentsInput) error {
-	checked := map[string]bool{}
 	for _, k := range sortedFolderKeys(in.Folders) {
 		f := in.Folders[k]
 		if f == nil {
@@ -193,17 +192,23 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 		if inside(p, a.dir) {
 			return refuse(CodeFolderForbidden, "name the folder the ERP's importer reads, outside the connector's data directory", "folder %s: %s is in the data directory", k, p)
 		}
-		if err := a.checkFolderWriters("folder "+k, p, in.AllowWritable); err != nil {
-			return err
+		// Review R1a: refused only for a folder the command adds, or moves; a
+		// folder set again where it was is reported, not refused.
+		if old, ok := a.cur.Documents.Folders[k]; !ok || !sameFolder(old.Path, p) {
+			if err := a.checkFolderWriters("folder "+k, p, in.AllowWritable); err != nil {
+				return err
+			}
 		}
-		checked[k] = true
 	}
-	// The receipt folder a binding names (it may have been set earlier).
-	if k := strings.TrimSpace(a.tgt.Documents.Receipts.Folder); in.Receipts != nil && k != "" && !checked[k] && a.tgt.ReceiptDir() != "" {
+	// The receipt folder a binding newly names (another key, or its path moved).
+	if k := strings.TrimSpace(a.tgt.Documents.Receipts.Folder); k != "" && a.tgt.ReceiptDir() != "" &&
+		(k != strings.TrimSpace(a.cur.Documents.Receipts.Folder) || !sameFolder(a.cur.ReceiptDir(), a.tgt.ReceiptDir())) &&
+		!a.folderChecked[folderKey(a.tgt.ReceiptDir())] {
 		if err := a.checkFolderWriters("folder "+k, a.tgt.ReceiptDir(), in.AllowWritable); err != nil {
 			return err
 		}
 	}
+	a.reportWritableFolders(a.tgt)
 	return a.documentsIdle(a.cur, a.tgt, in.AcceptUnreadable)
 }
 

@@ -25,104 +25,132 @@ func warned(res *ApplyResult, prefix string) bool {
 
 func TestDocuments_FolderWriters(t *testing.T) {
 	sys, env, _ := countersBox(t)
-	herp, kupain := mkdir(t, "herp"), mkdir(t, "kupain")
-	sys.writers = map[string][]string{herp: {usersWrite}, kupain: {usersWrite}}
-	set := func(cs string, allow bool) DocumentsInput {
+	herp, herp2, kupain := mkdir(t, "herp"), mkdir(t, "herp2"), mkdir(t, "kupain")
+	sys.writers = map[string][]string{herp: {usersWrite}, herp2: {usersWrite}, kupain: {usersWrite}}
+	set := func(cs, key, path string, allow bool) DocumentsInput {
 		return docsIn(func(in *DocumentsInput) {
 			in.ChangeSet, in.AllowWritable = cs, allow
-			in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
+			in.Folders = map[string]*FolderInput{key: {Kind: "orders", Path: path, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
 		})
 	}
 
-	// WinRM: refused, unless a human accepted it.
-	_, err := ApplyDocuments(context.Background(), env, set("cs-documents-w1", false), false)
+	// WinRM: a folder the command adds is refused, unless a human accepted it.
+	_, err := ApplyDocuments(context.Background(), env, set("cs-documents-w1", "herp", herp, false), false)
 	if r := wantRefusal(t, err, CodeFolderWritable); !strings.Contains(r.Message, usersWrite) || !strings.Contains(r.Fix, "allowWritable") {
 		t.Errorf("refusal %+v", r)
 	}
-	res, err := ApplyDocuments(context.Background(), env, set("cs-documents-w2", true), false)
-	if err != nil || !warned(res, "folder_writable: folder herp") {
-		t.Fatalf("allowWritable over WinRM: %v %v", res.Warnings, err)
+	res, err := ApplyDocuments(context.Background(), env, set("cs-documents-w2", "herp", herp, true), false)
+	if err != nil || !warned(res, "folder_writable: folder herp") || len(res.WritableFolders) != 1 {
+		t.Fatalf("allowWritable over WinRM: %v %+v %v", res.Warnings, res.WritableFolders, err)
 	}
-	// A receipts folder set earlier (allowWritable) and bound now: the binding checks it too.
+	// A receipts folder set earlier (allowWritable) and bound now: newly bound, so checked.
 	if _, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
 		in.ChangeSet, in.AllowWritable = "cs-documents-w3", true
 		in.Folders = map[string]*FolderInput{"herp_receipts": {Kind: "receipts", Path: kupain, NamePattern: "KUPAIN_{n}.doc"}}
 	}), false); err != nil {
 		t.Fatal(err)
 	}
-	bind := docsIn(func(in *DocumentsInput) {
+	_, err = ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
 		in.ChangeSet = "cs-documents-w4"
 		in.Receipts = &DocumentsReceiptsInput{Folder: strp("herp_receipts"), Counter: strp("receipts")}
-	})
-	_, err = ApplyDocuments(context.Background(), env, bind, false)
+	}), false)
 	wantRefusal(t, err, CodeFolderWritable)
 
-	// Behind the link: refused, and allowWritable is no way out.
+	// Behind the link: a folder the command adds or moves is refused — allowWritable is no way out;
+	// one set again where it was is a warning (review R1a).
 	linkBox(t, sys)
-	_, err = ApplyDocuments(context.Background(), env, set("cs-documents-w5", false), false)
+	_, err = ApplyDocuments(context.Background(), env, set("cs-documents-w5", "herp2", herp2, false), false)
 	if r := wantRefusal(t, err, CodeFolderWritable); strings.Contains(r.Fix, "allowWritable") {
 		t.Errorf("behind the link the fix offers allowWritable: %+v", r)
 	}
-	_, err = ApplyDocuments(context.Background(), env, set("cs-documents-w6", true), false)
+	_, err = ApplyDocuments(context.Background(), env, set("cs-documents-w6", "herp", herp2, false), false) // moved
+	wantRefusal(t, err, CodeFolderWritable)
+	_, err = ApplyDocuments(context.Background(), env, set("cs-documents-w7", "herp2", herp2, true), false)
 	wantRefusal(t, err, CodeSpecInvalid)
-	// Locked down: accepted.
+	res, err = ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.ChangeSet = "cs-documents-w8"
+		in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: "ORD_{n}.doc", Layout: "legacy"}} // same path
+	}), false)
+	if err != nil || !warned(res, "folder_writable: folder herp") {
+		t.Fatalf("a folder left where it was: %v %v", res, err)
+	}
+	// Locked down: accepted, nothing reported.
 	sys.writers = nil
-	if _, err := ApplyDocuments(context.Background(), env, set("cs-documents-w7", false), false); err != nil {
-		t.Fatalf("a folder only the administrators can write to: %v", err)
+	if res, err := ApplyDocuments(context.Background(), env, set("cs-documents-w9", "herp2", herp2, false), false); err != nil || len(res.WritableFolders) != 0 {
+		t.Fatalf("a folder only the administrators can write to: %+v %v", res, err)
 	}
 }
 
+// Review R1a, the review's case: on a linked box whose pickup and receipt
+// folders the ERP's scheduler writes into, an orders command changing only
+// sendOrderFormat and a receipts command changing only receiptCardNames go
+// through — the folders are reported, not refused; setting or moving a
+// writable folder is still refused.
 func TestReceiptsAndOrders_FolderWriters(t *testing.T) {
 	sys, fdb, orders := handInstallBox(t)
 	env := testEnv(sys, fdb)
-	kupain, pickup := mkdir(t, "kupain"), mkdir(t, "herp")
-	sys.writers = map[string][]string{kupain: {usersWrite}}
+	kupain, pickup, pickup2 := mkdir(t, "kupain"), mkdir(t, "herp"), mkdir(t, "herp2")
+	const scheduler = `BFL\wizsched`
 
+	// WinRM: setting a writable receipt folder is refused, allowWritable accepts it.
+	sys.writers = map[string][]string{kupain: {scheduler}}
 	receipts := func(cs string, allow bool) ReceiptsInput {
 		return receiptsInput(func(in *ReceiptsInput) { in.ChangeSet, in.SendReceiptDir, in.AllowWritable = cs, &kupain, allow })
 	}
 	_, err := ApplyReceipts(context.Background(), env, receipts("cs-receipts-w1", false), false)
 	wantRefusal(t, err, CodeFolderWritable)
-	res, err := ApplyReceipts(context.Background(), env, receipts("cs-receipts-w2", true), false)
-	if err != nil || !warned(res, "folder_writable: the receipt folder") {
-		t.Fatalf("allowWritable: %v %v", res.Warnings, err)
+	if res, err := ApplyReceipts(context.Background(), env, receipts("cs-receipts-w2", true), false); err != nil || !warned(res, "folder_writable: the receipt folder") {
+		t.Fatalf("allowWritable: %v %v", res, err)
 	}
-
-	// sendOrderDir and the pickup folder.
-	sys.writers = map[string][]string{orders: {usersWrite}}
-	format := "legacy"
-	ordersIn := func(cs string, allow bool) OrdersInput {
-		return OrdersInput{Version: 1, ChangeSet: cs, SendOrderPickupDir: &pickup, SendOrderFormat: &format, AllowWritable: allow}
-	}
-	_, err = ApplyOrders(context.Background(), env, ordersIn("cs-orders-w1", false), false)
-	if r := wantRefusal(t, err, CodeFolderWritable); !strings.Contains(r.Message, "sendOrderDir") {
-		t.Errorf("refusal %+v", r)
-	}
-	sys.writers = map[string][]string{pickup: {usersWrite}}
-	_, err = ApplyOrders(context.Background(), env, ordersIn("cs-orders-w2", false), false)
+	// Setting a writable pickup folder is refused; a writable sendOrderDir the command leaves is reported.
+	sys.writers = map[string][]string{orders: {scheduler}, pickup: {scheduler}, kupain: {scheduler}}
+	legacy := "legacy"
+	_, err = ApplyOrders(context.Background(), env, OrdersInput{Version: 1, ChangeSet: "cs-orders-w1", SendOrderPickupDir: &pickup, SendOrderFormat: &legacy}, false)
 	if r := wantRefusal(t, err, CodeFolderWritable); !strings.Contains(r.Message, "sendOrderPickupDir") {
 		t.Errorf("refusal %+v", r)
 	}
-	res, err = ApplyOrders(context.Background(), env, ordersIn("cs-orders-w3", true), false)
-	if err != nil || !warned(res, "folder_writable: sendOrderPickupDir") {
-		t.Fatalf("allowWritable: %v %v", res.Warnings, err)
+	res, err := ApplyOrders(context.Background(), env, OrdersInput{Version: 1, ChangeSet: "cs-orders-w2", SendOrderPickupDir: &pickup, SendOrderFormat: &legacy, AllowWritable: true}, false)
+	if err != nil || !warned(res, "folder_writable: sendOrderPickupDir") || !warned(res, "folder_writable: sendOrderDir") {
+		t.Fatalf("allowWritable: %v %v", res, err)
 	}
 
-	// Behind the link: refused; allowWritable refused with it.
+	// Behind the link (BFL): changes that touch no folder go through, reported.
 	linkBox(t, sys)
-	format2 := "official"
-	in := OrdersInput{Version: 1, ChangeSet: "cs-orders-w4", SendOrderFormat: &format2}
+	official := "official"
+	res, err = ApplyOrders(context.Background(), env, OrdersInput{Version: 1, ChangeSet: "cs-orders-w3", SendOrderFormat: &official}, false)
+	if err != nil || len(res.WritableFolders) != 3 {
+		t.Fatalf("an orders command changing only the layout: %v %+v %v", res.Warnings, res.WritableFolders, err)
+	}
+	res, err = ApplyReceipts(context.Background(), env, receiptsInput(func(in *ReceiptsInput) {
+		in.ChangeSet, in.ReceiptCardNames = "cs-receipts-w3", &config.ReceiptCardNamesConfig{}
+	}), false)
+	if err != nil || !warned(res, "folder_writable: sendReceiptDir") {
+		t.Fatalf("a receipts command changing only the card names: %v %v", res, err)
+	}
+	// Moving the pickup folder to another writable one is refused; allowWritable is refused with it.
+	sys.writers[pickup2] = []string{scheduler}
+	in := OrdersInput{Version: 1, ChangeSet: "cs-orders-w4", SendOrderPickupDir: &pickup2}
 	_, err = ApplyOrders(context.Background(), env, in, false)
 	wantRefusal(t, err, CodeFolderWritable)
 	in.AllowWritable = true
 	_, err = ApplyOrders(context.Background(), env, in, false)
 	wantRefusal(t, err, CodeSpecInvalid)
 
-	// state lists them.
+	// state lists them all.
 	st, err := State(context.Background(), env, StateInput{})
-	if err != nil || len(st.WritableFolders) != 1 || st.WritableFolders[0].Name != "sendOrderPickupDir" ||
-		!slices.Equal(st.WritableFolders[0].Writers, []string{usersWrite}) {
+	if err != nil || len(st.WritableFolders) != 3 {
 		t.Fatalf("state writableFolders %+v %v", st.WritableFolders, err)
+	}
+}
+
+// apply only warns (review R1a).
+func TestApply_WritableFoldersAreAWarning(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	sys.writers = map[string][]string{orders: {usersWrite}}
+	spec := handInstallSpec(orders)
+	res, err := ApplyCheck(context.Background(), testEnv(sys, fdb), spec)
+	if err != nil || len(res.WritableFolders) != 1 || !warned(res, "folder_writable: sendOrderDir") {
+		t.Fatalf("apply --check: %+v %v", res, err)
 	}
 }
 

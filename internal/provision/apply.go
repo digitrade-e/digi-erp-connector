@@ -40,6 +40,11 @@ type ApplyResult struct {
 	Proof            *Proof   `json:"proof,omitempty"`
 	RolledBack       bool     `json:"rolledBack,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
+	// WritableFolders (plan 087 review R1a) are the folders the connector
+	// writes documents into that accounts besides the administrators can
+	// write to and the command did not refuse: ones it left as they were
+	// (a warning, as the daemon gives) and ones allowWritable accepted.
+	WritableFolders []StateWritableFolder `json:"writableFolders,omitempty"`
 	// Check is what the run would do, when it was apply --check.
 	Check *CheckResult `json:"check,omitempty"`
 
@@ -154,6 +159,10 @@ type applier struct {
 	dir   string
 	res   *ApplyResult
 	check bool // apply --check: stop before the first write
+	// folderChecked are the folders a command checked as one it adds, moves
+	// or newly makes typed or bound (plan 087 review R1a), by folderKey: the
+	// others are only reported (reportWritableFolders).
+	folderChecked map[string]bool
 
 	cur      config.Config
 	curBytes []byte // nil: there is no config.yaml
@@ -223,6 +232,7 @@ func (a *applier) run(ctx context.Context) error {
 			return err
 		}
 	}
+	a.reportWritableFolders(a.tgt) // apply only warns (plan 087 review R1a)
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
 	}

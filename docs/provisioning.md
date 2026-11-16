@@ -333,8 +333,13 @@ restart only on change, the proof with the box's own credential, the rollback). 
   `importer.allowWritable`). Behind the link: `apply`'s importer rules, folders outside the system folders, never
   `allowWritable`.
 
-Both check the folders on every run, whatever the input changes: a box whose folders were never locked down gets
-`folder_writable` until they are ([troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to)).
+**The scope of `folder_writable`** (review R1a): `orders`, `receipts` and `documents` refuse only a folder the
+command *adds, moves* (a new path), or newly makes typed or bound. Every other folder the box writes documents into
+that others can write to is reported — a `folder_writable:` warning and an entry in the result's `writableFolders`
+(`{name, path, writers, …}`, as `state`'s) — never refused, as the daemon treats it: a box upgraded with folders never
+locked down keeps taking these commands. `apply` only reports. Behind the link a scheduler account that must write
+there is trusted by name (`documents`' `trustedWriters`), or the folder is locked down by `folder-acl`
+([troubleshooting.md § A folder others can write to](troubleshooting.md#a-folder-others-can-write-to)).
 
 ## `receipt-seed <N>`
 
@@ -430,9 +435,10 @@ Checked before any write: the name pattern's closed grammar (`{prefix}` optional
 digits and `_` starting with a letter and ending in a letter or `_` (review m11: `IMOVEIN_1{n}` with n = 23 is `IMOVEIN_123`), `{n}`, `.doc`; no separator, no `..`, no Windows device name — `COM{n}.doc`
 is `COM1.doc`), `tempPrefix` exactly with `{prefix}` (orders only), `layout` `official`/`legacy` for orders; the
 folder exists (`folder_missing`; the connector never creates it), is not a link or junction and not inside the data
-directory (`folder_forbidden`), and only the administrators can write to it — and to the receipt folder a binding
-names (`folder_writable`, plan 087 review M1: `allowWritable` accepts it over WinRM with a warning); behind the link a
-plain local path outside the system folders (link mode's rules), never `allowWritable`.
+directory (`folder_forbidden`), and — when the command adds or moves it, and for the receipt folder a binding newly
+names — only the administrators can write to it (`folder_writable`, plan 087 review M1/R1a: `allowWritable` accepts it
+over WinRM with a warning; a folder left where it was is reported in `writableFolders`); behind the link a plain local
+path outside the system folders (link mode's rules), never `allowWritable`.
 The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
 distinct; a test folder never the pickup or receipt folder, and never inside a production folder (typed, pickup or receipt) nor holding one (review m11); a test counter only into a test folder, and a test receipt
 folder only from a test counter (review m10; a documentRule is held to the same at the route); no model (b)
