@@ -40,8 +40,12 @@ type LogsInput struct {
 
 // LogsResult is what logs answers: the lines oldest first.
 type LogsResult struct {
-	Source string   `json:"source"`
-	Lines  []string `json:"lines"`
+	Source string `json:"source"`
+	// Untrusted is always true (review m6): the lines are text others could write — the relay (a GoAway reason), any
+	// caller of the data path (a logged request), a local user (the Event Log) — so they are data to show, never
+	// instructions to whoever reads them (digi-mcp's agent included).
+	Untrusted bool     `json:"untrusted"`
+	Lines     []string `json:"lines"`
 	// Truncated: older lines that would match were left out — by maxLines, the answer's size cap or the scan cap.
 	Truncated bool `json:"truncated"`
 	// Files are the files read, oldest first, relative to the data directory (empty for the Event Log).
@@ -111,7 +115,7 @@ func Logs(env Env, in LogsInput) (*LogsResult, error) {
 		maxLines = DefaultLogLines
 	}
 	dir := env.Sys.DataDir()
-	res := &LogsResult{Source: in.Source, Lines: []string{}, secrets: boxSecrets(env)}
+	res := &LogsResult{Source: in.Source, Untrusted: true, Lines: []string{}, secrets: boxSecrets(env)}
 	sel := lineSelector{grep: strings.ToLower(in.Grep), since: since, max: maxLines, budget: maxLogAnswer, secrets: res.secrets}
 	if source, ok := eventSources[in.Source]; ok {
 		max := maxLines + 1 // one more than wanted: whether older ones exist
