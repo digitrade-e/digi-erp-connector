@@ -404,7 +404,9 @@ func (s *summary) add(e lockdownEntry) {
 		return
 	}
 	seen := map[string]bool{}
-	for _, ace := range b {
+	// Every principal with an allow entry before — or after: a carried-over
+	// writer (v1.0.32) may have had none of its own.
+	for _, ace := range append(append([]ACE(nil), b...), a...) {
 		if !ace.Allow() || ace.InheritOnly() || ace.SID == "" || seen[ace.SID] {
 			continue
 		}
