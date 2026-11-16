@@ -135,7 +135,13 @@ the hand script or a person may use it), or the one it knows no longer logs in. 
 connectors on one SQL Server name two logins (`db.login`): rotating a shared login
 locks the other connector out. A password set in SQL Server cannot be taken back, so
 a rollback or a `restore` keeps the current password whenever the config they put
-back logs in as that login.
+back logs in as that login. When the running connector logs in as the login that is
+given a new password (`apply` or `db`), the order queue is asked and the service
+stopped **before** SQL Server changes it (a step `stop`): its pool would keep the old
+password, failing every new connection while the process lives on. A failure after
+the change rolls back, starts the service on the restored config — whose secret is
+the new password — and proves it (a warning says so); the daemon is never left on a
+password the server no longer accepts.
 
 ## What `apply` does, in order
 

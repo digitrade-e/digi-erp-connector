@@ -169,6 +169,8 @@ type applier struct {
 	captured   bool   // this run's pre-image exists: a failure from here on is rolled back
 	wrote      bool   // something on the box changed
 	touched    bool   // this run stopped (or started) the service
+	// stoppedEarly: stopped before the login in use got a new password (stopBeforeRotation); it must be started again.
+	stoppedEarly bool
 }
 
 func (a *applier) step(name string, changed bool, detail string) {
@@ -700,6 +702,10 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 		a.step("login", false, a.s.DB.login()+" works with the stored password")
 		return nil
 	}
+	login := a.s.DB.login()
+	if err := a.stopBeforeRotation(ctx, login); err != nil {
+		return err
+	}
 	pw, err := NewSQLPassword()
 	if err != nil {
 		return refuse(CodeLeastPrivilege, "run it again", "%v", err)
@@ -707,7 +713,6 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 	a.res.secrets = append(a.res.secrets, pw)
 	// From here the password may have reached SQL Server even if a step
 	// fails: treat it as set, so a rollback keeps the stored secret in step.
-	login := a.s.DB.login()
 	if err := a.env.Sys.SecretSet(loginKey(login), []byte(pw)); err != nil {
 		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "keep %s's new password: %v", login, err)
 	}
@@ -727,6 +732,30 @@ func (a *applier) applyLogin(ctx context.Context, admin Database) error {
 		what = "given a new password"
 	}
 	a.step("login", true, login+" "+what)
+	return nil
+}
+
+// stopBeforeRotation stops the service before login gets a new password on
+// SQL Server when the running connector logs in as it (review M2): its pool
+// keeps the old password until it restarts, so any failure after the rotation
+// — a refused queue check before the restart, a failed write — would leave it
+// on a password the server no longer accepts, failing every new connection
+// while the process lives on (SCM recovery never fires). The queue is asked
+// first; restartAndProve, or the rollback, starts the service again on what
+// the box ends with.
+func (a *applier) stopBeforeRotation(ctx context.Context, login string) error {
+	if !a.running || !strings.EqualFold(strings.TrimSpace(a.cur.DB.User), login) {
+		return nil
+	}
+	if err := a.idle(ctx, "before "+login+"'s password changes"); err != nil {
+		return err
+	}
+	a.touched = true
+	if err := a.env.Sys.StopService(ServiceName); err != nil {
+		return refuse(CodeServiceFailed, "stop it in services.msc and run it again", "stop the service before %s's password changes: %v", login, err)
+	}
+	a.stoppedEarly = true
+	a.step("stop", true, "before "+login+"'s password changes: the running connector logs in as it")
 	return nil
 }
 
@@ -910,7 +939,7 @@ func sameFold(a, b []string) bool {
 // the port with the new credential. A failure puts the run's pre-image back.
 func (a *applier) restartAndProve(ctx context.Context) error {
 	stale := configStale(a.curMod, a.svc.ProcessStart)
-	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders {
+	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders && !a.stoppedEarly {
 		a.step("restart", false, "nothing the service reads changed")
 		return nil
 	}
@@ -1055,6 +1084,34 @@ func (a *applier) rollback() error {
 	if err := a.env.Sys.StartService(ServiceName); err != nil {
 		return fmt.Errorf("the service did not start on the restored config: %w", err)
 	}
+	if a.rotated {
+		return a.proveRestored()
+	}
+	return nil
+}
+
+// proveRestored proves the service a rollback started again after this run
+// gave a login a new password on SQL Server (review M2): the restored config
+// with the secret keepLoginPassword left — never a daemon silently on a
+// password the server no longer accepts.
+func (a *applier) proveRestored() error {
+	b, err := os.ReadFile(filepath.Join(a.dir, configFile))
+	if err != nil {
+		return fmt.Errorf("read the restored config.yaml to prove it: %w", err)
+	}
+	cfg, err := config.Parse(b)
+	if err != nil {
+		return fmt.Errorf("the restored config.yaml does not parse: %w", err)
+	}
+	proof, err := a.prove(context.Background(), cfg)
+	if err != nil {
+		return fmt.Errorf("the service started on the restored config but was not proved: %w", err)
+	}
+	if proof.Health != "ok" && proof.Health != HealthNoDatabase {
+		a.warn("the service runs on the restored config but its database does not answer (/api/health: %s); SQL Server keeps %s's new password, which the box stores", proof.Health, a.s.DB.login())
+		return nil
+	}
+	a.warn("the rollback started the service again and it was proved on the restored config (/api/health: %s): SQL Server keeps %s's new password, which the box stores", proof.Health, a.s.DB.login())
 	return nil
 }
 

@@ -32,7 +32,10 @@ type fakeDaemon struct {
 	version      string
 	noQueueRoute bool
 	down         bool // refuses every login with 503: it never comes up
-	srv          *httptest.Server
+	// queuedFrom: from the queuedFrom-th question about the queue on (1-based), it answers queuedLater orders — an
+	// order that arrives in the middle of a run. 0: never.
+	queuedFrom, queuedLater, queueAsks int
+	srv                                *httptest.Server
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -68,7 +71,12 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/health":
 		w.WriteHeader(d.health)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sendOrder" && !d.noQueueRoute:
-		_ = json.NewEncoder(w).Encode(map[string]int{"queued": d.queued, "running": d.running})
+		d.queueAsks++
+		queued := d.queued
+		if d.queuedFrom > 0 && d.queueAsks >= d.queuedFrom {
+			queued = d.queuedLater
+		}
+		_ = json.NewEncoder(w).Encode(map[string]int{"queued": queued, "running": d.running})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -97,6 +105,10 @@ type fakeSys struct {
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
 	calls   []string
+	// daemonDBPass is the DB password the running daemon read at its start (its pool's, until the next start).
+	daemonDBPass string
+	// failSecretOnce makes the next SecretSet of that key fail.
+	failSecretOnce string
 }
 
 func newFakeSys(t *testing.T, d *fakeDaemon) *fakeSys {
@@ -130,6 +142,10 @@ func (s *fakeSys) SecretGet(key string) ([]byte, error) {
 
 func (s *fakeSys) SecretSet(key string, v []byte) error {
 	s.call("secret:" + key)
+	if s.failSecretOnce == key {
+		s.failSecretOnce = ""
+		return errors.New("the secret store refused")
+	}
 	if err := os.MkdirAll(filepath.Dir(s.secretPath(key)), 0o700); err != nil {
 		return err
 	}
@@ -187,6 +203,8 @@ func (s *fakeSys) StartService(string) error {
 		return err
 	}
 	s.daemon.set(func(d *fakeDaemon) { d.user, d.pass = cfg.Auth.Username, cfg.Auth.Password })
+	pw, _ := s.SecretGet(config.DBPasswordKey(cfg.ERP))
+	s.daemonDBPass = string(pw)
 	if s.onStart != nil {
 		s.onStart(cfg)
 	}

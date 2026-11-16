@@ -185,6 +185,75 @@ func TestApplyDB_UnhealthyDatabaseRollsBack(t *testing.T) {
 	}
 }
 
+// Review M2: a db run that gives the login in use a new password on SQL Server must never leave the running daemon on
+// the old one (its pool would fail on every new connection, and the process never exits, so SCM recovery never fires).
+// The daemon is stopped before the rotation, and a rollback after it starts the daemon on the restored config (whose
+// secret is the new password) and proves it.
+func TestApplyDB_RotatingTheLoginInUseNeverStrandsTheDaemon(t *testing.T) {
+	rotate := func(t *testing.T) (*fakeSys, *fakeDB, Env, DBInput) {
+		sys, fdb, _ := handInstallBox(t)
+		env := testEnv(sys, fdb)
+		if _, err := ApplyDB(context.Background(), env, offSa(), false); err != nil {
+			t.Fatalf("off sa: %v", err)
+		}
+		// a DBA changed the login's password: the box's no longer logs in, so it is rotated
+		fdb.setLogin(DefaultLogin, "changed-by-a-dba-0001")
+		in := offSa()
+		in.ChangeSet, in.DB.RotateLogin = "cs-db-rotate01", true
+		sys.daemon.set(func(d *fakeDaemon) { d.queueAsks = 0 })
+		return sys, fdb, env, in
+	}
+	// the invariant: if SQL Server got a new password, the running daemon started on it
+	stranded := func(t *testing.T, sys *fakeSys, fdb *fakeDB, rotatedBefore int) {
+		t.Helper()
+		pw, _ := fdb.login(DefaultLogin)
+		fdb.mu.Lock()
+		rotated := fdb.loginCalls > rotatedBefore
+		fdb.mu.Unlock()
+		if rotated && (sys.svc.State != "running" || sys.daemonDBPass != pw) {
+			t.Fatalf("SQL Server has a new password but the daemon is %s on another one (calls %v)", sys.svc.State, sys.calls)
+		}
+		if sys.svc.State != "running" {
+			t.Fatalf("the daemon was left %s", sys.svc.State)
+		}
+	}
+
+	t.Run("an order arrives before the restart", func(t *testing.T) {
+		sys, fdb, env, in := rotate(t)
+		fdb.mu.Lock()
+		before := fdb.loginCalls
+		fdb.mu.Unlock()
+		// the first question (before anything is written) finds none; every later one finds an order
+		sys.daemon.set(func(d *fakeDaemon) { d.queuedFrom, d.queuedLater = 2, 1 })
+		res, err := ApplyDB(context.Background(), env, in, false)
+		wantRefusal(t, err, CodeOrdersPending)
+		stranded(t, sys, fdb, before)
+		if pw, _ := fdb.login(DefaultLogin); pw != "changed-by-a-dba-0001" {
+			t.Errorf("the password was rotated although the queue refused the stop (rolled back %v)", res.RolledBack)
+		}
+	})
+
+	t.Run("a write fails after the rotation", func(t *testing.T) {
+		sys, fdb, env, in := rotate(t)
+		fdb.mu.Lock()
+		before := fdb.loginCalls
+		fdb.mu.Unlock()
+		sys.failSecretOnce = config.DBPasswordKey(config.ERPHasavshevet)
+		res, err := ApplyDB(context.Background(), env, in, false)
+		wantRefusal(t, err, CodeWriteFailed)
+		if !res.RolledBack {
+			t.Fatal("not rolled back")
+		}
+		stranded(t, sys, fdb, before)
+		if pw, _ := fdb.login(DefaultLogin); pw == "changed-by-a-dba-0001" {
+			t.Fatal("the scenario needs a rotation")
+		}
+		if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "proved on the restored config") }) {
+			t.Errorf("the restart after the rollback was not proved: %v", res.Warnings)
+		}
+	})
+}
+
 func TestApplyDB_TurnsTheDatabaseOff(t *testing.T) {
 	sys, fdb, _ := handInstallBox(t)
 	in := DBInput{Version: 1, ChangeSet: "cs-db-000005", DB: DBChange{Mode: DBModeNone}}
