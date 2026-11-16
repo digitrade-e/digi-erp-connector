@@ -122,8 +122,9 @@ func plainDocName(name string) bool {
 // ResolveRule checks a request's documentRule against cfg's documents block,
 // before anything is reserved. It returns a *FieldError naming
 // "documentRule/<key>": an unknown folder or counter, one of the wrong kind, a
-// test counter writing to a folder that is not a test folder, or temporary on
-// a folder with no temporary prefix. A retired counter is the queue's to
+// test counter writing to a folder that is not a test folder or a production
+// counter writing to a test folder (review m10), or temporary on a folder
+// with no temporary prefix. A retired counter is the queue's to
 // refuse (only for a new number: a repeat of an order it numbered is still
 // answered).
 func ResolveRule(cfg config.Config, r DocumentRule) error {
@@ -143,6 +144,10 @@ func ResolveRule(cfg config.Config, r DocumentRule) error {
 		return &FieldError{Field: "documentRule/counter", Reason: "is a counter for " + c.Kind + ", not orders"}
 	case c.Test && !f.Test:
 		return &FieldError{Field: "documentRule/folder", Reason: "is not a test folder, and the counter is a test counter: test documents never go to a production folder"}
+	case !c.Test && f.Test:
+		// Review m10: nor a production number into a test folder — a real
+		// order the books never import, and a gap in the production series.
+		return &FieldError{Field: "documentRule/counter", Reason: "is a production counter, and the folder is a test folder: production numbers never go to a test folder"}
 	}
 	if r.Temporary && f.TempPrefix == "" {
 		return &FieldError{Field: "documentRule/temporary", Reason: "the folder has no temporary prefix ({prefix} in its name pattern)"}

@@ -392,3 +392,27 @@ func TestValidDocumentKey_RefusesWindowsDeviceNames(t *testing.T) {
 		t.Errorf("folder nul: %v", err)
 	}
 }
+
+// Review m10: receipts never go to a test folder from a production counter —
+// a receipt is a tax document, and a production number written where the
+// books never import it is a gap in the series. Today's store (the implicit
+// counter) is production too.
+func TestValidateDocuments_ProductionReceiptCounterNeverIntoATestFolder(t *testing.T) {
+	cfg := bflDocuments(t)
+	cfg.Documents.Receipts = DocumentReceiptsConfig{Folder: "herp_receipts_test", Counter: "receipts"}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "production counter receipts") {
+		t.Errorf("a production counter into a test folder: %v", err)
+	}
+	cfg.Documents.Receipts.Counter = "receipts_test"
+	if err := cfg.ValidateOrders(); err != nil {
+		t.Errorf("the test pair: %v", err)
+	}
+	// No counter configured: today's receipt store numbers them, production.
+	legacy := Config{ERP: ERPHasavshevet, Documents: DocumentsConfig{
+		Folders:  map[string]FolderConfig{"kupain_test": {Kind: DocumentKindReceipts, Path: t.TempDir(), NamePattern: "KUPAIN_{n}.doc", Test: true}},
+		Receipts: DocumentReceiptsConfig{Folder: "kupain_test"},
+	}}
+	if err := legacy.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "production counter receipts") {
+		t.Errorf("today's store into a test folder: %v", err)
+	}
+}

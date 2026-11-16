@@ -153,7 +153,8 @@ no configured counter keeps today's store under that implicit key); a
 folder path that is relative, is or holds `sendOrderDir`, or is another folder's; a test folder (or one of the other
 kind) at the pickup or receipt folder; a name pattern outside the closed grammar (`{prefix}` optional and first, an
 ASCII stem starting with a letter, `{n}`, `.doc`; no device name); `tempPrefix` without `{prefix}` or the reverse; an
-orders folder without `layout`; a test receipt counter into a production folder; a test receipt folder with a model
+orders folder without `layout`; a test receipt counter into a production folder, or a production one (today's
+store included) into a test folder (review m10: a gap in the tax-document series); a test receipt folder with a model
 (b) receipt importer. Never downgrade a box with this block below v1.0.30.
 
 ## Data directory permissions (Windows)

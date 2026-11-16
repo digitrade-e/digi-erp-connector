@@ -246,7 +246,9 @@ set by digi-mcp's signed `documents` / `counters` commands ([provisioning.md](pr
 - `documents.receipts {folder, counter}` binds receipts to a typed receipts folder (its path replaces
   `sendReceiptDir`, its name pattern `KUPAIN_{n}.doc` the receipt file's name; `KUPAIN.prm` keeps its name, the
   history copies keep `KUPAIN_<n>.doc`) and to a counter (default: the one adopting `receiptNumber`). A test counter
-  only into a test folder; a test folder never with a model (b) receipt importer.
+  only into a test folder, and a test folder only from a test counter (review m10: a production receipt number where
+  the books never import it is a gap in the tax-document series); a test folder never with a model (b) receipt
+  importer.
 - The counter's range applies: its next number outside it is `503 COUNTER_EXHAUSTED`, nothing written. Recovery is
   over the counter's range only: a receipt of another counter neither moves it nor is finished into this folder (a
   repeat of such a key answers 503 until its counter is bound again). The binding does not change while a receipt is

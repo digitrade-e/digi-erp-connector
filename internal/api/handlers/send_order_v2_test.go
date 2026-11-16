@@ -188,6 +188,7 @@ func TestSendOrderV2_Refusals(t *testing.T) {
 		{"unknown counter", `{"v":1,"folder":"herp","counter":"nope"}`, 400, "documentRule/counter"},
 		{"receipts counter", `{"v":1,"folder":"herp_test","counter":"receipts_test"}`, 400, "documentRule/counter"},
 		{"test counter into production", `{"v":1,"folder":"herp","counter":"b2b_test"}`, 400, "documentRule/folder"},
+		{"production counter into a test folder (review m10)", `{"v":1,"folder":"herp_test","counter":"b2b"}`, 400, "documentRule/counter"},
 		{"temporary without a prefix", `{"v":1,"folder":"herp_test","counter":"b2b_test","temporary":true}`, 400, "documentRule/temporary"},
 		{"retired counter", `{"v":1,"folder":"herp","counter":"old"}`, 400, "documentRule/counter"},
 	}

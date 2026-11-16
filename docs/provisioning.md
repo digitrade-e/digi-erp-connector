@@ -428,7 +428,8 @@ directory (`folder_forbidden`), and only the administrators can write to it — 
 names (`folder_writable`, plan 087 review M1: `allowWritable` accepts it over WinRM with a warning); behind the link a
 plain local path outside the system folders (link mode's rules), never `allowWritable`.
 The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
-distinct; a test folder never the pickup or receipt folder; a test counter only into a test folder; no model (b)
+distinct; a test folder never the pickup or receipt folder; a test counter only into a test folder, and a test receipt
+folder only from a test counter (review m10; a documentRule is held to the same at the route); no model (b)
 receipt importer with a test receipt folder (it would import test receipts into the books). A folder with
 unfinished orders frozen for it (reserved, or waiting for a resend) is not removed and not changed at all — path,
 kind, name pattern, temporary prefix, layout or test (`folder_in_flight`, review m5: the pattern decides the "number

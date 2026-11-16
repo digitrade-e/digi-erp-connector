@@ -351,7 +351,8 @@ name), and `/api/sendOrder` ignores the key as before. No rule = exactly today's
 Before anything is reserved (else `400 VALIDATION_ERROR`, `details.field` `documentRule/<key>`): the object's keys
 are exactly `v`, `temporary`, `folder`, `counter` (case-sensitive, each once); `v` the number `1`; `folder` an orders
 folder and `counter` an orders counter configured on the box; a **test counter only into a test folder** (a test
-number must never reach the production books); `temporary: true` only on a folder with a temporary prefix; a retired
+number must never reach the production books) and **a test folder only from a test counter** (review m10: a
+production number there is a real order the books never import, and a gap in the production series); `temporary: true` only on a folder with a temporary prefix; a retired
 counter issues nothing. The folder's layout (`official`/`legacy`) replaces `sendOrderFormat` for that order, its
 legacy-fit check included.
 

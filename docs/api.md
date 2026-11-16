@@ -86,7 +86,9 @@ Today's body plus an optional `documentRule` — which counter numbers the order
 - Strict: an unknown, duplicate or wrong-case key, a value of the wrong type (`temporary` a JSON boolean, `folder` /
   `counter` non-empty strings), `v` other than the number `1` → `400 VALIDATION_ERROR`, `details.field`
   `documentRule/<key>`. An unknown folder or counter, one of the wrong kind, a test counter into a folder that is not
-  a test folder, `temporary: true` on a folder without a temporary prefix, a retired counter → 400 the same way.
+  a test folder or a production counter into a test folder (`documentRule/counter`, review m10), `temporary: true` on
+  a folder without a temporary prefix, a retired counter → 400 the same way (for a new order: a repeat is answered by
+  its frozen rule).
   Nothing is reserved or written.
 - `202` adds `{"counter","number","fileName","folder"}`: the counter that issued the number, the number (= `jobId`),
   the file name in the folder (the folder's pattern; `temporary` applies its prefix) and the folder's key. On a

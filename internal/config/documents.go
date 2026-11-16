@@ -377,8 +377,9 @@ func DocumentFileName(pattern, tempPrefix string, temporary bool, n int64) strin
 // only), and a layout for orders.
 //
 // Receipts binding: a configured receipts folder and receipts counter; a test
-// counter only into a test folder; no model (b) importer for a test folder
-// (it would import test receipts into the books).
+// counter only into a test folder, and a test folder only from a test counter
+// (review m10); no model (b) importer for a test folder (it would import test
+// receipts into the books).
 func (c Config) ValidateDocuments() error {
 	d := c.Documents
 	if len(d.Counters) == 0 && len(d.Folders) == 0 && d.Receipts == (DocumentReceiptsConfig{}) {
@@ -556,6 +557,7 @@ func (c Config) validateReceiptsBinding() error {
 	if !c.ReceiptsConfigured() {
 		return nil
 	}
+	counterTest := false // today's receipt store, under its implicit key, is production
 	if c.CountersConfigured() {
 		k := c.ReceiptCounterKey()
 		if k == "" {
@@ -569,6 +571,15 @@ func (c Config) validateReceiptsBinding() error {
 		if ctr.Test && (folder == nil || !folder.Test) {
 			return fmt.Errorf("counter %s is a test counter: receipts numbered by it may only go to a test folder (documents.receipts.folder)", k)
 		}
+		counterTest = ctr.Test
+	}
+	// Review m10: nor a production counter into a test folder — a receipt is a
+	// tax document, and a production number written where the books never
+	// import it is a gap in the series.
+	if folder != nil && folder.Test && !counterTest {
+		return fmt.Errorf("documents.receipts.folder %s is a test folder and receipts are numbered by the production counter %s: a production receipt number "+
+			"written where the books never import it is a gap in the tax-document series — bind a test receipts counter (documents.receipts.counter)",
+			strings.TrimSpace(b.Folder), c.ReceiptCounterKey())
 	}
 	if folder != nil && folder.Test && (strings.TrimSpace(c.HasReceiptBatFile) != "" || strings.TrimSpace(c.HasReceiptParamFile) != "") {
 		return errors.New("documents.receipts.folder is a test folder and a receipt importer is configured (hasReceiptBatFile / hasReceiptParamFile): it would import test receipts into the books")

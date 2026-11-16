@@ -48,7 +48,8 @@ func NewSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool) h
 //
 // Refusals: a malformed rule (an unknown, duplicate or wrong-case key, a
 // value of the wrong type, v other than 1), an unknown folder or counter, one
-// of the wrong kind, a test counter into a production folder, temporary
+// of the wrong kind, a test counter into a production folder or a production
+// counter into a test folder (review m10), temporary
 // without a prefix, a retired counter: 400 VALIDATION_ERROR with
 // details.field documentRule/<key>, nothing written. A repeat of a historyId
 // with another rule than its first: 409 DOCUMENT_RULE_CONFLICT. The counter's
