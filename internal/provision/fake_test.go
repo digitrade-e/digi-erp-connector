@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -516,11 +517,24 @@ func handInstallSpec(sendOrderDir string) Spec {
 
 // handInstallBox is the pilot box before provisioning: its config, the sa password in the
 // store, the daemon running on that config.
+// longTempDir is t.TempDir() by its long name: the Windows CI's is C:\Users\RUNNER~1\…, an 8.3 short name link mode
+// refuses for every folder it takes, apply's sendOrderDir included (reviews m6, R4-1).
+func longTempDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	if runtime.GOOS == "windows" {
+		if long, err := filepath.EvalSymlinks(d); err == nil {
+			return long
+		}
+	}
+	return d
+}
+
 func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 	t.Helper()
 	d := newFakeDaemon(t)
 	sys := newFakeSys(t, d)
-	orders := filepath.Join(t.TempDir(), "digiorders")
+	orders := filepath.Join(longTempDir(t), "digiorders")
 	if err := os.MkdirAll(orders, 0o700); err != nil {
 		t.Fatal(err)
 	}

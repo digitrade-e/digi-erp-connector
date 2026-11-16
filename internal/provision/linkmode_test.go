@@ -167,7 +167,7 @@ func TestApplyCheckBehindTheLinkTakesALoopbackListen(t *testing.T) {
 func TestLinkModeRefusesTheReviewsBypasses(t *testing.T) {
 	t.Setenv("SystemDrive", "C:")
 	sysDirs := []string{`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`}
-	orders := filepath.Join(t.TempDir(), "orders")
+	orders := filepath.Join(longTempDir(t), "orders")
 	loop := func(s Spec) Spec { s.APIListen = "127.0.0.1:8082"; s.Firewall = nil; return s }
 	base := func() Spec { return loop(handInstallSpec(orders)) }
 	bat := func(p string) Spec { return withImporter(base(), ImporterSpec{Mode: "bat", HasBatFile: p}) }
