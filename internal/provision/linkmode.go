@@ -63,6 +63,15 @@ func (s Spec) ValidateFor(linked bool, systemDirs []string) *Refusal {
 	if r := validateImporterLinked(s.Importer, systemDirs); r != nil {
 		return r
 	}
+	// review R4-1: sendOrderDir under link mode's path rule, as the orders, receipts and documents commands take
+	// theirs — no 8.3 name, no part ending in a dot or a space, a local drive (no \\?\, no UNC)
+	if s.SendOrderDir != nil {
+		if dir := strings.TrimSpace(*s.SendOrderDir); dir != "" {
+			if why := linkPathRefusal(dir); why != "" {
+				return refuse(CodeSpecInvalid, "name sendOrderDir by its plain path on a local drive", "sendOrderDir %q: %s", dir, why)
+			}
+		}
+	}
 	if s.Options != nil {
 		if r := validateImageFoldersLinked(s.Options.ImageFolders, systemDirs, usersDirs()); r != nil {
 			return r

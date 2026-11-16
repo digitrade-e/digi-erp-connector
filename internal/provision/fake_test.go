@@ -536,6 +536,17 @@ func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 
 func (s *fakeSys) FolderRules() FolderRules { return s.folderRules }
 
+// FinalPath is the test's final path for dir (finalPath), else \\?\<dir> for a folder that exists.
+func (s *fakeSys) FinalPath(dir string) (string, error) {
+	if f, ok := s.finalPath[dir]; ok {
+		return f, nil
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return "", err
+	}
+	return `\\?\` + dir, nil
+}
+
 // ReparsePointOn is the test's answer for path, else whether path itself is
 // a link: the test's temp folder above it is the machine's (on macOS /var is
 // a symbolic link).

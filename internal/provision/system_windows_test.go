@@ -3,6 +3,7 @@
 package provision
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,5 +78,30 @@ func TestFolderRules_ThisMachine(t *testing.T) {
 		if why := documentFolderRefusal(ok, r); why != "" {
 			t.Errorf("%s refused: %s", ok, why)
 		}
+	}
+}
+
+// Review R4-1 on this machine: FinalPath reads the path Windows resolves a folder to — the CI's temp folder is
+// C:\Users\RUNNER~1\…, an 8.3 spelling, and comes back as its long name, so the judgment refuses the short one — and
+// one that does not exist says so.
+func TestWinSystem_FinalPath(t *testing.T) {
+	dir := t.TempDir()
+	long, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := winSystem{}.FinalPath(dir)
+	fp, onDrive := finalDrivePath(final)
+	if err != nil || !onDrive || !strings.EqualFold(filepath.Clean(fp), filepath.Clean(long)) {
+		t.Fatalf("FinalPath(%s) = %q (%v), want %s", dir, final, err, long)
+	}
+	t.Logf("%s resolves to %s", dir, fp)
+	if _, err := (winSystem{}).FinalPath(filepath.Join(dir, "not-yet")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a folder that does not exist: %v", err)
+	}
+	file := filepath.Join(dir, "a-file")
+	_ = os.WriteFile(file, []byte("x"), 0o600)
+	if _, err := (winSystem{}).FinalPath(file); err == nil {
+		t.Fatal("a file resolved as a folder")
 	}
 }

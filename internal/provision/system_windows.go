@@ -187,6 +187,8 @@ func (winSystem) FolderRules() FolderRules { return machineFolderRules(profilesD
 
 func (winSystem) ReparsePointOn(path string) (string, error) { return reparseAlong(path) }
 
+func (winSystem) FinalPath(dir string) (string, error) { return dataacl.FinalDirPath(dir) }
+
 func (winSystem) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
 	return dataacl.PlanLockdown(dir, trusted, execExts)
 }

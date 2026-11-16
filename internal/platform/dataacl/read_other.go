@@ -49,6 +49,15 @@ func OpenRead(root, path string) (*os.File, error) {
 	return f, nil
 }
 
+// FinalDirPath is dir, cleaned, when it is a directory and not a symlink: off Windows a path has no other spelling to
+// resolve (the Windows version reads it from a handle).
+func FinalDirPath(dir string) (string, error) {
+	if err := PlainDir(dir); err != nil {
+		return "", err
+	}
+	return filepath.Clean(dir), nil
+}
+
 // PlainDir reports an error unless path is a directory and not a symlink.
 func PlainDir(path string) error {
 	fi, err := os.Lstat(path)

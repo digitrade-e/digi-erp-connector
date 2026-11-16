@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -189,6 +190,19 @@ func (a *applier) checkSetFolderPaths() error {
 		}
 		if err := a.folderPathRefusal(f.name, tgt); err != nil {
 			return err
+		}
+		// review R4-1: a folder that exists already is judged by the path its handle resolves to, as folder-acl's —
+		// a SUBST or mapped drive, an 8.3 name, a trailing dot are what Windows makes of them; one not made yet has
+		// only its text, which link mode's path rule judged before anything was read
+		final, err := a.env.Sys.FinalPath(tgt)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return refuse(CodeFolderReparse, "run it elevated (as an administrator)", "read where %s (%s) resolves: %v", f.name, tgt, err)
+		default:
+			if err := a.finalPathRefusal(f.name, tgt, final); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
