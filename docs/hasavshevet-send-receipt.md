@@ -257,7 +257,11 @@ set by digi-mcp's signed `documents` / `counters` commands ([provisioning.md](pr
   `documents` commands refuse it otherwise (`folder_writable`; `allowWritable` over WinRM only), and behind the link a
   bound typed folder others can write to gets nothing written (`503 FOLDER_WRITABLE`, nothing reserved; Recover
   finishes no reserved receipt there) until it is locked down and the service restarted
-  ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)).
+  ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). While it is refused a request is refused
+  before the recovery's full index scan — never a re-read of every entry per request — and a repeat of a `written`
+  key is still answered from its own entry (review m2); the first request after the folder is allowed again recovers.
+  Behind the link a receipt that would run the model (b) importer is refused the same way while the importer can be
+  changed by others (`503 IMPORTER_WRITABLE`, review T1).
 
 ## Idempotency and recovery
 

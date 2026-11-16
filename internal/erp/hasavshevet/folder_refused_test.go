@@ -190,3 +190,56 @@ func TestImporterRefused_NothingRunsNothingIsReserved(t *testing.T) {
 		t.Error("a receipt number was reserved")
 	}
 }
+
+// Review m2: while the receipt folder is refused (a reserved receipt left in
+// it), a receipt is refused before the recovery's full index scan — not
+// after re-reading every entry on every request: an index entry unreadable
+// since the start changes nothing — and a repeat of a written key is still
+// answered from its own entry. Once allowed, recovery runs and finishes it.
+func TestReceiptWriter_RefusedBeforeTheRecoveryScan(t *testing.T) {
+	h := newReceiptHarness(t, 1000)
+	refused := false
+	h.cfg.FolderCheck = func() error {
+		if refused {
+			return staticRefusals{"herp": `it can be written by BUILTIN\Users`}.Allowed("herp")
+		}
+		return nil
+	}
+	w := h.writer()
+	first := mustWrite(t, w, receiptFor(testKey(1)))
+	ix := receiptIndex{dir: filepath.Join(h.dataDir, "receipts", "index")}
+	if err := ix.save(&receiptIndexEntry{Key: testKey(2), Number: first.ReceiptNumber + 1, State: receiptReserved, Request: receiptFor(testKey(2)),
+		Import: ImportNotRun, ReservedAt: "2026-11-16T10:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	writeStoreFile(t, h.storePath(), fmt.Sprintf(`{"nextReceiptNumber": %d}`, first.ReceiptNumber+2))
+	refused = true
+	w = h.writer() // the start's Recover leaves the reserved receipt: refused folder
+	// An entry that does not decode: the full scan would fail on it.
+	if err := os.WriteFile(filepath.Join(ix.dir, testKey(9)+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := w.Write(context.Background(), receiptFor(testKey(3))); !errors.Is(err, ErrFolderWritable) {
+			t.Fatalf("a new receipt while refused: %v, want ErrFolderWritable (refused before the scan)", err)
+		}
+	}
+	if _, err := w.Write(context.Background(), receiptFor(testKey(2))); !errors.Is(err, ErrFolderWritable) {
+		t.Fatalf("the reserved receipt while refused: %v", err)
+	}
+	res, err := w.Write(context.Background(), receiptFor(testKey(1)))
+	if err != nil || res.ReceiptNumber != first.ReceiptNumber || !res.Replayed {
+		t.Fatalf("a written repeat while refused: %+v, %v", res, err)
+	}
+	// Allowed again: the next receipt recovers first (the unreadable entry now stops it, as before).
+	refused = false
+	if _, err := w.Write(context.Background(), receiptFor(testKey(3))); !errors.Is(err, ErrReceiptIndexUnreadable) {
+		t.Fatalf("allowed: %v, want the scan's ErrReceiptIndexUnreadable", err)
+	}
+	if err := os.Remove(filepath.Join(ix.dir, testKey(9)+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if res := mustWrite(t, w, receiptFor(testKey(3))); res.ReceiptNumber != first.ReceiptNumber+2 || len(h.docs()) != 3 {
+		t.Fatalf("after recovery: %+v, docs %v", res, h.docs())
+	}
+}

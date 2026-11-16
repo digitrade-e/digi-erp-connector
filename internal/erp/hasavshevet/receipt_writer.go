@@ -391,7 +391,15 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 	defer unlockImport()
 
 	if !w.recovered {
-		if err := w.recoverLocked(); err != nil {
+		// Review m2: while the folder is refused, no full index scan on every
+		// request — a reserved receipt cannot be finished there anyway. A
+		// repeat of a written key is still answered from its own entry
+		// (below); anything else is refused before a number is touched.
+		if refused := w.folderRefused(); refused != nil {
+			if err := w.lockDataLocked(); err != nil {
+				return nil, err
+			}
+		} else if err := w.recoverLocked(); err != nil {
 			return nil, err
 		}
 	}
