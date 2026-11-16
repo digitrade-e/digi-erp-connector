@@ -482,17 +482,22 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
 - **Named folders only**: a typed folder's key, or the roles `sendOrderDir`, `pickup`, `sendReceiptDir`, resolved from
   `config.yaml` — never a path (`spec_invalid`); one the box does not have is `folder_unknown`; a drive's root, a system
   folder or the data directory, or a folder holding one, is `folder_forbidden`. At most 8 per run.
-- **The new DACL**: protected; SYSTEM and Administrators Full Control `(OI)(CI)`; each `documents.trustedWriters`
-  account Modify `(OI)(CI)`; every other principal that had any allow entry read & execute only `(OI)(CI)`; deny entries
-  kept (they only take rights away). The folder's owner becomes Administrators.
-- **Propagation — the bound chosen**: every entry beneath is walked **by handle** (never following anything) and made to
-  inherit exactly that — its own explicit entries dropped, an owner that is not SYSTEM, an administrator or a trusted
-  writer handed to Administrators — so an existing subfolder (`history\`, `receipts\`) or a planted file keeps no old
-  right. At most 20 000 entries (the folder included), counted before anything is written: more is `folder_too_large`
-  (move old `*.MASOFON2.BAK` files out first). A reparse point or a multiply-linked file anywhere beneath is
-  `folder_reparse`: never followed, never written through. No path-based propagation (as LocalSystem a path can be
-  redirected). **Folders above are never changed**: who can still rename the folder away through one is reported — a
-  `parent_writable:` warning and the folder's `parentWritable` (the lock-down of the folder itself still applies).
+- **A lock-down never grants anything, to anyone, on any entry** (review T2). On the folder and on every entry beneath
+  — walked **by handle**, never following anything — it masks the DACL the entry already has: an allow entry, explicit
+  or inherited, of any type, for SYSTEM, Administrators or TrustedInstaller stays as it is; one for a `trustedWriters`
+  account keeps at most Modify; one for anyone else (CREATOR OWNER and OWNER RIGHTS included) keeps at most read &
+  execute — generic rights mapped first, an entry left with nothing beyond SYNCHRONIZE dropped. Conditional, callback
+  and object entries keep their condition and type; deny entries stay; flags and order are kept. **No entry is ever
+  added**: a trusted writer with no right before keeps none, and an account that could only add files gains no read.
+  The folder's link to its parent is cut (its DACL protected, its inherited entries kept as explicit and masked the
+  same way); every other entry keeps its own protection. An owner that is not SYSTEM, an administrator or
+  TrustedInstaller is handed to Administrators.
+- **The bound**: at most 20 000 entries (the folder included), counted before anything is written: more is
+  `folder_too_large` (move old `*.MASOFON2.BAK` files out first). A reparse point or a multiply-linked file anywhere
+  beneath is `folder_reparse`: never followed, never written through. No path-based propagation (as LocalSystem a path
+  can be redirected). **Folders above are never changed**: who can still rename the folder away through one is
+  reported — a `parent_writable:` warning and the folder's `parentWritable` (the lock-down of the folder itself still
+  applies).
 - **The pre-image**, recorded before the first write: the folder's and every entry's owner and DACL (SDDL) with its file
   ID, in a protected file `DataDir\folder-acl\<sha256>.json` — the sha256 of the file's bytes, answered as the
   folder's `preimage`. Kept on the box.
@@ -501,15 +506,18 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   a stolen team key can only tighten a configured folder or put back an ACL it had. Each entry is restored only if it is
   still the same object (file ID) at the same place; the others (gone, replaced, a link now) are counted as `skipped`.
   The folder itself must be the object recorded (`folder_reparse` otherwise).
-- **`--check`** reads and writes nothing: per folder `{name, path, entries, principals: [{sid, name, before, after}],
-  parentWritable}` — every principal of the folder's DACL with its rights before and after (`full`, `modify`, `write`,
-  `read`, `special`, `none`; a deny noted), so the approval form shows who loses write access.
+- **`--check`** reads and writes nothing: per folder `{name, path, entries, entriesChanged, principals: [{sid, name,
+  before, after, entries}], owners: [{sid, name, entries}], parentWritable}` — every principal with an allow entry
+  **anywhere in the tree**, the strongest rights it has anywhere before and after (`full`, `modify`, `write`, `read`,
+  `special`, `none`) and on how many entries they change (review T4), the owners handed to Administrators, and how many
+  entries change: the approval form shows exactly who loses write — at BFL, the legacy PHP site's account if it writes
+  into the folder.
 - **Unfinished work**: `folder_in_flight` (as the `documents` command) — orders frozen for a typed folder, rule-less
   orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
   unless `acceptUnreadable` names their number.
 - **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
-- The answer: `folderAcl: {op, folders: [{name, path, entries, principals?, parentWritable?, preimage?, written?,
-  restored?, skipped?}]}`.
+- The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, parentWritable?,
+  preimage?, written?, restored?, skipped?}]}`.
 
 ## `restore` and pre-images without files
 

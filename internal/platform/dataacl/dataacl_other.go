@@ -26,7 +26,7 @@ func FolderWriters(string) ([]Writer, error) { return []Writer{}, nil }
 
 // PlanLockdown, ApplyLockdown and RestoreFolder are Windows' (plan 087 review
 // R1c): off Windows there is no DACL to lock down.
-func PlanLockdown(string, []string) (LockdownPlan, error) {
+func PlanLockdown(string, []string, map[string]bool) (LockdownPlan, error) {
 	return LockdownPlan{}, errors.New("dataacl: a lock-down is Windows-only")
 }
 

@@ -160,13 +160,15 @@ with the accounts, and:
 
 **Lock a folder down — the command** (plan 087 review R1c): digi-mcp sends `folder-acl` with `op: lockdown` and the
 folder's name (a typed folder's key, or `sendOrderDir` / `pickup` / `sendReceiptDir`); `folder-acl-check` first shows
-every principal's rights before and after. It records the previous ACLs on the box (`preimage`, for `op: restore`),
-writes the lock-down below by handle to the folder and everything in it, and restarts the service. Name the ERP's
-scheduler account in `documents`' `trustedWriters` **before** the lock-down: a trusted writer keeps Modify. Folders
-above it are never changed — `parentWritable` says who could still rename the folder away through one.
+every principal's strongest rights anywhere in the folder before and after. It records the previous ACLs on the box
+(`preimage`, for `op: restore`), masks the folder's and every entry's DACL by handle — it **never grants**: SYSTEM,
+Administrators and TrustedInstaller keep theirs, a trusted writer keeps at most Modify of what it had, everyone else at
+most read & execute (review T2) — and restarts the service. Name the ERP's scheduler account in `documents`'
+`trustedWriters` **before** the lock-down, or it too drops to read & execute. Folders above it are never changed —
+`parentWritable` says who could still rename the folder away through one.
 
-**Lock a folder down by hand** (background — what the command does, for a box without the link; an elevated prompt;
-the path is an example):
+**Lock a folder down by hand** (background, for a box without the link: a stricter, simpler recipe than the command's
+masking — it replaces the folder's DACL instead of lowering it; an elevated prompt; the path is an example):
 
 ```bat
 icacls "C:\xampp\htdocs\herp" /setowner "*S-1-5-32-544"

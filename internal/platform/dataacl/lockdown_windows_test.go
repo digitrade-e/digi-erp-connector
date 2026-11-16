@@ -42,12 +42,13 @@ func principal(plan LockdownPlan, sid string) (PrincipalRights, bool) {
 	return PrincipalRights{}, false
 }
 
-// Plan 087 review R1c: a lock-down gives the folder a protected DACL —
-// SYSTEM and Administrators full, the trusted writer modify, Users (who could
-// add files) read & execute — and Administrators as its owner; every entry
-// beneath inherits exactly that (a subfolder's own Everyone entry is
-// dropped); and the recorded pre-image puts every entry back as it was.
-func TestLockdown_LocksDownAndRestores(t *testing.T) {
+// Plan 087 review T2: a lock-down masks the DACLs already there and grants
+// nothing — Users (could add files) end with read & execute; a subfolder
+// keeps its own protected DACL, its Everyone Full capped at read & execute;
+// the trusted account, which had nothing, gets nothing; the check output
+// counts what changes beneath the folder too; and the recorded pre-image
+// puts every entry back as it was.
+func TestLockdown_MasksAndRestores(t *testing.T) {
 	herp := filepath.Join(longTemp(t), "herp")
 	sub := filepath.Join(herp, "sub")
 	mkfile(t, filepath.Join(herp, "b.txt"))
@@ -62,46 +63,50 @@ func TestLockdown_LocksDownAndRestores(t *testing.T) {
 	me := currentUserSID(t)
 	users := wellKnownName(t, windows.WinBuiltinUsersSid)
 
-	plan, err := PlanLockdown(herp, []string{me})
+	plan, err := PlanLockdown(herp, []string{me}, map[string]bool{".dll": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Entries) != 4 || plan.Entries[0].Rel != "" {
-		t.Fatalf("entries %+v", plan.Entries)
+	if len(plan.Entries) != 4 || plan.Entries[0].Rel != "" || len(plan.Executables) != 0 || !strings.HasSuffix(strings.ToLower(plan.FinalPath), `\herp`) {
+		t.Fatalf("plan %+v", plan)
 	}
 	for _, p := range paths { // the plan wrote nothing
 		if got := ownerAndDACL(t, p); got != before[p] {
 			t.Fatalf("the plan changed %s", p)
 		}
 	}
-	if p, ok := principal(plan, "S-1-5-32-545"); !ok || p.Before != "write" || p.After != "read" {
+	if p, ok := principal(plan, "S-1-5-32-545"); !ok || p.Before != "write" || p.After != "read" || p.Entries < 1 {
 		t.Errorf("Users %+v (%v): want write → read", p, ok)
 	}
-	if p, ok := principal(plan, me); !ok || p.After != "modify" {
-		t.Errorf("the trusted writer %+v (%v): want modify", p, ok)
+	if p, ok := principal(plan, "S-1-1-0"); !ok || p.Before != "full" || p.After != "read" || p.Entries != 2 {
+		t.Errorf("Everyone %+v (%v): want full → read on the subfolder and its file (2 entries)", p, ok)
 	}
-	if p, ok := principal(plan, SIDLocalSystem); !ok || p.After != "full" {
-		t.Errorf("SYSTEM %+v", p)
+	if _, ok := principal(plan, me); ok {
+		t.Errorf("the trusted account, which had no entry, shows: %+v", plan.Principals)
+	}
+	if plan.EntriesChanged != 4 {
+		t.Errorf("entriesChanged %d, want 4", plan.EntriesChanged)
 	}
 
 	n, err := ApplyLockdown(herp, []string{me}, plan)
 	if err != nil || n != 4 {
 		t.Fatalf("ApplyLockdown = %d, %v", n, err)
 	}
-	if _, ctl := daclOf(t, herp); ctl&windows.SE_DACL_PROTECTED == 0 {
-		t.Error("the folder's DACL is not protected")
-	}
-	if o := ownerOf(t, herp); o != SIDAdministrators {
-		t.Errorf("the folder's owner is %s", o)
-	}
 	for _, p := range []string{herp, sub} {
+		d, ctl := daclOf(t, p)
+		if ctl&windows.SE_DACL_PROTECTED == 0 {
+			t.Errorf("%s: its DACL is no longer protected", p)
+		}
+		if strings.Contains(d, me) {
+			t.Errorf("%s: an entry was added for the trusted account: %s", p, d)
+		}
 		who, err := FolderWriters(p)
 		if err != nil || slices.Contains(names(who), users) || slices.ContainsFunc(who, func(w Writer) bool { return w.SID == "S-1-1-0" }) {
 			t.Errorf("%s after the lock-down: writers %+v, %v", p, who, err)
 		}
 	}
-	if d, _ := daclOf(t, sub); strings.Contains(d, ";;;WD)") && !strings.Contains(d, "0x1200a9;;;WD)") {
-		t.Errorf("the subfolder kept its own Everyone entry: %s", d)
+	if d, _ := daclOf(t, sub); !strings.Contains(d, "0x1200a9;;;WD)") {
+		t.Errorf("the subfolder's Everyone entry is not read & execute: %s", d)
 	}
 
 	restored, skipped, err := RestoreFolder(herp, plan.Entries)
@@ -124,6 +129,52 @@ func ownerPart(sddl string) string {
 	return sddl
 }
 
+// Review T2 on a real folder: a principal that could only add files gains no
+// read, a conditional entry stays conditional, and the folder's inherited
+// entries become explicit (its link to the parent cut).
+func TestLockdown_GrantsNothing(t *testing.T) {
+	top := filepath.Join(longTemp(t), "xampp")
+	herp := filepath.Join(top, "herp")
+	mkfile(t, filepath.Join(herp, "kupain.doc"))
+	setDACL(t, top, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x2;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, herp, "D:(XA;OICI;0x1301bf;;;WD;(Member_of {SID(BA)}))", 0) // inherits top's entries
+	plan, err := PlanLockdown(herp, []string{"S-1-5-21-1-2-3-1105"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyLockdown(herp, []string{"S-1-5-21-1-2-3-1105"}, plan); err != nil {
+		t.Fatal(err)
+	}
+	d, ctl := daclOf(t, herp)
+	if ctl&windows.SE_DACL_PROTECTED == 0 || strings.Contains(d, "ID;") {
+		t.Errorf("the folder is still linked to its parent: %s", d)
+	}
+	if strings.Contains(d, ";;;BU)") {
+		t.Errorf("Users, who could only add files, kept an entry (they would gain read): %s", d)
+	}
+	if !strings.Contains(d, "XA;") || !strings.Contains(d, "0x1200a9;;;WD;(") {
+		t.Errorf("the conditional entry is not a conditional read & execute: %s", d)
+	}
+	if strings.Contains(d, "S-1-5-21-1-2-3-1105") {
+		t.Errorf("an entry was added for the trusted writer: %s", d)
+	}
+}
+
+// Review T1: the plan names the files a lock-down must not take (executables).
+func TestLockdown_NamesExecutables(t *testing.T) {
+	herp := filepath.Join(longTemp(t), "herp")
+	mkfile(t, filepath.Join(herp, "IMOVEIN_1.doc"))
+	mkfile(t, filepath.Join(herp, "site.php"))
+	mkfile(t, filepath.Join(herp, "lib", "wtsapi32.DLL"))
+	plan, err := PlanLockdown(herp, nil, map[string]bool{".dll": true, ".exe": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Executables) != 1 || !strings.EqualFold(plan.Executables[0], filepath.Join("lib", "wtsapi32.DLL")) {
+		t.Errorf("executables %v", plan.Executables)
+	}
+}
+
 // A reparse point anywhere beneath refuses the lock-down before anything is
 // written — its target is never touched; and a lock-down walks a bounded
 // tree.
@@ -134,13 +185,13 @@ func TestLockdown_RefusesAJunctionAndTooManyEntries(t *testing.T) {
 	mkfile(t, filepath.Join(herp, "a.txt"))
 	mklinkJ(t, filepath.Join(herp, "zz-link"), target)
 	beforeTarget, beforeHerp := ownerAndDACL(t, target), ownerAndDACL(t, herp)
-	if _, err := PlanLockdown(herp, nil); !errors.Is(err, ErrReparsePoint) {
+	if _, err := PlanLockdown(herp, nil, nil); !errors.Is(err, ErrReparsePoint) {
 		t.Fatalf("a junction inside: %v, want ErrReparsePoint", err)
 	}
 	if ownerAndDACL(t, target) != beforeTarget || ownerAndDACL(t, herp) != beforeHerp {
 		t.Fatal("a refused plan changed something")
 	}
-	if _, err := PlanLockdown(filepath.Join(herp, "zz-link"), nil); !errors.Is(err, ErrReparsePoint) {
+	if _, err := PlanLockdown(filepath.Join(herp, "zz-link"), nil, nil); !errors.Is(err, ErrReparsePoint) {
 		t.Fatalf("the folder itself a junction: %v, want ErrReparsePoint", err)
 	}
 	if err := os.Remove(filepath.Join(herp, "zz-link")); err != nil {
@@ -153,7 +204,7 @@ func TestLockdown_RefusesAJunctionAndTooManyEntries(t *testing.T) {
 	for _, n := range []string{"b.txt", "c.txt", "d.txt"} {
 		mkfile(t, filepath.Join(herp, n))
 	}
-	if _, err := PlanLockdown(herp, nil); !errors.Is(err, ErrTooManyEntries) {
+	if _, err := PlanLockdown(herp, nil, nil); !errors.Is(err, ErrTooManyEntries) {
 		t.Fatalf("five entries with a bound of three: %v, want ErrTooManyEntries", err)
 	}
 }
@@ -167,7 +218,7 @@ func TestLockdown_ReportsParentWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 	setDACL(t, top, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;0x1200a9;;;BU)(A;;0x40;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	plan, err := PlanLockdown(herp, nil)
+	plan, err := PlanLockdown(herp, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

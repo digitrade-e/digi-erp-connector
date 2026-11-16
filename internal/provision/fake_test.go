@@ -109,6 +109,10 @@ type fakeSys struct {
 	folderSD      map[string]string
 	lockdownErr   map[string]error
 	parentWriters map[string][]dataacl.Writer
+	executables   map[string][]string // the plan's executable entries, by folder
+	finalPath     map[string]string   // the plan's final path, by folder (default \\?\<dir>)
+	lastExecExts  map[string]bool     // what the last plan was asked to flag
+	lastTrusted   []string            // and whom it trusted
 	daemon        *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
@@ -278,8 +282,9 @@ func (s *fakeSys) sidOf(name string) string {
 
 // The folder-acl fakes: a folder's security is one SDDL string; a lock-down
 // replaces it (and clears its writers), a restore puts the recorded one back.
-func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string) (dataacl.LockdownPlan, error) {
+func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
 	s.call("plan-lockdown:" + filepath.Base(dir))
+	s.lastExecExts, s.lastTrusted = execExts, trusted
 	if err := s.lockdownErr[dir]; err != nil {
 		return dataacl.LockdownPlan{}, err
 	}
@@ -287,12 +292,14 @@ func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string) (dataacl.Lock
 	if cur == "" {
 		cur = "O:S-1-5-21-0-0-0-1001D:AI(A;OICIID;0x1301bf;;;BU)"
 	}
-	plan := dataacl.LockdownPlan{Entries: []dataacl.FolderEntry{{Rel: "", FileID: "id-" + dir, SDDL: cur}, {Rel: "history", FileID: "id-h", SDDL: cur}},
-		Principals:    []dataacl.PrincipalRights{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`, Before: "modify", After: "read"}},
-		ParentWriters: s.parentWriters[dir], FolderDACL: "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"}
-	for _, t := range trusted {
-		plan.Principals = append(plan.Principals, dataacl.PrincipalRights{SID: t, Name: t, Before: "modify", After: "modify"})
+	final := s.finalPath[dir]
+	if final == "" {
+		final = `\\?\` + dir
 	}
+	plan := dataacl.LockdownPlan{Entries: []dataacl.FolderEntry{{Rel: "", FileID: "id-" + dir, SDDL: cur}, {Rel: "history", FileID: "id-h", SDDL: cur}},
+		Principals:     []dataacl.PrincipalRights{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`, Before: "modify", After: "read", Entries: 2}},
+		Owners:         []dataacl.OwnerChange{{SID: "S-1-5-21-0-0-0-1001", Name: `BFL\olduser`, Entries: 1}},
+		EntriesChanged: 2, Executables: s.executables[dir], FinalPath: final, ParentWriters: s.parentWriters[dir]}
 	return plan, nil
 }
 

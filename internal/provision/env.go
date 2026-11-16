@@ -60,7 +60,7 @@ type System interface {
 	// PlanFolderLockdown, ApplyFolderLockdown and RestoreFolderACL are the
 	// folder-acl command's (dataacl; review R1c): read what a lock-down of a
 	// folder would do, write it, put a recorded pre-image back.
-	PlanFolderLockdown(dir string, trusted []string) (dataacl.LockdownPlan, error)
+	PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error)
 	ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error)
 	RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (restored, skipped int, err error)
 }

@@ -2,23 +2,26 @@ package dataacl
 
 import "errors"
 
-// Plan 087 review R1c: locking down a folder the connector writes documents
-// into, so digi-mcp can do it through a signed command instead of a human
-// running icacls on the box.
+// Plan 087 review R1c, T2: locking down a folder the connector writes
+// documents into, so digi-mcp can do it through a signed command instead of
+// a human running icacls on the box.
 //
-// The folder gets a protected DACL — SYSTEM and Administrators Full Control,
-// each trusted writer Modify, every other principal that had an allow entry
-// read & execute only, each inherited by files and folders (OI)(CI); its deny
-// entries are kept (they only take rights away) — and Administrators as its
-// owner. Propagation (the bound chosen): every entry beneath, walked by
-// handle up to MaxLockdownEntries, is made to inherit exactly that — its own
-// explicit entries dropped, its owner handed to Administrators when it is
-// not a trusted one — so an existing subfolder (history\, receipts\) or a
-// planted file cannot keep its old rights. A folder holding more entries is
-// refused before anything is written, as is any reparse point or
-// multiply-linked file beneath it: never followed, never rewritten through.
-// No path-based propagation (MARTA) is used: as LocalSystem a path can be
-// redirected. Folders above are never changed.
+// A lock-down never grants anything, to anyone, on any entry (T2): on the
+// folder and on every entry beneath, walked by handle up to
+// MaxLockdownEntries, it masks the DACL the entry already has (MaskDACL) —
+// SYSTEM, Administrators and TrustedInstaller unchanged, a trusted writer
+// capped at Modify, anyone else at read & execute, generic rights mapped
+// first, an entry left with nothing dropped, deny entries and every entry's
+// type, condition and flags kept — and adds no entry, so a trusted writer
+// with no right before keeps none. The folder's link to its parent is cut:
+// its DACL is protected, its inherited entries kept as explicit (masked the
+// same way); every other entry keeps its own protection. An owner that is not
+// trusted (SYSTEM, an administrator, TrustedInstaller) is handed to
+// Administrators. A folder holding more entries, or any reparse point or
+// multiply-linked file beneath, is refused before anything is written —
+// never followed, never rewritten through. No path-based propagation (MARTA)
+// is used: as LocalSystem a path can be redirected. Folders above are never
+// changed.
 
 // MaxLockdownEntries bounds a lock-down: the folder and every entry beneath.
 const MaxLockdownEntries = 20000
@@ -36,26 +39,40 @@ type FolderEntry struct {
 	SDDL   string `json:"sddl"`
 }
 
-// PrincipalRights is one principal of the folder's own DACL before and after
-// a lock-down: "full", "modify", "write", "read", "special" or "none", with
-// "deny …" appended where a deny entry names it.
+// PrincipalRights is one principal with an allow entry anywhere in the tree
+// (review T4): the strongest rights it has anywhere before and after the
+// lock-down ("full", "modify", "write", "read", "special", "none") and on how
+// many entries they change — so the approval form shows exactly who loses
+// write, beneath the folder too.
 type PrincipalRights struct {
-	SID    string `json:"sid"`
-	Name   string `json:"name"`
-	Before string `json:"before"`
-	After  string `json:"after"`
+	SID     string `json:"sid"`
+	Name    string `json:"name"`
+	Before  string `json:"before"`
+	After   string `json:"after"`
+	Entries int    `json:"entries"`
+}
+
+// OwnerChange is an owner a lock-down hands to Administrators, and on how
+// many entries.
+type OwnerChange struct {
+	SID     string `json:"sid"`
+	Name    string `json:"name"`
+	Entries int    `json:"entries"`
 }
 
 // LockdownPlan is what a lock-down of a folder would do, read and nothing
 // written: the security of the folder and of every entry beneath (the
-// pre-image a restore puts back), the folder's principals before and after,
-// the accounts that can still rename the folder away through a folder above
-// (they keep that right: parents are never changed), and the new DACLs.
+// pre-image a restore puts back), every principal's rights before and after,
+// the owners handed over, how many entries change, the files whose extension
+// is executable (review T1), the folder's final path as Windows resolves it
+// (review T3), and the accounts that can still rename the folder away
+// through a folder above (parents are never changed).
 type LockdownPlan struct {
-	Entries       []FolderEntry     `json:"entries"`
-	Principals    []PrincipalRights `json:"principals"`
-	ParentWriters []Writer          `json:"parentWriters"`
-	FolderDACL    string            `json:"folderDacl"`
-	FileDACL      string            `json:"fileDacl"`
-	DirDACL       string            `json:"dirDacl"`
+	Entries        []FolderEntry     `json:"entries"`
+	Principals     []PrincipalRights `json:"principals"`
+	Owners         []OwnerChange     `json:"owners"`
+	EntriesChanged int               `json:"entriesChanged"`
+	Executables    []string          `json:"executables"`
+	FinalPath      string            `json:"finalPath"`
+	ParentWriters  []Writer          `json:"parentWriters"`
 }

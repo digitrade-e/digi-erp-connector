@@ -51,8 +51,8 @@ func TestFolderACL_LockdownAndRestore(t *testing.T) {
 		t.Fatalf("--check: %+v %v", chk, err)
 	}
 	h := chk.FolderACL.Folders[0]
-	if h.Name != "herp" || h.Path != herp || h.Entries != 2 || len(h.Principals) == 0 || h.Principals[0].After != "read" ||
-		!slices.Equal(h.ParentWritable, []string{usersWrite}) || h.Preimage != "" {
+	if h.Name != "herp" || h.Path != herp || h.Entries != 2 || h.EntriesChanged != 2 || len(h.Principals) == 0 || h.Principals[0].After != "read" ||
+		h.Principals[0].Entries != 2 || len(h.Owners) != 1 || !slices.Equal(h.ParentWritable, []string{usersWrite}) || h.Preimage != "" {
 		t.Errorf("--check herp %+v", h)
 	}
 	if !warned(chk, "parent_writable: herp") {

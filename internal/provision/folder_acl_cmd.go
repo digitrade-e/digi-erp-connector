@@ -27,13 +27,14 @@ import (
 //
 //   - op lockdown, for named folders only: a typed folder's key, or the roles
 //     sendOrderDir, pickup and sendReceiptDir, resolved from config.yaml —
-//     never a path. The folder gets a protected DACL (SYSTEM and
-//     Administrators Full, documents.trustedWriters Modify, every other
-//     principal that had an allow entry read & execute, all (OI)(CI); deny
-//     entries kept) and Administrators as its owner, and every entry beneath
-//     is made to inherit it (dataacl: by handle, at most
-//     dataacl.MaxLockdownEntries entries, no reparse point or hard link
-//     anywhere beneath). Parents are never changed: who can still rename the
+//     never a path. A lock-down never grants anything, to anyone, on any
+//     entry (review T2): the folder's and every entry's DACL beneath (by
+//     handle, at most dataacl.MaxLockdownEntries entries, no reparse point or
+//     hard link anywhere beneath) is masked in place — SYSTEM,
+//     Administrators and TrustedInstaller unchanged, a documents.trustedWriters
+//     account capped at Modify, anyone else at read & execute, no entry
+//     added — the folder cut from its parent, and an untrusted owner handed
+//     to Administrators. Parents are never changed: who can still rename the
 //     folder away through one is reported (parent_writable).
 //   - Before anything is written the previous owner and DACL of the folder
 //     and of every entry beneath are recorded in a protected file,
@@ -43,8 +44,10 @@ import (
 //     recorded for that folder at its configured path, never an SDDL: a
 //     stolen team key can only tighten a configured folder or put back an
 //     ACL it had before.
-//   - --check reads and writes nothing: per folder, every principal of its
-//     DACL with its rights before and after.
+//   - --check reads and writes nothing: per folder, every principal with an
+//     allow entry anywhere in the tree, the strongest rights it has anywhere
+//     before and after and on how many entries they change (review T4), the
+//     owners handed to Administrators, and how many entries change.
 //   - Refused: a reparse point or hard link (folder_reparse), more entries
 //     than the bound (folder_too_large), unfinished work in the folder
 //     (folder_in_flight, as the documents command), the data directory or a
@@ -93,8 +96,14 @@ type FolderACLFolder struct {
 	// Entries: the folder and every entry beneath (lockdown: found; restore:
 	// recorded).
 	Entries int `json:"entries"`
-	// Principals (lockdown) are the folder's DACL principals, before → after.
+	// EntriesChanged (lockdown) is how many entries' DACL or owner changes.
+	EntriesChanged int `json:"entriesChanged,omitempty"`
+	// Principals (lockdown) are every principal with an allow entry anywhere
+	// in the tree: the strongest rights it has anywhere before → after, and
+	// on how many entries they change (review T2/T4).
 	Principals []dataacl.PrincipalRights `json:"principals,omitempty"`
+	// Owners (lockdown) are the owners handed to Administrators, by entries.
+	Owners []dataacl.OwnerChange `json:"owners,omitempty"`
 	// ParentWritable (lockdown) names who can still rename the folder away
 	// through a folder above (parents are never changed).
 	ParentWritable []string `json:"parentWritable,omitempty"`
@@ -318,12 +327,13 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 	}
 	plans := make([]dataacl.LockdownPlan, len(in.Folders))
 	for i, n := range in.Folders {
-		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trusted)
+		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trusted, nil)
 		if err != nil {
 			return lockdownRefusal(n, paths[n], err)
 		}
 		plans[i] = plan
-		out := FolderACLFolder{Name: n, Path: paths[n], Entries: len(plan.Entries), Principals: plan.Principals}
+		out := FolderACLFolder{Name: n, Path: paths[n], Entries: len(plan.Entries), EntriesChanged: plan.EntriesChanged,
+			Principals: plan.Principals, Owners: plan.Owners}
 		for _, w := range plan.ParentWriters {
 			out.ParentWritable = append(out.ParentWritable, w.Name)
 		}

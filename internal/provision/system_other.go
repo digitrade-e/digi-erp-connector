@@ -51,7 +51,7 @@ func (otherSystem) Service(string) (autostart.ServiceInfo, error) {
 	return autostart.ServiceInfo{}, errUnsupported
 }
 
-func (otherSystem) PlanFolderLockdown(string, []string) (dataacl.LockdownPlan, error) {
+func (otherSystem) PlanFolderLockdown(string, []string, map[string]bool) (dataacl.LockdownPlan, error) {
 	return dataacl.LockdownPlan{}, errUnsupported
 }
 func (otherSystem) ApplyFolderLockdown(string, []string, dataacl.LockdownPlan) (int, error) {

@@ -3,21 +3,17 @@
 package dataacl
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-)
-
-// The rights a lock-down grants (icacls' M and RX).
-const (
-	maskModify      = 0x1301bf // FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE
-	maskReadExecute = 0x1200a9 // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
 )
 
 // lockdownLimit is MaxLockdownEntries; tests lower it.
@@ -110,153 +106,49 @@ func walkFolder(dir, rootFinal string, visit func(path, rel string, n node) erro
 	return walk(dir, "")
 }
 
-// lockdownACLs computes the lock-down's DACLs from the folder's current one:
-// the folder's (protected), and what its files and folders inherit.
-type lockdownACLs struct {
-	folder, file, dir string
-	principals        []PrincipalRights
-}
-
-func buildLockdown(sd *windows.SECURITY_DESCRIPTOR, trusted []string) (lockdownACLs, error) {
+// daclBytes is an SD's DACL as raw bytes; a NULL DACL (every right to
+// everyone) comes back as the explicit DACL it amounts to — SYSTEM and
+// Administrators Full, Everyone Full — so masking it lowers Everyone and
+// grants no one anything new.
+func daclBytes(sd *windows.SECURITY_DESCRIPTOR) ([]byte, error) {
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return lockdownACLs{}, err
+		return nil, err
 	}
-	type rights struct {
-		allow, deny       uint32
-		allowed, isDenied bool
-	}
-	per := map[string]*rights{}
-	var order []string
-	get := func(sid string) *rights {
-		if r, ok := per[sid]; ok {
-			return r
+	if dacl == nil {
+		nsd, err := windows.SecurityDescriptorFromString("D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;WD)")
+		if err != nil {
+			return nil, err
 		}
-		per[sid] = &rights{}
-		order = append(order, sid)
-		return per[sid]
-	}
-	type denyACE struct {
-		sid  string
-		mask uint32
-	}
-	var denies []denyACE
-	seenDeny := map[denyACE]bool{}
-	if dacl == nil { // no DACL: every right to everyone
-		r := get("S-1-1-0")
-		r.allowed, r.allow = true, windows.GENERIC_ALL
-	} else {
-		for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-			var ace *windows.ACCESS_ALLOWED_ACE
-			if err := windows.GetAce(dacl, i, &ace); err != nil {
-				return lockdownACLs{}, fmt.Errorf("entry %d: %w", i, err)
-			}
-			effective := ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0
-			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
-				sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
-				d := denyACE{sid, uint32(ace.Mask)}
-				if !seenDeny[d] {
-					seenDeny[d] = true
-					denies = append(denies, d)
-				}
-				r := get(sid)
-				r.isDenied = true
-				if effective {
-					r.deny |= uint32(ace.Mask)
-				}
-				continue
-			}
-			s, err := allowedSID(ace)
-			if err != nil {
-				return lockdownACLs{}, fmt.Errorf("entry %d: %w", i, err)
-			}
-			if s == nil {
-				continue // audit, label, …
-			}
-			r := get(s.String())
-			r.allowed = true
-			if effective {
-				r.allow |= uint32(ace.Mask)
-			}
+		if dacl, _, err = nsd.DACL(); err != nil {
+			return nil, err
 		}
 	}
-	trustedSet := map[string]bool{}
-	var trustedOrder []string
-	for _, s := range trusted {
-		if !trustedSet[s] && s != SIDLocalSystem && s != SIDAdministrators {
-			trustedSet[s] = true
-			trustedOrder = append(trustedOrder, s)
-		}
-	}
-	var others []string
-	for _, s := range order {
-		if per[s].allowed && s != SIDLocalSystem && s != SIDAdministrators && !trustedSet[s] {
-			others = append(others, s)
-		}
-	}
-	build := func(prefix, flags string) string {
-		var b strings.Builder
-		b.WriteString(prefix)
-		for _, d := range denies {
-			fmt.Fprintf(&b, "(D;%s;0x%x;;;%s)", flags, d.mask, d.sid)
-		}
-		fmt.Fprintf(&b, "(A;%s;FA;;;%s)(A;%s;FA;;;%s)", flags, SIDLocalSystem, flags, SIDAdministrators)
-		for _, s := range trustedOrder {
-			fmt.Fprintf(&b, "(A;%s;0x%x;;;%s)", flags, maskModify, s)
-		}
-		for _, s := range others {
-			fmt.Fprintf(&b, "(A;%s;0x%x;;;%s)", flags, maskReadExecute, s)
-		}
-		return b.String()
-	}
-	out := lockdownACLs{folder: build("D:PAI", "OICI"), file: build("D:AI", "ID"), dir: build("D:AI", "OICIID")}
-
-	after := map[string]uint32{SIDLocalSystem: windows.GENERIC_ALL, SIDAdministrators: windows.GENERIC_ALL}
-	for _, s := range trustedOrder {
-		after[s] = maskModify
-	}
-	for _, s := range others {
-		after[s] = maskReadExecute
-	}
-	names := append([]string{SIDLocalSystem, SIDAdministrators}, trustedOrder...)
-	for _, s := range order {
-		if s != SIDLocalSystem && s != SIDAdministrators && !trustedSet[s] {
-			names = append(names, s)
-		}
-	}
-	for _, s := range names {
-		r := per[s]
-		var before uint32
-		denied, deny := false, uint32(0)
-		if r != nil {
-			before, denied, deny = r.allow, r.isDenied, r.deny
-		}
-		p := PrincipalRights{SID: s, Name: sidName(s), Before: rightsWord(before), After: rightsWord(after[s])}
-		if denied {
-			p.Before += " (deny " + rightsWord(deny) + ")"
-			p.After += " (deny " + rightsWord(deny) + ")"
-		}
-		out.principals = append(out.principals, p)
-	}
-	return out, nil
+	head := unsafe.Slice((*byte)(unsafe.Pointer(dacl)), aclHeaderSize)
+	size := int(binary.LittleEndian.Uint16(head[2:])) // AclSize (unexported in x/sys)
+	return append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(dacl)), size)...), nil
 }
 
-// rightsWord says what a mask lets its holder do with a folder.
-func rightsWord(mask uint32) string {
-	const fullAccess = 0x1f01ff
-	switch {
-	case mask == 0:
-		return "none"
-	case mask&windows.GENERIC_ALL != 0 || mask&fullAccess == fullAccess:
-		return "full"
-	case mask&windows.DELETE != 0 && (mask&windows.FILE_WRITE_DATA != 0 || mask&windows.GENERIC_WRITE != 0):
-		return "modify"
-	case mask&(dirWrite|windows.DELETE) != 0:
-		return "write"
-	case mask&(windows.FILE_READ_DATA|windows.FILE_EXECUTE|windows.GENERIC_READ|windows.GENERIC_EXECUTE) != 0:
-		return "read"
+// writeDACL sets a raw DACL through the handle, protected or not; no
+// propagation.
+func writeDACL(path string, h windows.Handle, acl []byte, protected bool) error {
+	sd, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return err
 	}
-	return "special"
+	if err := sd.SetDACL((*windows.ACL)(unsafe.Pointer(&acl[0])), true, false); err != nil {
+		return err
+	}
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+	if protected {
+		info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+	}
+	err = windows.SetKernelObjectSecurity(h, info, sd)
+	runtime.KeepAlive(acl)
+	if err != nil {
+		return fmt.Errorf("dataacl: set the DACL of %s: %w", path, err)
+	}
+	return nil
 }
 
 // sidName is a SID string's account name, or the SID.
@@ -268,13 +160,134 @@ func sidName(s string) string {
 	return accountName(sid)
 }
 
-// PlanLockdown reads what a lock-down of dir would do, writing nothing: the
-// security of dir and every entry beneath (refusing a reparse point or a
-// multiply-linked file anywhere, and more than MaxLockdownEntries entries),
-// the folder's principals before and after, and who can still rename dir
-// away through a folder above (trusted SIDs left out).
-func PlanLockdown(dir string, trusted []string) (LockdownPlan, error) {
+// lockdownEntry is one entry as the lock-down would leave it.
+type lockdownEntry struct {
+	before, after []byte
+	owner         string
+	ownerTrusted  bool
+	protected     bool
+	changed       bool
+}
+
+// planEntry reads an opened entry and masks its DACL (root: the folder,
+// whose link to its parent is cut).
+func planEntry(path string, n node, trusted map[string]bool, t *trust, root bool) (lockdownEntry, *windows.SECURITY_DESCRIPTOR, error) {
+	sd, err := readSD(path, n)
+	if err != nil {
+		return lockdownEntry{}, nil, err
+	}
+	before, err := daclBytes(sd)
+	if err != nil {
+		return lockdownEntry{}, nil, fmt.Errorf("dataacl: read the DACL of %s: %w", path, err)
+	}
+	after, changed, err := MaskDACL(before, trusted, root)
+	if err != nil {
+		return lockdownEntry{}, nil, fmt.Errorf("dataacl: the DACL of %s: %w", path, err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return lockdownEntry{}, nil, fmt.Errorf("dataacl: read the owner of %s: %w", path, err)
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return lockdownEntry{}, nil, err
+	}
+	e := lockdownEntry{before: before, after: after, owner: owner.String(), protected: control&windows.SE_DACL_PROTECTED != 0}
+	e.ownerTrusted, _ = trustedOwner(e.owner, t.tokenUser, t.admins, t.indirectFn)
+	e.changed = changed || !e.ownerTrusted || (root && !e.protected)
+	return e, sd, nil
+}
+
+// summary gathers what a lock-down takes from whom, across the tree.
+type summary struct {
+	order       []string
+	before      map[string]uint32
+	after       map[string]uint32
+	entries     map[string]int
+	owners      map[string]int
+	ownersOrder []string
+	changed     int
+}
+
+func newSummary() *summary {
+	return &summary{before: map[string]uint32{}, after: map[string]uint32{}, entries: map[string]int{}, owners: map[string]int{}}
+}
+
+func (s *summary) add(e lockdownEntry) {
+	if e.changed {
+		s.changed++
+	}
+	if !e.ownerTrusted {
+		if _, ok := s.owners[e.owner]; !ok {
+			s.ownersOrder = append(s.ownersOrder, e.owner)
+		}
+		s.owners[e.owner]++
+	}
+	b, err1 := ParseACL(e.before)
+	a, err2 := ParseACL(e.after)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, ace := range b {
+		if !ace.Allow() || ace.InheritOnly() || ace.SID == "" || seen[ace.SID] {
+			continue
+		}
+		seen[ace.SID] = true
+		if _, ok := s.before[ace.SID]; !ok {
+			s.order = append(s.order, ace.SID)
+		}
+		was, now := GrantedTo(b, ace.SID), GrantedTo(a, ace.SID)
+		s.before[ace.SID] |= was
+		s.after[ace.SID] |= now
+		if was != now {
+			s.entries[ace.SID]++
+		}
+	}
+}
+
+func (s *summary) principals() []PrincipalRights {
+	out := make([]PrincipalRights, 0, len(s.order))
+	for _, sid := range s.order {
+		out = append(out, PrincipalRights{SID: sid, Name: sidName(sid), Before: RightsWord(s.before[sid]), After: RightsWord(s.after[sid]), Entries: s.entries[sid]})
+	}
+	// Who loses something first, then by name: the approval form's order.
+	sort.SliceStable(out, func(i, j int) bool {
+		if (out[i].Entries > 0) != (out[j].Entries > 0) {
+			return out[i].Entries > 0
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func (s *summary) ownerChanges() []OwnerChange {
+	out := make([]OwnerChange, 0, len(s.ownersOrder))
+	for _, sid := range s.ownersOrder {
+		out = append(out, OwnerChange{SID: sid, Name: sidName(sid), Entries: s.owners[sid]})
+	}
+	return out
+}
+
+// PlanLockdown reads what a lock-down of dir would do, writing nothing (plan
+// 087 review T2: masking, never a grant): the security of dir and of every
+// entry beneath (refusing a reparse point or a multiply-linked file
+// anywhere, and more than MaxLockdownEntries entries), per principal the
+// strongest rights it has anywhere in the tree before and after and on how
+// many entries they change, the owners handed to Administrators, the files
+// whose extension is in execExts (review T1), the folder's final path
+// (review T3), and who can still rename dir away through a folder above
+// (trusted SIDs left out).
+func PlanLockdown(dir string, trusted []string, execExts map[string]bool) (LockdownPlan, error) {
 	enableRestorePrivileges()
+	t, err := newTrust()
+	if err != nil {
+		return LockdownPlan{}, err
+	}
+	trustedSet := map[string]bool{}
+	for _, s := range trusted {
+		trustedSet[s] = true
+	}
 	root, err := open(dir, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER)
 	if err != nil {
 		return LockdownPlan{}, err
@@ -287,41 +300,40 @@ func PlanLockdown(dir string, trusted []string) (LockdownPlan, error) {
 	if err != nil {
 		return LockdownPlan{}, err
 	}
-	sd, err := readSD(dir, root)
+	sum := newSummary()
+	re, sd, err := planEntry(dir, root, trustedSet, t, true)
 	if err != nil {
 		return LockdownPlan{}, err
 	}
-	acls, err := buildLockdown(sd, trusted)
-	if err != nil {
-		return LockdownPlan{}, fmt.Errorf("dataacl: read the DACL of %s: %w", dir, err)
-	}
-	plan := LockdownPlan{Entries: []FolderEntry{{Rel: "", FileID: fileIDOf(root.info), SDDL: sd.String()}}, Principals: acls.principals,
-		ParentWriters: []Writer{}, FolderDACL: acls.folder, FileDACL: acls.file, DirDACL: acls.dir}
+	sum.add(re)
+	plan := LockdownPlan{Entries: []FolderEntry{{Rel: "", FileID: fileIDOf(root.info), SDDL: sd.String()}}, ParentWriters: []Writer{},
+		Executables: []string{}, FinalPath: rootFinal}
 	err = walkFolder(dir, rootFinal, func(path, rel string, n node) error {
 		if len(plan.Entries) >= lockdownLimit {
 			return fmt.Errorf("%w: %s holds more than %d", ErrTooManyEntries, dir, lockdownLimit)
 		}
-		esd, err := readSD(path, n)
+		e, esd, err := planEntry(path, n, trustedSet, t, false)
 		if err != nil {
 			return err
 		}
+		sum.add(e)
 		plan.Entries = append(plan.Entries, FolderEntry{Rel: rel, FileID: fileIDOf(n.info), SDDL: esd.String()})
+		if !n.dir() && execExts[strings.ToLower(filepath.Ext(rel))] && len(plan.Executables) < 20 {
+			plan.Executables = append(plan.Executables, rel)
+		}
 		return nil
 	})
 	if err != nil {
 		return LockdownPlan{}, err
 	}
+	plan.Principals, plan.Owners, plan.EntriesChanged = sum.principals(), sum.ownerChanges(), sum.changed
 	if chain := folderWritersChain(dir); len(chain) > 1 {
 		who, err := writers(chain[1:])
 		if err != nil {
 			return LockdownPlan{}, err
 		}
-		skip := map[string]bool{}
-		for _, s := range trusted {
-			skip[s] = true
-		}
 		for _, w := range who {
-			if !skip[w.SID] {
+			if !trustedSet[w.SID] {
 				plan.ParentWriters = append(plan.ParentWriters, w)
 			}
 		}
@@ -329,11 +341,12 @@ func PlanLockdown(dir string, trusted []string) (LockdownPlan, error) {
 	return plan, nil
 }
 
-// ApplyLockdown writes plan (PlanLockdown's, for the same dir and trusted
-// SIDs): the folder's protected DACL and Administrators as its owner, then
-// every entry beneath made to inherit it (explicit entries dropped, an owner
-// that is not trusted handed to Administrators). The folder must still be the
-// object the plan read. It answers how many entries it wrote.
+// ApplyLockdown masks dir and every entry beneath, as PlanLockdown read it
+// (review T2): each DACL lowered in place — nothing added, nothing raised —
+// the folder's cut from its parent (protected, inherited entries kept as
+// explicit), every other entry's protection left as it was; an owner that is
+// not trusted handed to Administrators. The folder must still be the object
+// the plan read. It answers how many entries it wrote.
 func ApplyLockdown(dir string, trusted []string, plan LockdownPlan) (int, error) {
 	if len(plan.Entries) == 0 {
 		return 0, errors.New("dataacl: an empty lock-down plan")
@@ -359,44 +372,34 @@ func ApplyLockdown(dir string, trusted []string, plan LockdownPlan) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	var sds [3]*windows.SECURITY_DESCRIPTOR
-	for i, s := range []string{plan.FolderDACL, plan.FileDACL, plan.DirDACL} {
-		if sds[i], err = windows.SecurityDescriptorFromString(s); err != nil {
-			return 0, fmt.Errorf("dataacl: the lock-down's DACL %q: %w", s, err)
+	apply := func(path string, n node, isRoot bool) error {
+		e, _, err := planEntry(path, n, trustedSet, t, isRoot)
+		if err != nil {
+			return err
 		}
+		if !e.changed {
+			return nil
+		}
+		if err := writeDACL(path, n.h, e.after, isRoot || e.protected); err != nil {
+			return err
+		}
+		if !e.ownerTrusted {
+			if err := setOwner(n.h, t.baSID); err != nil {
+				return fmt.Errorf("dataacl: make Administrators the owner of %s: %w", path, err)
+			}
+		}
+		return nil
 	}
-	if err := write(dir, root, sds[0], true); err != nil {
+	if err := apply(dir, root, true); err != nil {
 		return 0, err
-	}
-	if err := setOwner(root.h, t.baSID); err != nil {
-		return 1, fmt.Errorf("dataacl: make Administrators the owner of %s: %w", dir, err)
 	}
 	written := 1
 	err = walkFolder(dir, rootFinal, func(path, _ string, n node) error {
 		if written >= 2*lockdownLimit {
 			return fmt.Errorf("%w: %s grew past %d during the lock-down", ErrTooManyEntries, dir, 2*lockdownLimit)
 		}
-		want := sds[1]
-		if n.dir() {
-			want = sds[2]
-		}
-		if err := write(path, n, want, false); err != nil {
+		if err := apply(path, n, false); err != nil {
 			return err
-		}
-		esd, err := readSD(path, n)
-		if err != nil {
-			return err
-		}
-		owner, _, err := esd.Owner()
-		if err != nil {
-			return err
-		}
-		if o := owner.String(); !trustedSet[o] {
-			if ok, _ := trustedOwner(o, t.tokenUser, t.admins, t.indirectFn); !ok {
-				if err := setOwner(n.h, t.baSID); err != nil {
-					return fmt.Errorf("dataacl: make Administrators the owner of %s: %w", path, err)
-				}
-			}
 		}
 		written++
 		return nil
