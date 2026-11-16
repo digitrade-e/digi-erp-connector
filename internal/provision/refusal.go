@@ -96,6 +96,9 @@ const (
 	// CodeFolderHasExecutables: folder-acl (review T1) — the folder holds the importer's files, or files Windows runs
 	// (PATHEXT's extensions, .dll, .ps1): a lock-down never tightens a folder code is run from.
 	CodeFolderHasExecutables = "folder_has_executables"
+	// CodeCarryOverFailed: folder-acl with carryOver (v1.0.32) — a trusted writer the check carried over could not be
+	// resolved again before anything was written (its domain controller stopped answering): nothing written.
+	CodeCarryOverFailed = "carry_over_failed"
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

@@ -89,6 +89,11 @@ type FolderACLInput struct {
 	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
 	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
 	Expect           *Expect `json:"expect,omitempty"`
+	// CarryOver (lockdown, v1.0.32): a trusted writer that wrote only
+	// through a group gets back, per entry, one explicit allow entry with
+	// exactly what it effectively had there (AuthZ) intersected with Modify
+	// — never more (dataacl/carry.go). Off by default: today's lock-down.
+	CarryOver bool `json:"carryOver,omitempty"`
 }
 
 // FolderACLResult is the command's answer (ApplyResult.FolderACL).
@@ -112,6 +117,11 @@ type FolderACLFolder struct {
 	Principals []dataacl.PrincipalRights `json:"principals,omitempty"`
 	// Owners (lockdown) are the owners handed to Administrators, by entries.
 	Owners []dataacl.OwnerChange `json:"owners,omitempty"`
+	// CarriedOver (lockdown with carryOver, v1.0.32) are the trusted
+	// writers given back their write: the strongest rights carried, on how
+	// many entries, and on how many none was computed (skipped: a
+	// conditional entry applies to them).
+	CarriedOver []dataacl.CarriedRights `json:"carriedOver,omitempty"`
 	// ParentWritable (lockdown) names who can still rename the folder away
 	// through a folder above (parents are never changed).
 	ParentWritable []string `json:"parentWritable,omitempty"`
@@ -183,6 +193,9 @@ func (in FolderACLInput) Validate() *Refusal {
 	case FolderACLRestore:
 		if len(in.Folders) != 0 {
 			return refuse(CodeSpecInvalid, "restore takes folder and preimage", "folders are lockdown's")
+		}
+		if in.CarryOver {
+			return refuse(CodeSpecInvalid, "leave carryOver out: a restore puts back what was recorded", "carryOver is lockdown's")
 		}
 		if !validFolderName(in.Folder) {
 			return refuse(CodeSpecInvalid, nameFix, "%q is not a folder name", in.Folder)
@@ -375,7 +388,7 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 	plans := make([]dataacl.LockdownPlan, len(in.Folders))
 	exts := executableExtensions()
 	for i, n := range in.Folders {
-		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trustedFor[n], exts)
+		plan, err := a.env.Sys.PlanFolderLockdown(paths[n], trustedFor[n], exts, in.CarryOver)
 		if err != nil {
 			return lockdownRefusal(n, paths[n], err)
 		}
@@ -396,9 +409,17 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 			a.warn("parent_writable: %s (%s) can still be renamed away through a folder above it by %s — parents are never changed; let only the administrators delete or rename the folders above",
 				n, paths[n], strings.Join(out.ParentWritable, ", "))
 		}
+		// v1.0.32: carry-over — the writers given back their write, and the
+		// ones whose groups could not be resolved (no carry-over for them).
+		out.CarriedOver = plan.Carried
+		for _, f := range plan.CarryFailed {
+			a.warn("carry_over_failed: %s in folder %s (%s): %s — nothing is carried over for it, and the lock-down takes the write it had through a group",
+				f.Name, n, paths[n], f.Error)
+		}
 		// Review T2: a lock-down never grants, so a trusted writer keeps only
 		// what its own entries give it — write it had through a group (Users)
-		// is capped with the group. Said before anything is written.
+		// is capped with the group, unless carried over. Said before anything
+		// is written.
 		for _, w := range a.cur.Documents.TrustedWriters {
 			if !slices.Contains(trustedFor[n], w.SID) {
 				continue
@@ -410,7 +431,7 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 				}
 			}
 			if after != "full" && after != "modify" && after != "write" {
-				a.warn("trusted_writer_no_write: %s, a trusted writer, has no write of its own in folder %s (%s) after the lock-down (%s): a lock-down never grants, and write it had through a group is capped with the group — if the ERP's scheduler must write there, give it its own entry first",
+				a.warn("trusted_writer_no_write: %s, a trusted writer, has no write of its own in folder %s (%s) after the lock-down (%s): a lock-down never grants, and write it had through a group is capped with the group — if the ERP's scheduler must write there, lock down with carryOver (or give it its own entry first)",
 					w.Name, n, paths[n], after)
 			}
 		}
@@ -437,6 +458,10 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 		a.res.FolderACL.Folders[i].Preimage = sha
 		written, err := a.env.Sys.ApplyFolderLockdown(paths[n], trustedFor[n], plans[i])
 		a.res.FolderACL.Folders[i].Written = written
+		if errors.Is(err, dataacl.ErrCarryOver) && written == 0 {
+			return refuse(CodeCarryOverFailed, "run it again once the domain controller answers, or lock down without carryOver",
+				"folder %s (%s): %v — nothing was written", n, paths[n], err)
+		}
 		if err != nil {
 			r := lockdownRefusal(n, paths[n], err)
 			r.Message += fmt.Sprintf(" — the lock-down stopped part way (%d entries written): folder-acl restore with preimage %s puts back what it found", written, sha)

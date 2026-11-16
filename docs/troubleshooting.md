@@ -168,8 +168,12 @@ Administrators and TrustedInstaller keep theirs, a trusted writer keeps at most 
 most read & execute (review T2) — and restarts the service. Name the ERP's scheduler account in `documents`'
 `trustedWriters` **before** the lock-down, or it too drops to read & execute — and since nothing is ever granted, it
 keeps only what **its own** entries give it: write it had only through a group (`Users`, `Authenticated Users`) is
-capped with the group. `folder-acl-check` warns `trusted_writer_no_write:` for such an account; give it its own entry
-first (as an administrator: `icacls "<folder>" /grant "<DOMAINccount>:(OI)(CI)M"`), then lock down. Folders above it
+capped with the group. `folder-acl-check` warns `trusted_writer_no_write:` for such an account. From v1.0.32 send the
+lock-down with `carryOver: true`: the box gives that account back, per entry, exactly the rights it had there (AuthZ,
+its groups resolved) within Modify — `carriedOver` in the answer, and the warning gone; if its groups cannot be
+resolved (the domain controller does not answer: `carry_over_failed:`) nothing is carried over for it. Before
+v1.0.32: give it its own entry first (as an administrator: `icacls "<folder>" /grant "<DOMAIN\account>:(OI)(CI)M"`),
+then lock down. Folders above it
 are never changed — `parentWritable` says who could still rename the folder away through one.
 
 **Lock a folder down by hand** (background, for a box without the link: a stricter, simpler recipe than the command's

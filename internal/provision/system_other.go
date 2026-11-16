@@ -55,7 +55,7 @@ func (otherSystem) FolderRules() FolderRules                   { return machineF
 func (otherSystem) ReparsePointOn(path string) (string, error) { return reparseAlong(path) }
 func (otherSystem) FinalPath(dir string) (string, error)       { return dataacl.FinalDirPath(dir) }
 
-func (otherSystem) PlanFolderLockdown(string, []string, map[string]bool) (dataacl.LockdownPlan, error) {
+func (otherSystem) PlanFolderLockdown(string, []string, map[string]bool, bool) (dataacl.LockdownPlan, error) {
 	return dataacl.LockdownPlan{}, errUnsupported
 }
 func (otherSystem) ApplyFolderLockdown(string, []string, dataacl.LockdownPlan) (int, error) {

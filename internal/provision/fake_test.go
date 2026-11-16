@@ -123,6 +123,8 @@ type fakeSys struct {
 	finalPath     map[string]string   // the plan's final path, by folder (default \\?\<dir>)
 	lastExecExts  map[string]bool     // what the last plan was asked to flag
 	lastTrusted   []string            // and whom it trusted
+	lastCarry     bool                // and whether it carried over (v1.0.32)
+	carryFails    map[string]string   // trusted SIDs whose carry-over fails, with why
 	folderRules   FolderRules         // FolderRules (review T3); none by default
 	reparse       map[string]string   // ReparsePointOn by path; otherwise only the path itself is looked at
 	daemon        *fakeDaemon
@@ -294,9 +296,9 @@ func (s *fakeSys) sidOf(name string) string {
 
 // The folder-acl fakes: a folder's security is one SDDL string; a lock-down
 // replaces it (and clears its writers), a restore puts the recorded one back.
-func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
+func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool, carry bool) (dataacl.LockdownPlan, error) {
 	s.call("plan-lockdown:" + filepath.Base(dir))
-	s.lastExecExts, s.lastTrusted = execExts, trusted
+	s.lastExecExts, s.lastTrusted, s.lastCarry = execExts, trusted, carry
 	if err := s.lockdownErr[dir]; err != nil {
 		return dataacl.LockdownPlan{}, err
 	}
@@ -312,6 +314,19 @@ func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[
 		Principals:     []dataacl.PrincipalRights{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`, Before: "modify", After: "read", Entries: 2}},
 		Owners:         []dataacl.OwnerChange{{SID: "S-1-5-21-0-0-0-1001", Name: `BFL\olduser`, Entries: 1}},
 		EntriesChanged: 2, Executables: s.executables[dir], FinalPath: final, ParentWriters: s.parentWriters[dir]}
+	// v1.0.32's carry-over: every trusted writer given back Modify on both
+	// entries, but those the test says do not resolve.
+	if carry {
+		for _, t := range trusted {
+			if why, ok := s.carryFails[t]; ok {
+				plan.CarryFailed = append(plan.CarryFailed, dataacl.CarryFailure{SID: t, Name: t, Error: why})
+				continue
+			}
+			plan.CarrySIDs = append(plan.CarrySIDs, t)
+			plan.Carried = append(plan.Carried, dataacl.CarriedRights{SID: t, Name: t, Rights: "modify", Entries: 2})
+			plan.Principals = append(plan.Principals, dataacl.PrincipalRights{SID: t, Name: t, Before: "none", After: "modify", Entries: 2})
+		}
+	}
 	return plan, nil
 }
 

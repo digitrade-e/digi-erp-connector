@@ -60,7 +60,7 @@ type System interface {
 	// PlanFolderLockdown, ApplyFolderLockdown and RestoreFolderACL are the
 	// folder-acl command's (dataacl; review R1c): read what a lock-down of a
 	// folder would do, write it, put a recorded pre-image back.
-	PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error)
+	PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool, carry bool) (dataacl.LockdownPlan, error)
 	// FolderRules are what a document folder may not be in or hold on this
 	// machine (review T3): its Windows, Program Files and ProgramData folders,
 	// the profiles' folder, the connector's install folder; AppData, System

@@ -189,8 +189,8 @@ func (winSystem) ReparsePointOn(path string) (string, error) { return reparseAlo
 
 func (winSystem) FinalPath(dir string) (string, error) { return dataacl.FinalDirPath(dir) }
 
-func (winSystem) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
-	return dataacl.PlanLockdown(dir, trusted, execExts)
+func (winSystem) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool, carry bool) (dataacl.LockdownPlan, error) {
+	return dataacl.PlanLockdown(dir, trusted, execExts, carry)
 }
 func (winSystem) ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error) {
 	return dataacl.ApplyLockdown(dir, trusted, plan)

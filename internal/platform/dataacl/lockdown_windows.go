@@ -220,11 +220,65 @@ type lockdownEntry struct {
 	protected     bool
 	autoInherited bool // SE_DACL_AUTO_INHERITED, kept on the write
 	changed       bool
+	// carried (v1.0.32) are the rights carried over to each trusted writer
+	// on this entry; skipped the writers given none (a conditional entry
+	// applies to them).
+	carried map[string]uint32
+	skipped []string
+}
+
+// carryEntry adds to after one explicit allow entry per carrier that the
+// masking took write from (carry.go): exactly what AuthZ says it had on the
+// old descriptor, intersected with Modify, inheritable only as far as it was
+// handed down before. owner and group are the entry's.
+func carryEntry(e *lockdownEntry, carriers []*authzCtx, owner, group *windows.SID, folder bool) error {
+	aces, err := ParseACL(e.before)
+	if err != nil {
+		return err
+	}
+	var add [][]byte
+	for _, c := range carriers {
+		if !CarryCapable(aces, c.allow, c.deny) {
+			e.skipped = append(e.skipped, c.sid)
+			continue
+		}
+		had, err := c.access(owner, group, e.before)
+		if err != nil {
+			return err
+		}
+		want := had & MaskModify
+		now, err := c.access(owner, group, e.after)
+		if err != nil {
+			return err
+		}
+		if (want&^now)&^maskSynchronize == 0 {
+			continue // the masking took nothing it had
+		}
+		ace, err := CarryACE(c.sid, want, CarryFlags(aces, c.allow, c.deny, want, folder))
+		if err != nil {
+			return err
+		}
+		add = append(add, ace)
+		if e.carried == nil {
+			e.carried = map[string]uint32{}
+		}
+		e.carried[c.sid] = want
+	}
+	if len(add) == 0 {
+		return nil
+	}
+	after, err := InsertCarried(e.after, add)
+	if err != nil {
+		return err
+	}
+	e.after, e.changed = after, true
+	return nil
 }
 
 // planEntry reads an opened entry and masks its DACL (root: the folder,
-// whose link to its parent is cut).
-func planEntry(path string, n node, trusted map[string]bool, t *trust, root bool) (lockdownEntry, *windows.SECURITY_DESCRIPTOR, error) {
+// whose link to its parent is cut), then carries over what the carriers'
+// write the masking took (v1.0.32; none without carry-over).
+func planEntry(path string, n node, trusted map[string]bool, t *trust, root bool, carriers ...*authzCtx) (lockdownEntry, *windows.SECURITY_DESCRIPTOR, error) {
 	sd, err := readSD(path, n)
 	if err != nil {
 		return lockdownEntry{}, nil, err
@@ -249,7 +303,49 @@ func planEntry(path string, n node, trusted map[string]bool, t *trust, root bool
 		autoInherited: control&windows.SE_DACL_AUTO_INHERITED != 0}
 	e.ownerTrusted, _ = trustedOwner(e.owner, t.tokenUser, t.admins, t.indirectFn)
 	e.changed = changed || !e.ownerTrusted || (root && !e.protected)
+	if len(carriers) > 0 {
+		// AuthZ needs the group too: read it with the owner, as the kernel holds them.
+		full, err := kernelSD(n.h, windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			return lockdownEntry{}, nil, fmt.Errorf("dataacl: read the security of %s: %w", path, err)
+		}
+		o, _, err := full.Owner()
+		if err != nil {
+			return lockdownEntry{}, nil, err
+		}
+		g, _, _ := full.Group()
+		if err := carryEntry(&e, carriers, o, g, n.dir()); err != nil {
+			return lockdownEntry{}, nil, fmt.Errorf("dataacl: carry over on %s: %w", path, err)
+		}
+		runtime.KeepAlive(full)
+	}
 	return e, sd, nil
+}
+
+// carriersFor resolves each trusted SID's AuthZ context (its groups): the
+// ones resolved, and the ones that could not be. close frees them.
+func carriersFor(trusted []string) (ctxs []*authzCtx, failed []CarryFailure, close func()) {
+	rm, err := newAuthzRM()
+	if err != nil {
+		for _, s := range trusted {
+			failed = append(failed, CarryFailure{SID: s, Name: sidName(s), Error: err.Error()})
+		}
+		return nil, failed, func() {}
+	}
+	for _, s := range trusted {
+		c, err := rm.context(s)
+		if err != nil {
+			failed = append(failed, CarryFailure{SID: s, Name: sidName(s), Error: err.Error()})
+			continue
+		}
+		ctxs = append(ctxs, c)
+	}
+	return ctxs, failed, func() {
+		for _, c := range ctxs {
+			c.close()
+		}
+		rm.close()
+	}
 }
 
 // summary gathers what a lock-down takes from whom, across the tree.
@@ -261,15 +357,40 @@ type summary struct {
 	owners      map[string]int
 	ownersOrder []string
 	changed     int
+	// carried (v1.0.32): per trusted writer, the rights carried over, on
+	// how many entries, and on how many none was computed.
+	carried        map[string]uint32
+	carriedEntries map[string]int
+	carrySkipped   map[string]int
 }
 
 func newSummary() *summary {
-	return &summary{before: map[string]uint32{}, after: map[string]uint32{}, entries: map[string]int{}, owners: map[string]int{}}
+	return &summary{before: map[string]uint32{}, after: map[string]uint32{}, entries: map[string]int{}, owners: map[string]int{},
+		carried: map[string]uint32{}, carriedEntries: map[string]int{}, carrySkipped: map[string]int{}}
+}
+
+// carriedRights is the summary's carried rights, one per carrier SID.
+func (s *summary) carriedRights(sids []string) []CarriedRights {
+	var out []CarriedRights
+	for _, sid := range sids {
+		if s.carriedEntries[sid] == 0 && s.carrySkipped[sid] == 0 {
+			continue
+		}
+		out = append(out, CarriedRights{SID: sid, Name: sidName(sid), Rights: RightsWord(s.carried[sid]), Entries: s.carriedEntries[sid], Skipped: s.carrySkipped[sid]})
+	}
+	return out
 }
 
 func (s *summary) add(e lockdownEntry) {
 	if e.changed {
 		s.changed++
+	}
+	for sid, m := range e.carried {
+		s.carried[sid] |= m
+		s.carriedEntries[sid]++
+	}
+	for _, sid := range e.skipped {
+		s.carrySkipped[sid]++
 	}
 	if !e.ownerTrusted {
 		if _, ok := s.owners[e.owner]; !ok {
@@ -332,7 +453,11 @@ func (s *summary) ownerChanges() []OwnerChange {
 // whose extension is in execExts (review T1), the folder's final path
 // (review T3), and who can still rename dir away through a folder above
 // (trusted SIDs left out).
-func PlanLockdown(dir string, trusted []string, execExts map[string]bool) (LockdownPlan, error) {
+//
+// carry (v1.0.32): the trusted writers' write taken by the masking is carried
+// over (carry.go); a writer whose groups cannot be resolved gets none, and is
+// named in CarryFailed.
+func PlanLockdown(dir string, trusted []string, execExts map[string]bool, carry bool) (LockdownPlan, error) {
 	enableRestorePrivileges()
 	t, err := newTrust()
 	if err != nil {
@@ -341,6 +466,13 @@ func PlanLockdown(dir string, trusted []string, execExts map[string]bool) (Lockd
 	trustedSet := map[string]bool{}
 	for _, s := range trusted {
 		trustedSet[s] = true
+	}
+	var carriers []*authzCtx
+	var carryFailed []CarryFailure
+	if carry && len(trusted) > 0 {
+		var closeCarriers func()
+		carriers, carryFailed, closeCarriers = carriersFor(trusted)
+		defer closeCarriers()
 	}
 	root, err := open(dir, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER)
 	if err != nil {
@@ -355,18 +487,21 @@ func PlanLockdown(dir string, trusted []string, execExts map[string]bool) (Lockd
 		return LockdownPlan{}, err
 	}
 	sum := newSummary()
-	re, sd, err := planEntry(dir, root, trustedSet, t, true)
+	re, sd, err := planEntry(dir, root, trustedSet, t, true, carriers...)
 	if err != nil {
 		return LockdownPlan{}, err
 	}
 	sum.add(re)
 	plan := LockdownPlan{Entries: []FolderEntry{{Rel: "", FileID: fileIDOf(root.info), SDDL: sd.String()}}, ParentWriters: []Writer{},
-		Executables: []string{}, FinalPath: rootFinal}
+		Executables: []string{}, FinalPath: rootFinal, CarryFailed: carryFailed}
+	for _, c := range carriers {
+		plan.CarrySIDs = append(plan.CarrySIDs, c.sid)
+	}
 	err = walkFolder(dir, rootFinal, func(path, rel string, n node) error {
 		if len(plan.Entries) >= lockdownLimit {
 			return fmt.Errorf("%w: %s holds more than %d", ErrTooManyEntries, dir, lockdownLimit)
 		}
-		e, esd, err := planEntry(path, n, trustedSet, t, false)
+		e, esd, err := planEntry(path, n, trustedSet, t, false, carriers...)
 		if err != nil {
 			return err
 		}
@@ -381,6 +516,7 @@ func PlanLockdown(dir string, trusted []string, execExts map[string]bool) (Lockd
 		return LockdownPlan{}, err
 	}
 	plan.Principals, plan.Owners, plan.EntriesChanged = sum.principals(), sum.ownerChanges(), sum.changed
+	plan.Carried = sum.carriedRights(plan.CarrySIDs)
 	if chain := folderWritersChain(dir); len(chain) > 1 {
 		who, err := writers(chain[1:])
 		if err != nil {
@@ -429,8 +565,20 @@ func ApplyLockdown(dir string, trusted []string, plan LockdownPlan) (int, error)
 	if !strings.EqualFold(rootFinal, plan.FinalPath) { // the path judged (review T3)
 		return 0, fmt.Errorf("%w: %s resolves to %s, not %s as the check read", ErrOutsideTree, dir, rootFinal, plan.FinalPath)
 	}
+	// The writers the plan carried over, resolved again before anything is
+	// written: one that no longer resolves stops the lock-down here.
+	var carriers []*authzCtx
+	if len(plan.CarrySIDs) > 0 {
+		var failed []CarryFailure
+		var closeCarriers func()
+		carriers, failed, closeCarriers = carriersFor(plan.CarrySIDs)
+		defer closeCarriers()
+		if len(failed) > 0 {
+			return 0, fmt.Errorf("%w: %s: %s", ErrCarryOver, failed[0].Name, failed[0].Error)
+		}
+	}
 	apply := func(path string, n node, isRoot bool) error {
-		e, _, err := planEntry(path, n, trustedSet, t, isRoot)
+		e, _, err := planEntry(path, n, trustedSet, t, isRoot, carriers...)
 		if err != nil {
 			return err
 		}

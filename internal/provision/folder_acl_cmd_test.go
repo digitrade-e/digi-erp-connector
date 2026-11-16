@@ -291,3 +291,39 @@ func TestState_ListsFolderACLPreimages(t *testing.T) {
 		t.Errorf("a changed pre-image: %+v", st.FolderACL.Preimages)
 	}
 }
+
+// v1.0.32: carryOver reaches the lock-down; the answer names the writers
+// given back their write (carriedOver) and trusted_writer_no_write is gone
+// for them; one whose groups do not resolve is carry_over_failed and keeps
+// the warning; a restore takes no carryOver.
+func TestFolderACL_CarryOver(t *testing.T) {
+	sys, env, _, _ := aclBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.Documents.TrustedWriters = []config.TrustedWriter{{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}, {SID: "S-1-5-21-1-2-3-1106", Name: `BFL\other`}}
+	writeConfig(t, sys.dir, cfg)
+	sys.carryFails = map[string]string{"S-1-5-21-1-2-3-1106": "the domain controller does not answer"}
+	lock := aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"}; in.CarryOver = true })
+	res, err := ApplyFolderACL(context.Background(), env, lock, true)
+	if err != nil || !sys.lastCarry {
+		t.Fatalf("--check: %v (carry %v)", err, sys.lastCarry)
+	}
+	h := res.FolderACL.Folders[0]
+	if len(h.CarriedOver) != 1 || h.CarriedOver[0].SID != "S-1-5-21-1-2-3-1105" || h.CarriedOver[0].Rights != "modify" || h.CarriedOver[0].Entries != 2 {
+		t.Errorf("carriedOver %+v", h.CarriedOver)
+	}
+	if warned(res, `trusted_writer_no_write: BFL\wizsched`) || !warned(res, `trusted_writer_no_write: BFL\other`) || !warned(res, "carry_over_failed: S-1-5-21-1-2-3-1106") {
+		t.Errorf("warnings %v", res.Warnings)
+	}
+	b, _ := json.Marshal(res)
+	if !strings.Contains(string(b), `"carriedOver":[{"sid":"S-1-5-21-1-2-3-1105"`) {
+		t.Errorf("the wire shape: %s", b)
+	}
+	// Without it: today's lock-down.
+	if _, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true); err != nil || sys.lastCarry {
+		t.Errorf("without carryOver: %v (carry %v)", err, sys.lastCarry)
+	}
+	_, err = ApplyFolderACL(context.Background(), env, aclIn("restore", func(in *FolderACLInput) {
+		in.Folder, in.Preimage, in.CarryOver = "herp", strings.Repeat("a", 64), true
+	}), true)
+	wantRefusal(t, err, CodeSpecInvalid)
+}

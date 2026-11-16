@@ -567,7 +567,20 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   execute — generic rights mapped first, an entry left with nothing beyond SYNCHRONIZE dropped. Conditional, callback
   and object entries keep their condition and type; deny entries stay; flags and order are kept. **No entry is ever
   added**: a trusted writer with no right before keeps none (write it had only through a group is capped with the
-  group: `trusted_writer_no_write:` warns, on `--check` too), and an account that could only add files gains no read.
+  group: `trusted_writer_no_write:` warns, on `--check` too — unless `carryOver`, below), and an account that could
+  only add files gains no read.
+- **`carryOver: true`** (lockdown only; v1.0.32; digi-mcp's feature `folder_acl_carry_over`): a trusted writer whose
+  write the masking takes — it wrote through a group, the WizSched case — gets back, per entry, ONE explicit allow
+  entry with exactly what it effectively had there before (AuthZ on the entry's old descriptor:
+  `AuthzInitializeContextFromSid` + `AuthzAccessCheck`, its groups resolved) intersected with Modify: its effective
+  rights never grow. On a folder the entry is inheritable to files (OI) and folders (CI) only as far as the old DACL
+  handed the account at least those rights there (a lower bound: an allow that may not apply counts for nothing, a
+  deny that may counts); on a file never. It sits after the entry's explicit denies. An entry with a conditional
+  entry for the account gets none (`skipped`). An account whose groups cannot be resolved (the domain controller does
+  not answer, an error) gets nothing carried over — `carry_over_failed:` warns and `trusted_writer_no_write:` stays —
+  and if one resolved for the check no longer does when the run writes, nothing is written (`carry_over_failed`). The
+  answer's `carriedOver: [{sid, name, rights, entries, skipped?}]` per folder; the pre-image and `restore` are
+  unchanged (a restore takes the carried entries away with the rest). Without it (the default): today's lock-down.
   The folder's link to its parent is cut (its DACL protected, its inherited entries kept as explicit and masked the
   same way); every other entry keeps its own protection. An owner that is not SYSTEM, an administrator or
   TrustedInstaller is handed to Administrators.
@@ -595,8 +608,8 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
   unless `acceptUnreadable` is their total over both indexes (review m3).
 - **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
-- The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, parentWritable?,
-  preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
+- The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, carriedOver?,
+  parentWritable?, preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
   pre-image listed in `state`'s `folderAcl.preimages` (review T5).
 
 ## `restore` and pre-images without files
@@ -650,6 +663,7 @@ actually changed.
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`, `folder-acl`: no folder of that key / the path is not a folder here / inside the data directory, not a path link mode takes, or one of the [places a document folder may not be](#where-a-document-folder-may-be) (review T3: typed folders behind the link, every `folder-acl` target, and behind the link the `sendOrderDir`, pickup and receipt folders `apply`, `orders` and `receipts` set or move) |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through), or — with `documents` and, behind the link, `apply`/`orders`/`receipts` — a junction, link or mount point on the configured path, or a folder whose handle resolves to another path (review T3) / more than 20 000 entries |
+| `carry_over_failed` | `folder-acl` with `carryOver` (v1.0.32): a trusted writer the check carried over could not be resolved again before the lock-down wrote anything — nothing written |
 | `entry_missing`, `entry_moved`, `entry_final` | `inflight` (review R6): no order with that `historyId` / no receipt with that number / the entry's state is not `expect` / it is written or failed already |
 | `entry_busy` | `inflight`: the running connector has the order queued or is writing it; another process holds the receipt data |
 | `may_be_written`, `not_written` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` while neither its file nor its history copy is there |
