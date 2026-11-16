@@ -63,10 +63,15 @@ type StateResult struct {
 	// no typed folder listed here (503 FOLDER_WRITABLE), and the documents,
 	// receipts and orders commands refuse them (folder_writable).
 	WritableFolders []StateWritableFolder `json:"writableFolders"`
-	TLS             *StateTLS             `json:"tls,omitempty"`
-	Link            StateLink             `json:"link"`
-	Disk            StateDisk             `json:"disk"`
-	Errors          []string              `json:"errors,omitempty"`
+	// FolderACL (plan 087 review T5) lists the folder-acl pre-images recorded
+	// on the box: a lock-down killed between recording and answering (the
+	// link's deadline, a crash, a reboot) leaves one whose sha256 digi-mcp
+	// never got, and a restore needs it.
+	FolderACL StateFolderACL `json:"folderAcl"`
+	TLS       *StateTLS      `json:"tls,omitempty"`
+	Link      StateLink      `json:"link"`
+	Disk      StateDisk      `json:"disk"`
+	Errors    []string       `json:"errors,omitempty"`
 }
 
 // StateWritableFolder is one folder others can write to (config.WriteFolder):
@@ -78,6 +83,82 @@ type StateWritableFolder struct {
 	Writers []string `json:"writers"`
 	Trusted []string `json:"trusted,omitempty"`
 	Error   string   `json:"error,omitempty"`
+}
+
+// StateFolderACL is DataDir\folder-acl.
+type StateFolderACL struct {
+	Preimages []StatePreimage `json:"preimages"`
+	Error     string          `json:"error,omitempty"`
+}
+
+// StatePreimage is one recorded pre-image: the folder name and path it was
+// recorded for, its sha256 (restore's preimage), when (UTC) and how many
+// entries it holds. Error: the file could not be read or does not match its
+// name (a restore of it is refused).
+type StatePreimage struct {
+	Folder    string `json:"folder,omitempty"`
+	Path      string `json:"path,omitempty"`
+	SHA256    string `json:"sha256"`
+	At        string `json:"at,omitempty"`
+	ChangeSet string `json:"changeSet,omitempty"`
+	Entries   int    `json:"entries"`
+	Error     string `json:"error,omitempty"`
+}
+
+// maxStatePreimages bounds the list (the newest files).
+const maxStatePreimages = 50
+
+// folderACLState reads the pre-images under DataDir\folder-acl, newest first
+// (at most maxStatePreimages files are read).
+func folderACLState(dir string) StateFolderACL {
+	out := StateFolderACL{Preimages: []StatePreimage{}}
+	names, err := os.ReadDir(folderACLDir(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return out
+	}
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	type file struct {
+		sha string
+		mod time.Time
+	}
+	var files []file
+	for _, n := range names {
+		sha := strings.TrimSuffix(n.Name(), ".json")
+		if n.IsDir() || !strings.HasSuffix(n.Name(), ".json") || !preimageSHA.MatchString(sha) {
+			continue
+		}
+		f := file{sha: sha}
+		if info, err := n.Info(); err == nil {
+			f.mod = info.ModTime()
+		}
+		files = append(files, f)
+	}
+	slices.SortStableFunc(files, func(a, b file) int { return b.mod.Compare(a.mod) })
+	if len(files) > maxStatePreimages {
+		files = files[:maxStatePreimages]
+	}
+	for _, f := range files {
+		sha := f.sha
+		p := StatePreimage{SHA256: sha}
+		b, err := readSmall(filepath.Join(folderACLDir(dir), sha+".json"), 64<<20)
+		var pre folderACLPreimage
+		sum := sha256.Sum256(b)
+		switch {
+		case err != nil:
+			p.Error = err.Error()
+		case hex.EncodeToString(sum[:]) != sha:
+			p.Error = "the file does not match its sha256: it was changed"
+		case json.Unmarshal(b, &pre) != nil:
+			p.Error = "the file does not decode"
+		default:
+			p.Folder, p.Path, p.At, p.ChangeSet, p.Entries = pre.Folder, pre.Path, pre.Created, pre.ChangeSet, len(pre.Entries)
+		}
+		out.Preimages = append(out.Preimages, p)
+	}
+	return out
 }
 
 // StateServices are both Windows services.
@@ -294,6 +375,7 @@ func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
 		}
 	}
 	res.WritableFolders = writableFolders(env.Sys, cfg)
+	res.FolderACL = folderACLState(dir)
 	if cfg != nil && cfg.TLS.Enabled() {
 		res.TLS = tlsState(cfg.TLS.CertFile, env.Now())
 	}

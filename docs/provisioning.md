@@ -534,7 +534,8 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   unless `acceptUnreadable` names their number.
 - **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
 - The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, parentWritable?,
-  preimage?, written?, restored?, skipped?}]}`.
+  preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
+  pre-image listed in `state`'s `folderAcl.preimages` (review T5).
 
 ## `restore` and pre-images without files
 
@@ -622,7 +623,12 @@ model always writes that `config.yaml` lacks (their defaults apply); `unknownKey
 an older build, or misspelt). Index entries are read for their number and state only (a receipt's request never
 leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
 `writableFolders` (plan 087 review M1) lists every folder the connector writes documents into that accounts besides
-the administrators can write to: `{name, path, key?, typed?, receipts?, writers, error?}` — `[]` when there is none.
+the administrators can write to: `{name, path, key?, typed?, receipts?, executes?, writers, trusted?, error?}` — `[]`
+when there is none (`executes`: an importer runs in or from it, so `trustedWriters` count there too; review T1).
+`folderAcl.preimages` (review T5) lists the `folder-acl` pre-images recorded on the box, newest first (at most 50):
+`{folder, path, sha256, at, changeSet, entries, error?}` — a lock-down killed before it answered (the link's
+deadline, a crash, a reboot) still leaves the sha256 a `restore` takes; `error` marks a file that no longer matches its
+sha256 or does not decode (its restore is refused).
 `orders.folderTestChanged` (review R2) lists the unfinished orders whose rule froze another test flag than their
 folder has now. `counters[].error` is a code (`store_missing`, `store_damaged`, `issued_unreadable`, as `GET /api/counters`) and
 `counters[].detail` its text (review m7).

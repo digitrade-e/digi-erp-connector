@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -244,5 +245,43 @@ func TestTrustedWriterCountsWhereAnImporterRuns(t *testing.T) {
 	}), false)
 	if r := wantRefusal(t, err, CodeFolderWritable); !strings.Contains(r.Message, `BFL\wizsched`) {
 		t.Errorf("the bound receipt folder where has.exe runs: %+v", r)
+	}
+}
+
+// Review T5: state lists the pre-images recorded on the box — the folder and
+// path, the sha256 a restore takes, when, the change set and how many
+// entries — so a lock-down killed before it answered can still be put back;
+// a changed file is flagged, never listed as restorable.
+func TestState_ListsFolderACLPreimages(t *testing.T) {
+	sys, env, _, herp := aclBox(t)
+	res, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := res.FolderACL.Folders[0].Preimage
+	st, err := State(context.Background(), env, StateInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.FolderACL.Preimages) != 1 {
+		t.Fatalf("preimages %+v", st.FolderACL)
+	}
+	p := st.FolderACL.Preimages[0]
+	if p.Folder != "herp" || p.Path != herp || p.SHA256 != sha || p.At == "" || p.ChangeSet != "cs-acl-0001" || p.Entries != 2 || p.Error != "" {
+		t.Errorf("preimage %+v", p)
+	}
+	b, _ := json.Marshal(st)
+	if !strings.Contains(string(b), `"folderAcl":{"preimages":[{"folder":"herp"`) {
+		t.Errorf("the wire shape: %s", b)
+	}
+	// A changed file is flagged.
+	f := filepath.Join(sys.dir, "folder-acl", sha+".json")
+	raw, _ := os.ReadFile(f)
+	if err := os.WriteFile(f, append(raw, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = State(context.Background(), env, StateInput{})
+	if len(st.FolderACL.Preimages) != 1 || st.FolderACL.Preimages[0].Error == "" || st.FolderACL.Preimages[0].Folder != "" {
+		t.Errorf("a changed pre-image: %+v", st.FolderACL.Preimages)
 	}
 }
