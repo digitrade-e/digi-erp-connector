@@ -347,7 +347,7 @@ func (l *Link) autoInputs(now time.Time, af autoFile, afErr error) autoInputs {
 	in.state, in.stateErr = l.cfg.Store.LoadState()
 	in.minEpoch, in.epochErr = l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
 	l.cfg.Store.policyMu.Lock()
-	in.pf, in.pfErr = l.cfg.Store.loadPolicies()
+	in.pf, _, _, _, _, in.pfErr = l.cfg.Store.loadHeld(in.state.Box) // review N1: the floors' kept policies, the file lost or not
 	l.cfg.Store.policyMu.Unlock()
 	in.pending, _ = runningTicket(l.upgradeDataDir(), now)
 	return in

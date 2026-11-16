@@ -1,9 +1,11 @@
 package link
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -645,8 +647,9 @@ func TestOnlyAChangeKicksTheScheduler(t *testing.T) {
 	waitChecks(3)
 }
 
-// Review m3, m4: the seq floors are kept apart from policy.json (in the secrets store) and never pruned — a policy file
-// deleted by hand, or lost, holds the box until the relay delivers again, and never lets an older policy back.
+// Review m3, m4, N1: the seq floors, and the policy that set each, are kept apart from policy.json (in the secrets store)
+// and never pruned — a policy file deleted by hand, or lost, changes nothing the box holds, and never lets an older
+// policy back.
 func TestTheSeqFloorsSurviveALostPolicyFile(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
@@ -663,14 +666,18 @@ func TestTheSeqFloorsSurviveALostPolicyFile(t *testing.T) {
 	if err := os.Remove(policyPath(b.store.Dir)); err != nil {
 		t.Fatal(err)
 	}
-	// older policies of both keys, replayed into the empty file: refused
+	// older policies of both keys, replayed after the file went: refused, and the box holds what it held
 	all4 := targetPolicy(everyBox(), 4, "1.0.31", digest, now)
 	list6 := targetPolicy(boxList("bfl-read"), 6, "1.0.31", digest, now)
 	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", all4), signed(t, priv, "team-1", list6)))
 	rep := rs.next(t)
 	if len(rep.Refused) != 2 || rep.Refused[0].Code != linkproto.CodeStaleSeq || rep.Refused[1].Code != linkproto.CodeStaleSeq ||
-		len(rep.Policies) != 0 || rep.Effective.Why != linkproto.WhyNoPolicy || !rep.Effective.Hold {
+		len(rep.Policies) != 2 || rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Seq != 7 {
 		t.Fatalf("a replay into a lost policy file: %+v", rep)
+	}
+	// the file is written back from the floors
+	if pf, err := b.store.loadPolicies(); err != nil || len(pf.Policies) != 2 {
+		t.Fatalf("policy.json %+v %v", pf, err)
 	}
 	// the same seq with other bytes: refused too
 	other := all5
@@ -679,19 +686,15 @@ func TestTheSeqFloorsSurviveALostPolicyFile(t *testing.T) {
 	if rep := rs.next(t); len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeStaleSeq {
 		t.Fatalf("other bytes at the floor's seq: %+v", rep.Refused)
 	}
-	// the very policies again: taken back
+	// the very policies again: delivered again, nothing changes
 	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", all5), signed(t, priv, "team-1", list7)))
 	if rep := rs.next(t); len(rep.Refused) != 0 || len(rep.Policies) != 2 || rep.Effective.Why != linkproto.WhyPolicyHolds {
-		t.Fatalf("taken back: %+v", rep)
-	}
-	pf, err := b.store.loadPolicies()
-	if err != nil || len(pf.Policies) != 2 {
-		t.Fatalf("policy.json %+v %v", pf, err)
+		t.Fatalf("delivered again: %+v", rep)
 	}
 }
 
-// Review m4: an unreadable policy file no longer stops policies for good — the floors kept apart judge every replay —
-// but with no floors to judge by, it is never started over.
+// Review m4, N1: an unreadable policy file no longer stops policies for good — the floors kept apart, and the policies
+// kept with them, stand in for it and judge every replay — but with no floors to judge by, it is never started over.
 func TestAnUnreadablePolicyFileStartsOverAgainstTheFloors(t *testing.T) {
 	r := newRelay(t)
 	priv, kr := team(t, 1)
@@ -702,13 +705,17 @@ func TestAnUnreadablePolicyFileStartsOverAgainstTheFloors(t *testing.T) {
 	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 5, "1.0.31", digest, now))))
 	rs.next(t)
 	_ = os.WriteFile(policyPath(b.store.Dir), []byte("{corrupt"), 0o600)
+	// the box decides by the policy kept with its floor (review N1) until a delivery writes the file back
+	if st := b.link.autoStatus(); st.Effective.Why != linkproto.WhyScheduled || st.Effective.Seq != 5 {
+		t.Fatalf("with an unreadable policy file: %+v", st.Effective)
+	}
 	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 4, "1.0.31", digest, now))))
 	rep := rs.next(t)
-	if len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeStaleSeq || rep.Effective.Why != linkproto.WhyStateUnreadable {
+	if len(rep.Refused) != 1 || rep.Refused[0].Code != linkproto.CodeStaleSeq || rep.Effective.Why != linkproto.WhyScheduled || rep.Effective.Seq != 5 {
 		t.Fatalf("a replay against the floors: %+v", rep)
 	}
-	if got, _ := os.ReadFile(policyPath(b.store.Dir)); string(got) != "{corrupt" {
-		t.Fatal("a delivery that changed nothing rewrote the file")
+	if pf, err := b.store.loadPolicies(); err != nil || len(pf.Policies) != 1 || pf.Policies[0].Seq != 5 {
+		t.Fatalf("the file was not written back from the floors: %+v %v", pf, err)
 	}
 	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", targetPolicy(everyBox(), 6, "1.0.31", digest, now))))
 	if rep := rs.next(t); len(rep.Refused) != 0 || rep.Effective.Why != linkproto.WhyScheduled || rep.Effective.Seq != 6 {
@@ -725,5 +732,222 @@ func TestAnUnreadablePolicyFileStartsOverAgainstTheFloors(t *testing.T) {
 	}
 	if pf, _ := b.store.loadPolicies(); len(pf.Policies) != 1 || pf.Policies[0].Seq != 6 {
 		t.Fatalf("written past unreadable floors: %+v", pf.Policies)
+	}
+}
+
+// reinstall is what an uninstall and a reinstall leave of the box's policy state: the uninstaller deletes link\ (policy.json
+// with it) and the key-epoch floor; the seq floors (secrets\link_policy_floors) stay.
+func reinstall(t *testing.T, b *box) {
+	t.Helper()
+	if err := os.RemoveAll(linkDir(b.store.Dir)); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok := b.store.Secrets.(*memSecrets); ok {
+		s.mu.Lock()
+		delete(s.m, secretMinEpoch)
+		s.mu.Unlock()
+	}
+}
+
+// Review N1: an expired list hold keeps holding the box after a reinstall, with an honest relay — which never delivers
+// an expired policy again.
+func TestAReinstallKeepsAnExpiredListHold(t *testing.T) {
+	clk := &fakeClock{t: time.Now()}
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c); withClock(clk)(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := clk.Now()
+	all5 := signed(t, priv, "team-1", targetPolicy(everyBox(), 5, "1.0.31", strings.Repeat("ab", 32), now))
+	hold := holdPolicy(boxList("bfl-read", "bfl-write"), 7, now)
+	hold.ExpiresAt = now.Add(time.Hour)
+	deliver(t, rc, delivery("bfl-read", "", "", all5, signed(t, priv, "team-1", hold)))
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyPolicyHolds {
+		t.Fatalf("%+v", rep.Effective)
+	}
+	clk.add(2 * time.Hour) // the list hold expired: the relay delivers every box's policy only
+	deliver(t, rc, delivery("bfl-read", "", "", all5))
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyPolicyExpired || rep.Effective.Scope.Key() != "boxes" {
+		t.Fatalf("expired: %+v", rep.Effective)
+	}
+	reinstall(t, b)
+	if st := b.link.autoStatus(); st.Effective.Why != linkproto.WhyPolicyExpired || st.Effective.Seq != 7 {
+		t.Fatalf("after the reinstall, before any delivery: %+v", st.Effective)
+	}
+	deliver(t, rc, delivery("bfl-read", "", "", all5))
+	rep := rs.next(t)
+	if rep.Effective.Why != linkproto.WhyPolicyExpired || !rep.Effective.Hold || rep.Effective.Scope.Key() != "boxes" || rep.Effective.Seq != 7 {
+		t.Fatalf("the expired list hold lapsed into every box's target: %+v", rep.Effective)
+	}
+	if pf, err := b.store.loadPolicies(); err != nil || len(pf.Policies) != 2 {
+		t.Fatalf("policy.json was not written back: %+v %v", pf, err)
+	}
+}
+
+// Review N1: a live list hold that a relay withholds after a reinstall still holds the box.
+func TestAReinstallKeepsAListHoldTheRelayWithholds(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	all5 := signed(t, priv, "team-1", targetPolicy(everyBox(), 5, "1.0.31", strings.Repeat("ab", 32), now))
+	deliver(t, rc, delivery("bfl-read", "", "", all5, signed(t, priv, "team-1", holdPolicy(boxList("bfl-read"), 7, now))))
+	rs.next(t)
+	reinstall(t, b)
+	deliver(t, rc, delivery("bfl-read", "", "", all5)) // the hold withheld
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Scope.Key() != "boxes" || rep.Effective.Seq != 7 {
+		t.Fatalf("the withheld hold no longer held: %+v", rep.Effective)
+	}
+}
+
+// Review N1: every box's expired hold, braking a live list target, is not delivered again either — and it still brakes
+// that target after a reinstall.
+func TestAReinstallKeepsAnExpiredAllBrake(t *testing.T) {
+	clk := &fakeClock{t: time.Now()}
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c); withClock(clk)(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := clk.Now()
+	list := targetPolicy(boxList("bfl-read", "tamig-1"), 3, "1.0.31", strings.Repeat("ab", 32), now)
+	list.IssuedAt = now.Add(-3 * time.Hour)
+	listSigned := signed(t, priv, "team-1", list)
+	brake := holdPolicy(everyBox(), 6, now) // issued an hour ago, after the list
+	brake.ExpiresAt = now.Add(30 * time.Minute)
+	deliver(t, rc, delivery("bfl-read", "", "", listSigned, signed(t, priv, "team-1", brake)))
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Scope.Key() != "all" {
+		t.Fatalf("braked: %+v", rep.Effective)
+	}
+	clk.add(time.Hour) // the brake expired: the relay delivers the live list only
+	deliver(t, rc, delivery("bfl-read", "", "", listSigned))
+	if rep := rs.next(t); rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Seq != 6 {
+		t.Fatalf("an expired brake no longer brakes: %+v", rep.Effective)
+	}
+	reinstall(t, b)
+	deliver(t, rc, delivery("bfl-read", "", "", listSigned))
+	rep := rs.next(t)
+	if rep.Effective.Why != linkproto.WhyPolicyHolds || rep.Effective.Scope.Key() != "all" || rep.Effective.Seq != 6 {
+		t.Fatalf("after the reinstall the list target was revived: %+v", rep.Effective)
+	}
+	if st := b.link.autoStatus(); st.Braked == nil || st.Braked.Scope.Key() != "boxes" || st.Braked.Seq != 3 {
+		t.Fatalf("braked %+v", st.Braked)
+	}
+}
+
+// Review N1: a kept list comes back only when it names the box's id — a box paired again under another id follows every
+// box's policy, while the box-list floor still binds.
+func TestARepairUnderANewIDIsNotStranded(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	digest := strings.Repeat("ab", 32)
+	all5 := signed(t, priv, "team-1", targetPolicy(everyBox(), 5, "1.0.31", digest, now))
+	deliver(t, rc, delivery("bfl-read", "", "", all5, signed(t, priv, "team-1", holdPolicy(boxList("bfl-read", "bfl-write"), 7, now))))
+	rs.next(t)
+	reinstall(t, b)
+	st, _ := b.store.LoadState()
+	st.Box = "bfl-new"
+	if err := b.store.SaveState(st); err != nil {
+		t.Fatal(err)
+	}
+	if s := b.link.autoStatus(); s.Effective.Why != linkproto.WhyScheduled || s.Effective.Scope.Key() != "all" || len(s.Policies) != 1 {
+		t.Fatalf("paired again as bfl-new: %+v (%d held)", s.Effective, len(s.Policies))
+	}
+	raw := func(ps ...linkproto.SignedPolicy) []byte {
+		b, _ := json.Marshal(delivery("bfl-new", "", "", ps...))
+		return b
+	}
+	// the box-list floor binds: a list for the new id below it is refused, one above it is taken
+	refused, _, err := b.link.acceptDelivery(raw(all5, signed(t, priv, "team-1", holdPolicy(boxList("bfl-new"), 6, now))))
+	if err != nil || len(refused) != 1 || refused[0].Code != linkproto.CodeStaleSeq {
+		t.Fatalf("%+v %v", refused, err)
+	}
+	if refused, _, err := b.link.acceptDelivery(raw(all5, signed(t, priv, "team-1", holdPolicy(boxList("bfl-new"), 8, now)))); err != nil || len(refused) != 0 {
+		t.Fatalf("%+v %v", refused, err)
+	}
+	if s := b.link.autoStatus(); s.Effective.Why != linkproto.WhyPolicyHolds || s.Effective.Seq != 8 {
+		t.Fatalf("%+v", s.Effective)
+	}
+}
+
+// Review N1: the floor record holds both scope keys' policies at their full size (a 256-box list, 16 rollbacks), and
+// one larger than two such policies is refused (fail closed).
+func TestTheFloorRecordHoldsTwoFullPolicies(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); withBuild("v1.0.30")(c) })
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	boxes := []string{"bfl-read"}
+	for i := len(boxes); i < linkproto.MaxScopeBoxes; i++ {
+		boxes = append(boxes, fmt.Sprintf("%s-%03d", strings.Repeat("z", 59), i))
+	}
+	var pins []linkproto.RollbackPin
+	for i := range linkproto.MaxRollbacks {
+		pins = append(pins, linkproto.RollbackPin{Version: fmt.Sprintf("1.0.%d", i), SHA256: strings.Repeat("cd", 32)})
+	}
+	list := targetPolicy(boxList(boxes...), 9, "1.0.31", strings.Repeat("ab", 32), now)
+	list.Rollbacks = pins
+	all := targetPolicy(everyBox(), 5, "1.0.31", strings.Repeat("ab", 32), now)
+	all.Rollbacks = pins
+	deliver(t, rc, delivery("bfl-read", "", "", signed(t, priv, "team-1", all), signed(t, priv, "team-1", list)))
+	if rep := rs.next(t); len(rep.Policies) != 2 || len(rep.Refused) != 0 {
+		t.Fatalf("%+v", rep)
+	}
+	rec, err := b.store.Secrets.Get(secretPolicyFloors)
+	if err != nil || len(rec) > maxFloorRecord || len(rec) < 20<<10 {
+		t.Fatalf("the floor record is %d bytes (%v)", len(rec), err)
+	}
+	reinstall(t, b)
+	if s := b.link.autoStatus(); len(s.Policies) != 2 || s.Effective.Scope.Key() != "boxes" || s.Effective.Seq != 9 {
+		t.Fatalf("after the reinstall: %+v", s.Effective)
+	}
+	_ = b.store.Secrets.Set(secretPolicyFloors, append([]byte(`{"v":1,"floors":{},"pad":"`), append(bytes.Repeat([]byte("x"), maxFloorRecord), '"', '}')...))
+	if _, _, err := b.store.loadFloors(); err == nil {
+		t.Fatal("an oversized floor record was taken")
+	}
+}
+
+// Review N1: the floors are written first, so they are never behind policy.json; loadHeld takes each key's kept policy
+// over the file's entry, and gives a key the floors lack the file's.
+func TestTheFloorsAreTheAuthorityOverThePolicyFile(t *testing.T) {
+	priv1, _ := team(t, 1)
+	priv2, _ := team(t, 2)
+	now := time.Now()
+	store := &Store{Dir: t.TempDir(), Secrets: &memSecrets{}}
+	entry := func(priv ed25519.PrivateKey, id string, epoch int, p linkproto.UpgradePolicy) storedPolicy {
+		return storedPolicy{Scope: p.Scope, Seq: p.Seq, Epoch: epoch, AcceptedAt: now, Signed: signed(t, priv, id, p)}
+	}
+	// a crash after the floors' write: the file still holds the retired key's policy at a higher seq
+	stale := entry(priv1, "team-1", 1, targetPolicy(everyBox(), linkproto.MaxSeq, "1.0.31", strings.Repeat("ab", 32), now))
+	fresh := entry(priv2, "team-2", 2, targetPolicy(everyBox(), 5, "1.0.32", strings.Repeat("cd", 32), now))
+	list := entry(priv2, "team-2", 2, holdPolicy(boxList("bfl-read"), 9, now))
+	if err := store.saveFloors(map[string]policyFloor{"all": floorOf(fresh)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.savePolicies(policyFile{V: 1, Policies: []storedPolicy{stale, list}}); err != nil {
+		t.Fatal(err)
+	}
+	pf, floors, kept, rebuilt, fileErr, err := store.loadHeld("bfl-read")
+	if err != nil || fileErr != nil || !kept || !rebuilt || len(pf.Policies) != 2 {
+		t.Fatalf("%+v %v %v %v %v", pf, kept, rebuilt, fileErr, err)
+	}
+	for _, sp := range pf.Policies {
+		switch sp.Scope.Key() {
+		case "all":
+			if sp.Seq != 5 || !bytes.Equal(sp.Signed.Policy, fresh.Signed.Policy) {
+				t.Fatalf("the file's stale entry won: %+v", sp)
+			}
+		case "boxes":
+			if sp.Seq != 9 {
+				t.Fatalf("the file's list: %+v", sp)
+			}
+		}
+	}
+	if floors["all"].Seq != 5 || floors["boxes"].Seq != 9 || floors["boxes"].Policy == nil {
+		t.Fatalf("floors %+v", floors)
 	}
 }

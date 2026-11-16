@@ -70,8 +70,9 @@ func (l *Link) knownSetupSHA(version string) string {
 	if err != nil {
 		return ""
 	}
+	st, _ := l.cfg.Store.LoadState()
 	l.cfg.Store.policyMu.Lock()
-	pf, err := l.cfg.Store.loadPolicies()
+	pf, _, _, _, _, err := l.cfg.Store.loadHeld(st.Box)
 	l.cfg.Store.policyMu.Unlock()
 	if err == nil {
 		for _, sp := range pf.Policies {

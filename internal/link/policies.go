@@ -71,9 +71,9 @@ type storedPolicy struct {
 	Signed     linkproto.SignedPolicy `json:"signed"`
 }
 
-// loadPolicies reads policy.json; none yet is an empty store. One that cannot be read is an error: the scheduler holds,
-// and a delivery starts over only against the seq floors kept apart (loadFloors), never from nothing. Unknown fields
-// are ignored, so a build rolled back to reads what a later one wrote.
+// loadPolicies reads policy.json; none yet is an empty store. One that cannot be read is an error; loadHeld then
+// stands the floors' kept policies in for it, never nothing. Unknown fields are ignored, so a build rolled back to
+// reads what a later one wrote.
 func (s *Store) loadPolicies() (policyFile, error) {
 	b, err := readLinkFile(s.Dir, policyPath(s.Dir), 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -94,12 +94,19 @@ func (s *Store) loadPolicies() (policyFile, error) {
 
 // policyFloor is the highest seq the box accepted for one scope key, the SHA-256 of that policy's signed bytes (the
 // same seq comes back only as the same bytes) and the epoch of the key that signed it (once the box's epoch floor is
-// above it, the floor no longer binds: review m1).
+// above it, the floor no longer binds: review m1). Policy is that policy itself, its exact signed bytes (review N1): a
+// reinstall deletes link\ (policy.json with it) and the relay never delivers an expired policy again, so an expired
+// list, or an expired brake, would be lost with the file; kept here, the box goes on holding what it held.
 type policyFloor struct {
-	Seq    int64  `json:"seq"`
-	SHA256 string `json:"sha256"`
-	Epoch  int    `json:"epoch,omitempty"`
+	Seq    int64                   `json:"seq"`
+	SHA256 string                  `json:"sha256"`
+	Epoch  int                     `json:"epoch,omitempty"`
+	Policy *linkproto.SignedPolicy `json:"policy,omitempty"`
+	At     time.Time               `json:"at,omitzero"` // when it was accepted
 }
+
+// maxFloorRecord bounds the floor record: two scope keys, each policy at most 24 KiB (base64 in the record).
+const maxFloorRecord = 256 << 10
 
 type floorRecord struct {
 	V      int                    `json:"v"`
@@ -119,6 +126,9 @@ func (s *Store) loadFloors() (floors map[string]policyFloor, present bool, err e
 	if err != nil {
 		return nil, false, fmt.Errorf("the policy seq floors cannot be read: %w", err)
 	}
+	if len(b) > maxFloorRecord {
+		return nil, false, fmt.Errorf("the policy seq floors are %d bytes, more than the %d two policies take", len(b), maxFloorRecord)
+	}
 	var rec floorRecord
 	if err := json.Unmarshal(b, &rec); err != nil || rec.V != 1 {
 		return nil, false, fmt.Errorf("the policy seq floors do not parse (version %d): %v", rec.V, err)
@@ -134,19 +144,83 @@ func (s *Store) saveFloors(floors map[string]policyFloor) error {
 	return s.Secrets.Set(secretPolicyFloors, b)
 }
 
-// floorOf is the floor an accepted policy sets.
+// floorOf is the floor an accepted policy sets, the policy kept with it.
 func floorOf(sp storedPolicy) policyFloor {
-	return policyFloor{Seq: sp.Seq, SHA256: linkproto.SHA256Hex(sp.Signed.Policy), Epoch: sp.Epoch}
+	kept := linkproto.SignedPolicy{Policy: bytes.Clone(sp.Signed.Policy), KeyID: sp.Signed.KeyID, Sig: sp.Signed.Sig}
+	return policyFloor{Seq: sp.Seq, SHA256: linkproto.SHA256Hex(sp.Signed.Policy), Epoch: sp.Epoch, Policy: &kept, At: sp.AcceptedAt}
 }
 
-// mergeFloors raises floors to what policy.json holds (a floor record lost, or older than the file).
+// mergeFloors gives a key the floors lack (a floor record lost or deleted by hand) the floor of what policy.json holds
+// for it. A key the floors have is never lowered or replaced from the file: the floors are written first, so they are
+// never behind it.
 func mergeFloors(floors map[string]policyFloor, pf policyFile) {
 	for _, sp := range pf.Policies {
-		key := sp.Scope.Key()
-		if cur, ok := floors[key]; !ok || sp.Seq > cur.Seq {
-			floors[key] = floorOf(sp)
+		if _, ok := floors[sp.Scope.Key()]; !ok {
+			floors[sp.Scope.Key()] = floorOf(sp)
 		}
 	}
+}
+
+// keptEntry is the held policy a floor's kept policy makes for box. valid is false when the record holds no policy (a
+// record from before review N1) or one that is not the floor's (its bytes, its seq); names is false when its scope does
+// not name box — a box paired again under another id is not bound by the old id's list. The policy's signature is not
+// judged here: every held policy is verified again at the epoch floor at every use (decideAuto), and one that no longer
+// verifies holds for its scope.
+func keptEntry(f policyFloor, box string) (entry storedPolicy, valid, names bool) {
+	if f.Policy == nil || linkproto.SHA256Hex(f.Policy.Policy) != f.SHA256 {
+		return storedPolicy{}, false, false
+	}
+	var p linkproto.UpgradePolicy
+	if json.Unmarshal(f.Policy.Policy, &p) != nil || p.Seq != f.Seq || p.Scope.Rank() < 0 {
+		return storedPolicy{}, false, false
+	}
+	entry = storedPolicy{Scope: p.Scope, Seq: f.Seq, Epoch: f.Epoch, AcceptedAt: f.At, Signed: *f.Policy}
+	return entry, true, p.Scope.Names(box)
+}
+
+// loadHeld is what the box holds, for box id box (review N1). The seq floors in the secrets store keep each scope key's
+// floor and the policy that set it, so they are the authority; link\policy.json mirrors them (for people, and for a
+// build before N1). A reinstall deletes link\ but not the floors: the box goes on holding what it held — an expired list
+// or an expired brake included, which the relay never delivers again. In order:
+//   - floors that cannot be read: an error (fail closed);
+//   - policy.json that cannot be read: fileErr, and with no floors kept an error too (nothing to judge a replay by);
+//   - a key the floors lack takes policy.json's entry (a lost floor record), and each key's kept policy stands in for
+//     policy.json's entry: added when the file lacks it, replacing one that differs, dropped when it does not name box.
+//
+// rebuilt says the result differs from the file, so the next write puts it back.
+func (s *Store) loadHeld(box string) (pf policyFile, floors map[string]policyFloor, kept, rebuilt bool, fileErr, err error) {
+	floors, kept, err = s.loadFloors()
+	if err != nil {
+		return policyFile{}, nil, false, false, nil, err
+	}
+	pf, fileErr = s.loadPolicies()
+	if fileErr != nil {
+		if !kept {
+			return policyFile{}, nil, false, false, fileErr, fileErr
+		}
+		pf, rebuilt = policyFile{V: 1, Policies: []storedPolicy{}}, true
+	}
+	mergeFloors(floors, pf)
+	for _, key := range []string{linkproto.ScopeAll, linkproto.ScopeBoxes} {
+		f, ok := floors[key]
+		if !ok {
+			continue
+		}
+		entry, valid, names := keptEntry(f, box)
+		if !valid {
+			continue // no kept policy (a record from before N1): policy.json's entry stands
+		}
+		at := slices.IndexFunc(pf.Policies, func(cur storedPolicy) bool { return cur.Scope.Key() == key })
+		switch {
+		case names && at < 0:
+			pf.Policies, rebuilt = append(pf.Policies, entry), true
+		case names && !bytes.Equal(pf.Policies[at].Signed.Policy, entry.Signed.Policy):
+			pf.Policies[at], rebuilt = entry, true
+		case !names && at >= 0:
+			pf.Policies, rebuilt = slices.Delete(pf.Policies, at, at+1), true
+		}
+	}
+	return pf, floors, kept, rebuilt, fileErr, nil
 }
 
 func (s *Store) savePolicies(pf policyFile) error {
@@ -281,25 +355,20 @@ func (l *Link) acceptDelivery(raw []byte) (refused []linkproto.ReportRefusal, ch
 	}
 	l.cfg.Store.policyMu.Lock()
 	defer l.cfg.Store.policyMu.Unlock()
-	floors, floorsKept, err := l.cfg.Store.loadFloors()
+	// review N1: what the box holds comes from the floors and the policies kept with them, policy.json or not
+	pf, floors, _, rebuilt, fileErr, err := l.cfg.Store.loadHeld(st.Box)
 	if err != nil {
-		l.logEvery("policy-floors", func() { l.cfg.Log.Error("link: policies are refused until it is fixed by hand", err) })
-		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
-	}
-	pf, err := l.cfg.Store.loadPolicies()
-	switch {
-	case err != nil && !floorsKept:
-		// no floors to judge a replay by: never start over (fail closed)
+		// floors that do not read, or no floors to judge a replay by: never start over (fail closed)
 		l.logEvery("policy-store", func() { l.cfg.Log.Error("link: policies are refused until it is fixed by hand", err) })
 		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
-	case err != nil:
-		// review m4: the floors are kept apart, so the box holds and takes the policies again, none below them
-		l.logEvery("policy-store", func() {
-			l.cfg.Log.Warn("link: " + err.Error() + "; the box holds and takes the relay's policies again, none below the seq floors it keeps")
-		})
-		pf = policyFile{V: 1, Policies: []storedPolicy{}}
 	}
-	mergeFloors(floors, pf)
+	if fileErr != nil {
+		// review m4, N1: the floors and the policies kept with them stand in for the file, which this delivery rewrites
+		l.logEvery("policy-store", func() {
+			l.cfg.Log.Warn("link: " + fileErr.Error() + "; the box holds what its seq floors keep and takes the relay's policies again, none below them")
+		})
+	}
+	changed = rebuilt // policy.json lost (a reinstall) or behind the floors: written back
 	now := l.cfg.Now()
 	l.noteStated(d.Tenant, d.Ring, now)
 	refused = []linkproto.ReportRefusal{}
