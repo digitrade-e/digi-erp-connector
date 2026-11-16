@@ -129,3 +129,58 @@ func TestFolderWriters(t *testing.T) {
 		})
 	}
 }
+
+// Review R4: an object, callback or conditional (callback) allow ACE that
+// grants a write right names its account as a writer, as a plain one does;
+// deny, inherit-only and read-only entries do not.
+func TestDaclGrants_EveryAllowType(t *testing.T) {
+	const users = "S-1-5-32-545"
+	for _, tc := range []struct {
+		name, ace string
+		named     bool
+	}{
+		{"plain", "(A;;0x2;;;BU)", true},
+		{"object, no GUID", "(OA;;0x2;;;BU)", true},
+		{"object, with a GUID", "(OA;;0x2;bf967aba-0de6-11d0-a285-00aa003049e2;;BU)", true},
+		{"object, both GUIDs", "(OA;;0x2;bf967aba-0de6-11d0-a285-00aa003049e2;bf967a86-0de6-11d0-a285-00aa003049e2;BU)", true},
+		{"conditional (callback)", "(XA;;0x2;;;BU;(Member_of {SID(BA)}))", true},
+		{"callback object", "(ZA;;0x2;;;BU;(Member_of {SID(BA)}))", true},
+		{"deny", "(D;;0x2;;;BU)", false},
+		{"inherit-only", "(A;OICIIO;0x2;;;BU)", false},
+		{"read only", "(A;;0x1200a9;;;BU)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sd, err := windows.SecurityDescriptorFromString("D:" + tc.ace + "(A;;FA;;;SY)")
+			if err != nil {
+				t.Fatalf("parse %s: %v", tc.ace, err)
+			}
+			dacl, _, err := sd.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			sids, err := daclGrants(dacl, folderWrite)
+			if err != nil {
+				t.Fatalf("daclGrants: %v", err)
+			}
+			named := slices.ContainsFunc(sids, func(s *windows.SID) bool { return s.String() == users })
+			if named != tc.named {
+				t.Errorf("%s: Users named %v, want %v (%v)", tc.ace, named, tc.named, sids)
+			}
+		})
+	}
+}
+
+// A conditional ACE on a real folder counts (FolderWriters reads it through
+// GetNamedSecurityInfo).
+func TestFolderWriters_ConditionalACE(t *testing.T) {
+	const adminsOnly = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+	dir := filepath.Join(t.TempDir(), "herp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, dir, adminsOnly+"(XA;;0x2;;;BU;(Member_of {SID(BA)}))", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	who, err := FolderWriters(dir)
+	if err != nil || !slices.Contains(who, wellKnownName(t, windows.WinBuiltinUsersSid)) {
+		t.Fatalf("a conditional write ACE for Users: %v, %v", who, err)
+	}
+}

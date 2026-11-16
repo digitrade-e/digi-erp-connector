@@ -692,17 +692,11 @@ func writers(chain []writerCheck) ([]string, error) {
 			}
 			continue
 		}
-		for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-			var ace *windows.ACCESS_ALLOWED_ACE
-			if err := windows.GetAce(dacl, i, &ace); err != nil {
-				return nil, fmt.Errorf("dataacl: read entry %d of %s: %w", i, o.path, err)
-			}
-			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 ||
-				uint32(ace.Mask)&o.mask == 0 {
-				continue
-			}
-			who = append(who, (*windows.SID)(unsafe.Pointer(&ace.SidStart)))
+		granted, err := daclGrants(dacl, o.mask)
+		if err != nil {
+			return nil, fmt.Errorf("dataacl: read the DACL of %s: %w", o.path, err)
 		}
+		who = append(who, granted...)
 		for _, sid := range who {
 			s := sid.String()
 			switch s {
@@ -720,6 +714,76 @@ func writers(chain []writerCheck) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// The allow ACE types besides ACCESS_ALLOWED_ACE_TYPE (winnt.h). An object
+// ACE carries one or two GUIDs before its SID (flags say which); a callback
+// ACE — a conditional one is a callback ACE — carries data after it.
+const (
+	aceAllowedCompound       = 0x4
+	aceAllowedObject         = 0x5
+	aceAllowedCallback       = 0x9
+	aceAllowedCallbackObject = 0xB
+	aceObjectTypePresent     = 0x1
+	aceInheritedTypePresent  = 0x2
+)
+
+// daclGrants is every SID an allow ACE of dacl gives one of mask's rights,
+// inherit-only ACEs aside (review R4): plain, object, callback and
+// conditional (callback) allow ACEs alike — a condition may hold, so it
+// counts (fail closed). Deny ACEs are not subtracted (they fail closed the
+// other way: a writer reported that a deny stops). A compound ACE (reserved,
+// never seen on a file) refuses the read rather than guess its SIDs.
+func daclGrants(dacl *windows.ACL, mask uint32) ([]*windows.SID, error) {
+	var out []*windows.SID
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || uint32(ace.Mask)&mask == 0 {
+			continue
+		}
+		sid, err := allowedSID(ace)
+		if err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if sid != nil {
+			out = append(out, sid)
+		}
+	}
+	return out, nil
+}
+
+// allowedSID is the SID an allow ACE gives its rights to; nil for any other
+// ACE type (deny, audit, alarm, label).
+func allowedSID(ace *windows.ACCESS_ALLOWED_ACE) (*windows.SID, error) {
+	base := unsafe.Pointer(ace)
+	off := uintptr(8) // header + mask
+	switch ace.Header.AceType {
+	case windows.ACCESS_ALLOWED_ACE_TYPE, aceAllowedCallback:
+	case aceAllowedObject, aceAllowedCallbackObject:
+		flags := *(*uint32)(unsafe.Add(base, 8))
+		off = 12
+		if flags&aceObjectTypePresent != 0 {
+			off += 16
+		}
+		if flags&aceInheritedTypePresent != 0 {
+			off += 16
+		}
+	case aceAllowedCompound:
+		return nil, errors.New("a compound allow ACE (reserved): its grantees are not read")
+	default:
+		return nil, nil
+	}
+	if off+8 > uintptr(ace.Header.AceSize) {
+		return nil, fmt.Errorf("an allow ACE of type %d is too short for its SID", ace.Header.AceType)
+	}
+	sid := (*windows.SID)(unsafe.Add(base, off))
+	if off+8+4*uintptr(sid.SubAuthorityCount()) > uintptr(ace.Header.AceSize) || !sid.IsValid() {
+		return nil, fmt.Errorf("an allow ACE of type %d holds no valid SID", ace.Header.AceType)
+	}
+	return sid, nil
 }
 
 // accountName is a SID as DOMAIN\name, or the SID itself when it names no
