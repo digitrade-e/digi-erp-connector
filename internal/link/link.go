@@ -69,6 +69,9 @@ type Config struct {
 	// ReportBudget is the most report streams one connection opens in a minute, default 5: the relay ends a
 	// connection whose box opens more than six.
 	ReportBudget int
+	// DeliveryEvery is the least time between two policy deliveries the link takes on one connection, default 10 s
+	// (review m2); negative: no gate (tests).
+	DeliveryEvery time.Duration
 }
 
 // Link keeps one box connected to the relay.
@@ -100,6 +103,7 @@ type Link struct {
 	stated      statedPlace // the tenant and ring the relay last stated: information only
 	autoMu      sync.Mutex
 	autoKick    chan struct{}
+	autoChecks  atomic.Int64 // checks run (tests read it)
 }
 
 // liveStatus is the link's own view of its connection, for link-status.
@@ -174,6 +178,9 @@ func New(cfg Config) *Link {
 	if cfg.ReportBudget <= 0 {
 		cfg.ReportBudget = 5
 	}
+	if cfg.DeliveryEvery == 0 {
+		cfg.DeliveryEvery = 10 * time.Second
+	}
 	l := &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64),
 		policySlots: make(chan struct{}, 1), autoKick: make(chan struct{}, 1)}
 	l.status.started = cfg.Now()
@@ -199,8 +206,9 @@ type conn struct {
 	liveAns chan bool
 	// policies: the relay opened a policy stream on this connection (plan 088), so it takes report streams; the box
 	// opens one on no other connection (an older relay closes a connection whose box opens a second stream).
-	policies atomic.Bool
-	reports  reportGate
+	policies   atomic.Bool
+	reports    reportGate
+	deliveries deliveryGate // review m2: at most one delivery taken per DeliveryEvery
 }
 
 var (

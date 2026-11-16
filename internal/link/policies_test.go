@@ -152,8 +152,9 @@ func (c *fakeClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); ret
 func (c *fakeClock) set(t time.Time)     { c.mu.Lock(); c.t = t; c.mu.Unlock() }
 func (c *fakeClock) add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
 
-// forTests088: no scheduler (the tests call autoCheck) and no report budget (they read every report at once).
-func forTests088(c *Config) { c.AutoEvery, c.ReportBudget = -1, 1000 }
+// forTests088: no scheduler (the tests call autoCheck), no report budget and no delivery gate (they deliver and read
+// every report at once).
+func forTests088(c *Config) { c.AutoEvery, c.ReportBudget, c.DeliveryEvery = -1, 1000, -1 }
 
 func withBuild(build string) func(*Config)   { return func(c *Config) { c.Build = build } }
 func withClock(clk *fakeClock) func(*Config) { return func(c *Config) { c.Now = clk.Now } }
@@ -568,4 +569,78 @@ func TestTheRelaysStatementsAreInformationOnly(t *testing.T) {
 	if n := b.log.count("the relay states tenant"); n != 1 {
 		t.Fatalf("the statement's change logged %d times", n)
 	}
+}
+
+// Review m2: a connection's deliveries are taken at most once per DeliveryEvery; of those that come sooner only the
+// newest is taken, once, when the period is over.
+func TestDeliveriesAreCoalesced(t *testing.T) {
+	r := newRelay(t)
+	_, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) { forTests088(c); c.DeliveryEvery = 400 * time.Millisecond })
+	rs := acceptReports(t, rc, b.keys.Public())
+	start := time.Now()
+	deliver(t, rc, delivery("bfl-read", "", "r-1"))
+	if rep := rs.next(t); rep.Ring != "r-1" {
+		t.Fatalf("the first: %+v", rep)
+	}
+	for _, ring := range []string{"r-2", "r-3", "r-4", "r-5"} {
+		deliver(t, rc, delivery("bfl-read", "", ring))
+		time.Sleep(10 * time.Millisecond)
+	}
+	rep := rs.next(t)
+	if rep.Ring != "r-5" || time.Since(start) < 350*time.Millisecond {
+		t.Fatalf("the coalesced one: ring %q after %s", rep.Ring, time.Since(start))
+	}
+	rs.none(t)
+	if n := len(b.link.policySlots); n != 0 {
+		t.Fatal("a waiting delivery holds the slot")
+	}
+}
+
+// Review m2: only a delivery that changed a policy asks the scheduler for a check, and those checks come at most once
+// per autoKickEvery however many deliveries ask.
+func TestOnlyAChangeKicksTheScheduler(t *testing.T) {
+	old := autoKickEvery
+	autoKickEvery = time.Second
+	t.Cleanup(func() { autoKickEvery = old })
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", func(c *Config) {
+		forTests088(c)
+		c.AutoEvery, c.AutoFirst = time.Hour, time.Hour // only kicks check
+	})
+	rs := acceptReports(t, rc, b.keys.Public())
+	now := time.Now()
+	policy := func(seq int64) linkproto.SignedPolicy {
+		return signed(t, priv, "team-1", targetPolicy(everyBox(), seq, "1.0.31", strings.Repeat("ab", 32), now))
+	}
+	waitChecks := func(want int64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for b.link.autoChecks.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := b.link.autoChecks.Load(); got != want {
+			t.Fatalf("%d checks, want %d", got, want)
+		}
+	}
+	deliver(t, rc, delivery("bfl-read", "", "", policy(1)))
+	rs.next(t)
+	waitChecks(1)
+	// the same policy again, five times: no check, not even once the period is over
+	for range 5 {
+		deliver(t, rc, delivery("bfl-read", "", "", policy(1)))
+		rs.next(t)
+	}
+	time.Sleep(autoKickEvery + 200*time.Millisecond)
+	waitChecks(1)
+	// four new policies in a row: a check at once, then one more when the period is over — not four
+	for seq := int64(2); seq <= 5; seq++ {
+		deliver(t, rc, delivery("bfl-read", "", "", policy(seq)))
+		rs.next(t)
+	}
+	time.Sleep(200 * time.Millisecond)
+	waitChecks(2)
+	time.Sleep(autoKickEvery)
+	waitChecks(3)
 }

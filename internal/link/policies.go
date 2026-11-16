@@ -122,9 +122,9 @@ func (pf *policyFile) put(p linkproto.UpgradePolicy, sp linkproto.SignedPolicy, 
 	return true, ""
 }
 
-// policyStream reads one delivery, records it and answers with a report. The relay opened a policy stream, so it is a
-// relay that takes report streams on this connection. It lets its slot go before it reports: the relay waits for the
-// report before its next delivery, and the link takes one delivery at a time (a second one is closed unread).
+// policyStream reads one delivery and hands it to the connection's delivery gate. The relay opened a policy stream,
+// so it is a relay that takes report streams on this connection. The slot goes as soon as the frame is read: the
+// relay waits for the report before its next delivery, and the gate keeps at most one delivery waiting.
 func (l *Link) policyStream(c *conn, st net.Conn, release func()) {
 	if c != nil {
 		c.policies.Store(true)
@@ -132,10 +132,21 @@ func (l *Link) policyStream(c *conn, st net.Conn, release func()) {
 	_ = st.SetReadDeadline(time.Now().Add(frameWait))
 	raw, err := linkproto.ReadFrame(st, linkproto.MaxPolicyFrame)
 	_ = st.Close()
+	release()
 	if err != nil {
 		return
 	}
-	refused, err := l.acceptDelivery(raw)
+	if c == nil {
+		l.takeDelivery(nil, raw)
+		return
+	}
+	c.deliveries.offer(raw, l.cfg.DeliveryEvery, func(raw []byte) { l.takeDelivery(c, raw) })
+}
+
+// takeDelivery records a delivery, reports, and asks the scheduler for a check only when a policy changed (review m2:
+// a relay re-sending the same policies costs a verification and a report, never a write, a check or a log line).
+func (l *Link) takeDelivery(c *conn, raw []byte) {
+	refused, changed, err := l.acceptDelivery(raw)
 	if err != nil {
 		code := refusalCode(err)
 		l.logEvery("policy-delivery-"+code, func() { l.cfg.Log.Warn("link: a policy delivery was refused: " + code) })
@@ -144,43 +155,78 @@ func (l *Link) policyStream(c *conn, st net.Conn, release func()) {
 	l.refusedMu.Lock()
 	l.refused = refused
 	l.refusedMu.Unlock()
-	release()
 	l.sendReport(c)
-	l.kickAuto()
+	if changed {
+		l.kickAuto()
+	}
+}
+
+// deliveryGate takes at most one delivery per period on one connection (review m2): one arriving sooner waits, and of
+// those waiting only the newest is taken, once, when the period is over.
+type deliveryGate struct {
+	mu      sync.Mutex
+	last    time.Time
+	pending []byte
+	armed   bool
+}
+
+// offer takes raw at once when the gate is open (every <= 0: always), else keeps it — replacing one kept before — for
+// one take when it opens.
+func (g *deliveryGate) offer(raw []byte, every time.Duration, take func([]byte)) {
+	g.mu.Lock()
+	now := time.Now()
+	if every <= 0 || (!g.armed && !now.Before(g.last.Add(every))) {
+		g.last = now
+		g.mu.Unlock()
+		take(raw)
+		return
+	}
+	g.pending = raw
+	if !g.armed {
+		g.armed = true
+		time.AfterFunc(g.last.Add(every).Sub(now), func() {
+			g.mu.Lock()
+			raw := g.pending
+			g.pending, g.armed, g.last = nil, false, time.Now()
+			g.mu.Unlock()
+			take(raw)
+		})
+	}
+	g.mu.Unlock()
 }
 
 // acceptDelivery verifies a delivery's policies and keeps those that name this box's id. The error refuses the
-// delivery as a whole (nothing is recorded); refused lists the policies refused one by one.
-func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
+// delivery as a whole (nothing is recorded); refused lists the policies refused one by one; changed says a policy was
+// accepted (and written).
+func (l *Link) acceptDelivery(raw []byte) (refused []linkproto.ReportRefusal, changed bool, err error) {
 	d, err := linkproto.DecodePolicyDelivery(raw)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	st, err := l.cfg.Store.LoadState()
 	switch {
 	case err != nil:
-		return nil, &linkproto.Refusal{Code: codeStateUnreadable}
+		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
 	case st.Box == "":
-		return nil, &linkproto.Refusal{Code: linkproto.CodeBoxUnknown}
+		return nil, false, &linkproto.Refusal{Code: linkproto.CodeBoxUnknown}
 	case d.Box != st.Box:
-		return nil, &linkproto.Refusal{Code: linkproto.CodeWrongBox}
+		return nil, false, &linkproto.Refusal{Code: linkproto.CodeWrongBox}
 	}
 	minEpoch, err := l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
 	if err != nil {
-		return nil, &linkproto.Refusal{Code: codeStateUnreadable}
+		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
 	}
 	l.cfg.Store.policyMu.Lock()
 	defer l.cfg.Store.policyMu.Unlock()
 	pf, err := l.cfg.Store.loadPolicies()
 	if err != nil {
 		l.logEvery("policy-store", func() { l.cfg.Log.Error("link: policies are refused until it is fixed by hand", err) })
-		return nil, &linkproto.Refusal{Code: codeStateUnreadable}
+		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
 	}
 	now := l.cfg.Now()
 	l.noteStated(d.Tenant, d.Ring, now)
-	refused := []linkproto.ReportRefusal{}
+	refused = []linkproto.ReportRefusal{}
 	unverified, lastUnverified := 0, ""
-	changed := false
 	for _, sp := range d.Policies {
 		p, key, err := l.cfg.Team.VerifySignedPolicy(sp, minEpoch)
 		if err != nil {
@@ -221,13 +267,13 @@ func (l *Link) acceptDelivery(raw []byte) ([]linkproto.ReportRefusal, error) {
 		})
 	}
 	if !changed {
-		return refused, nil // the same policies again (the relay's hourly delivery): nothing to write
+		return refused, false, nil // the same policies again (the relay's hourly delivery): nothing to write
 	}
 	if err := l.cfg.Store.savePolicies(pf); err != nil {
 		l.cfg.Log.Error("link: saving link\\policy.json", err)
-		return nil, &linkproto.Refusal{Code: codeStateUnreadable}
+		return nil, false, &linkproto.Refusal{Code: codeStateUnreadable}
 	}
-	return refused, nil
+	return refused, true, nil
 }
 
 // codeStateUnreadable: the box's own state (link.yaml, the epoch floor, policy.json) cannot be read; it never starts

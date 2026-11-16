@@ -294,8 +294,13 @@ func (l *Link) autoInputs(now time.Time, af autoFile, afErr error) autoInputs {
 	return in
 }
 
+// autoKickEvery is the least time between a check and one a delivery asks for (review m2); a kick sooner is a check
+// then, however many came. A variable for the tests only.
+var autoKickEvery = 10 * time.Second
+
 // runAuto runs the checks until ctx ends: the first a minute or three after the start (the relay delivers on
-// connect), then every AutoEvery, every minute while an automatic ticket runs, and at once after a delivery.
+// connect), then every AutoEvery, every minute while an automatic ticket runs, and after a delivery that changed a
+// policy — at most one such check per autoKickEvery.
 func (l *Link) runAuto(ctx context.Context) {
 	if l.cfg.AutoEvery < 0 {
 		return
@@ -306,21 +311,37 @@ func (l *Link) runAuto(ctx context.Context) {
 	}
 	t := time.NewTimer(first)
 	defer t.Stop()
+	due := time.Now().Add(first)
+	var lastCheck time.Time
+	stop := func() {
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-l.autoKick:
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
+			if soon := lastCheck.Add(autoKickEvery); time.Now().Before(soon) {
+				if soon.Before(due) {
+					stop()
+					t.Reset(time.Until(soon))
+					due = soon
 				}
+				continue
 			}
+			stop()
 		}
 		next := l.autoCheck()
-		t.Reset(max(next.Sub(l.cfg.Now()), time.Second))
+		lastCheck = time.Now()
+		wait := max(next.Sub(l.cfg.Now()), time.Second)
+		t.Reset(wait)
+		due = time.Now().Add(wait)
 	}
 }
 
@@ -329,6 +350,7 @@ func (l *Link) runAuto(ctx context.Context) {
 func (l *Link) autoCheck() time.Time {
 	l.autoMu.Lock()
 	defer l.autoMu.Unlock()
+	l.autoChecks.Add(1)
 	now := l.cfg.Now()
 	af, afErr := l.cfg.Store.loadAuto()
 	if afErr != nil {
