@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
@@ -435,5 +436,66 @@ func TestCountersRoute_ErrorIsACode(t *testing.T) {
 	}
 	if len(log.warns) != 2 || !strings.Contains(strings.Join(log.warns, "\n"), b.dataDir) {
 		t.Errorf("the log got %d lines, want the two texts once each (with their paths): %v", len(log.warns), log.warns)
+	}
+}
+
+// Review m13: GET /api/counters lists history and reads indexes on every
+// call, and /api/* has no rate limit: its report runs at most once per TTL,
+// and again at once after a reservation (the generation changes).
+func TestCacheCounters(t *testing.T) {
+	calls := 0
+	report := func() []hasavshevet.CounterStatus {
+		calls++
+		return []hasavshevet.CounterStatus{{Key: "b2b", Last: int64(calls)}}
+	}
+	var gen uint64
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	cached := CacheCounters(report, 3*time.Second, func() uint64 { return gen }, func() time.Time { return now })
+	h := NewCountersHandler(cached)
+	get := func() string {
+		w := httptest.NewRecorder()
+		h(w, httptest.NewRequest(http.MethodGet, "/api/counters", nil))
+		return w.Body.String()
+	}
+	first := get()
+	for range 50 {
+		if get() != first {
+			t.Fatal("the cached answer changed")
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("%d reports for 51 requests within the TTL, want 1", calls)
+	}
+	gen++ // an order reserved a number
+	if get() == first || calls != 2 {
+		t.Fatalf("after a reservation: %d reports, want a fresh one", calls)
+	}
+	now = now.Add(3 * time.Second)
+	get()
+	if calls != 3 {
+		t.Fatalf("after the TTL: %d reports, want a fresh one", calls)
+	}
+	now = now.Add(-time.Hour) // the clock went back: never trust the old answer
+	get()
+	if calls != 4 {
+		t.Fatalf("after the clock went back: %d reports", calls)
+	}
+}
+
+// The queue's generation moves with a reservation, never with a replay.
+func TestOrderQueueGeneration(t *testing.T) {
+	b := newV2Box(t)
+	h := NewSendOrderV2Handler(b.queue, b.cfg)
+	g0 := b.queue.Generation()
+	if w := postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "g1", `{"v":1,"folder":"herp","counter":"b2b"}`)); w.Code != http.StatusAccepted {
+		t.Fatal(w.Body)
+	}
+	g1 := b.queue.Generation()
+	if g1 == g0 {
+		t.Fatal("a reservation did not change the generation")
+	}
+	postJSON(t, h, "/api/v2/sendOrder", orderWithRule(t, "g1", `{"v":1,"folder":"herp","counter":"b2b"}`))
+	if b.queue.Generation() != g1 {
+		t.Error("a replay changed the generation")
 	}
 }

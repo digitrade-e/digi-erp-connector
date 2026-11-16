@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -159,6 +160,9 @@ type ReceiptWriter struct {
 	// without the import lock.
 	issuedMu sync.Mutex
 	issued   []int64
+	// gen counts reservations and recoveries, for GET /api/counters' cache
+	// (review m13; Generation).
+	gen atomic.Uint64
 
 	// recovered is guarded by importLock. False until Recover succeeds, and
 	// set back to false when the store could not be moved past a reserved
@@ -609,12 +613,24 @@ func (w *ReceiptWriter) setIssued(entries []*receiptIndexEntry) {
 	w.issuedMu.Lock()
 	w.issued = ns
 	w.issuedMu.Unlock()
+	w.gen.Add(1) // recovery: the store may move next
 }
 
 func (w *ReceiptWriter) addIssued(n int64) {
 	w.issuedMu.Lock()
 	w.issued = append(w.issued, n)
 	w.issuedMu.Unlock()
+	w.gen.Add(1)
+}
+
+// Generation changes whenever this writer reserves a receipt number or
+// recovers: GET /api/counters' cache answers again only while it is the same
+// (review m13).
+func (w *ReceiptWriter) Generation() uint64 {
+	if w == nil {
+		return 0
+	}
+	return w.gen.Load()
 }
 
 // historyPath is DataDir/history/receipts/{n}.

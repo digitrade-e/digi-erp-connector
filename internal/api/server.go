@@ -148,9 +148,13 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 		counters = hasavshevet.NewCounterSet(cfg, deps.DataDir)
 	}
 	receiptWriter, _ := deps.ReceiptWriter.(*hasavshevet.ReceiptWriter)
-	countersHandler := handlers.NewCountersHandler(handlers.LogCounterErrors(deps.Logger, func() []hasavshevet.CounterStatus {
+	countersReport := handlers.LogCounterErrors(deps.Logger, func() []hasavshevet.CounterStatus {
 		return hasavshevet.ReportCounters(counters, deps.SendOrderQueue, receiptWriter, deps.DataDir, strings.TrimSpace(cfg.SendOrderDir))
-	}))
+	})
+	// Review m13: cached for a few seconds, and again after any reservation
+	// (both generations only grow, so their sum changes with either).
+	countersHandler := handlers.NewCountersHandler(handlers.CacheCounters(countersReport, handlers.CountersCacheTTL,
+		func() uint64 { return deps.SendOrderQueue.Generation() + receiptWriter.Generation() }, time.Now))
 	capabilitiesHandler := handlers.NewDocumentCapabilitiesHandler(cfg, counters)
 	sendOrderStatusHandler := handlers.NewSendOrderStatusHandler(deps.SendOrderQueue)
 	sendReceiptHandler := handlers.NewSendReceiptHandler(deps.ReceiptWriter, receiptsConfigured, deps.Logger)

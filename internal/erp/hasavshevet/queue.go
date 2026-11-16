@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -116,6 +117,9 @@ type OrderQueue struct {
 	// accounts besides the administrators can write to (review M1;
 	// RefuseFolders).
 	refusedFolders map[string]string
+	// gen counts what moves a counter here — reservations, recoveries — for
+	// the read route's cache (review m13; Generation).
+	gen atomic.Uint64
 
 	crashPoint func(point string) // test seam
 }
@@ -172,6 +176,16 @@ func (q *OrderQueue) UseCounters(set *CounterSet) {
 	defer q.closeMu.Unlock()
 	q.counters = set
 	clear(q.recovered)
+}
+
+// Generation changes whenever this queue reserves a number or recovers a
+// counter: GET /api/counters' cache answers again only while it is the same
+// (review m13).
+func (q *OrderQueue) Generation() uint64 {
+	if q == nil {
+		return 0
+	}
+	return q.gen.Load()
 }
 
 // RefuseFolders makes the queue refuse every new order, and every re-queue,
@@ -306,6 +320,7 @@ func (q *OrderQueue) recoverCountersLocked(cs []*Counter) error {
 	if all := q.orderCounters().OfKind(config.DocumentKindOrders); len(all) > 1 || (len(all) == 1 && !all[0].Implicit) {
 		q.logOutOfRange(all, entries, history)
 	}
+	defer q.gen.Add(1) // a counter may have moved
 	var errs []error
 	for _, c := range cs {
 		if err := q.recoverCounterLocked(c, entries, history); err != nil {
@@ -643,6 +658,7 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 		return Acceptance{}, err // nothing reserved: the counter has not moved
 	}
 	q.highest[c.Key] = n
+	q.gen.Add(1)
 	q.mu.Lock()
 	q.byNumber[n] = orderIndexStem(key)
 	q.mu.Unlock()

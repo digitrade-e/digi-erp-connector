@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/api/dto"
 	"github.com/digitrade-e/digi-erp-connector/internal/api/respond"
@@ -19,6 +20,37 @@ import (
 
 // CountersReport is the counters as the box reads them now.
 type CountersReport func() []hasavshevet.CounterStatus
+
+// CountersCacheTTL is how long GET /api/counters answers from its cache.
+const CountersCacheTTL = 3 * time.Second
+
+// CacheCounters wraps report so that it runs at most once per ttl while
+// generation stays the same (review m13): a report lists sendOrderDir\history
+// once per order counter and reads the whole receipt index for each receipt
+// counter no live writer serves, and /api/* has no rate limit (by decision).
+// generation changes with every reservation and recovery in this process
+// (OrderQueue/ReceiptWriter.Generation), so a number issued here is never
+// answered stale; a provision command restarts the service, which empties
+// the cache. Concurrent requests wait for the one report being read.
+func CacheCounters(report CountersReport, ttl time.Duration, generation func() uint64, now func() time.Time) CountersReport {
+	var (
+		mu     sync.Mutex
+		cached []hasavshevet.CounterStatus
+		at     time.Time
+		gen    uint64
+		filled bool
+	)
+	return func() []hasavshevet.CounterStatus {
+		mu.Lock()
+		defer mu.Unlock()
+		g, t := generation(), now()
+		if filled && g == gen && t.Sub(at) < ttl && !t.Before(at) {
+			return cached
+		}
+		cached, at, gen, filled = report(), t, g, true
+		return cached
+	}
+}
 
 // LogCounterErrors wraps report so that a counter's error text
 // (CounterStatus.Detail, which names files under the data directory) reaches
