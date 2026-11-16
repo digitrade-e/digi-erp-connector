@@ -259,3 +259,39 @@ func TestLockdown_RefusesAFolderThatResolvesElsewhere(t *testing.T) {
 		t.Error("the refused lock-down wrote")
 	}
 }
+
+// Review T2 on long paths: the lock-down and its restore reach an entry
+// deeper than MAX_PATH (every open is by its \\?\ form, the walk by handle):
+// the deep file loses Users' write, and the restore puts it back as it was.
+func TestLockdown_LongPaths(t *testing.T) {
+	herp := filepath.Join(longTemp(t), "herp")
+	deep := herp
+	for len(deep) < 300 {
+		deep = filepath.Join(deep, strings.Repeat("d", 40))
+	}
+	file := filepath.Join(deep, "KUPAIN_500001.doc")
+	mkfile(t, file)
+	setDACL(t, longPath(deep), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, longPath(file), "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	before := ownerAndDACL(t, longPath(file))
+	plan, err := PlanLockdown(herp, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := plan.Entries[len(plan.Entries)-1]; !strings.HasSuffix(last.Rel, "KUPAIN_500001.doc") || len(herp)+1+len(last.Rel) <= 260 {
+		t.Fatalf("the deepest entry %q (%d chars)", last.Rel, len(herp)+1+len(last.Rel))
+	}
+	if _, err := ApplyLockdown(herp, nil, plan); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := daclOf(t, longPath(file))
+	if !strings.Contains(after, "(A;;0x1200a9;;;BU)") || strings.Contains(after, "0x1301bf;;;BU") {
+		t.Errorf("the deep file after the lock-down: %s", after)
+	}
+	if _, skipped, err := RestoreFolder(herp, plan.Entries); err != nil || skipped != 0 {
+		t.Fatalf("RestoreFolder: %d skipped, %v", skipped, err)
+	}
+	if got := ownerAndDACL(t, longPath(file)); !sameDACL(got, before) {
+		t.Errorf("the deep file after the restore:\n got  %s\n want %s", got, before)
+	}
+}

@@ -310,3 +310,16 @@ Second review (R1–R5, R7, R8; R6 is a follow-up): `folder_writable` only for a
 frozen in the rule (R2); the daemon's folder guard reads ACLs in the background and again (R3); object, callback and
 conditional allow entries count as writers (R4); the cache generation moves after the store (R5); the in-flight guards
 refuse unreadable entries (R7); `documentRule.temporary` also as text (R8).
+
+Third review (T1–T5, m1–m3), round 4: **a lock-down never grants** — `dataacl.MaskDACL` lowers each entry's own DACL
+in place (SYSTEM/Administrators/TrustedInstaller unchanged, a trusted writer ∩ Modify, anyone else ∩ read & execute,
+generic rights mapped, emptied entries dropped, deny/conditional/object entries kept, no entry ever added; the folder
+cut from its parent with its inherited entries made explicit; an untrusted owner handed to Administrators), proved by
+a property test over generated DACLs, with the check output per principal across the whole tree (T2, T4); trusted
+writers count where code runs (sendOrderDir with an order importer, the receipt folder with a receipt importer, the
+importers' folders), `folder-acl` refuses folders holding importer files or executables, and the daemon reads the
+importer before each run — behind the link a writable one is `503 IMPORTER_WRITABLE` (T1); document folders are judged
+where Windows resolves them — no reparse point on the path, never in or holding the system, profile, ProgramData,
+install or data folders, never in an AppData — and `folder-acl` judges the handle's final path too (T3); `state` lists
+the recorded pre-images (T5); the guard reads in parallel with a 10 s bound per read (m1); a refused receipt folder
+skips the recovery scan (m2); `acceptUnreadable` is one total per command (m3).
