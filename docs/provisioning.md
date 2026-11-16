@@ -429,10 +429,14 @@ names (`folder_writable`, plan 087 review M1: `allowWritable` accepts it over Wi
 plain local path outside the system folders (link mode's rules), never `allowWritable`.
 The daemon's own check (`config_refused`): never the `sendOrderDir` or a folder holding it; folders pairwise
 distinct; a test folder never the pickup or receipt folder; a test counter only into a test folder; no model (b)
-receipt importer with a test receipt folder (it would import test receipts into the books). A folder whose
-unfinished orders (frozen rule naming it) would be written elsewhere is not removed, moved or retyped
-(`folder_in_flight`; a pattern change is fine — the frozen file name stays the order's). The receipts folder or
-counter does not change while a receipt is reserved (`receipts_in_flight`). Config-command flow; `restore` puts
+receipt importer with a test receipt folder (it would import test receipts into the books). A folder with
+unfinished orders frozen for it (reserved, or waiting for a resend) is not removed and not changed at all — path,
+kind, name pattern, temporary prefix, layout or test (`folder_in_flight`, review m5: the pattern decides the "number
+taken" scan, the layout the record, the test flag whether production may write there). The receipt binding — the
+receipt folder, its name pattern or test flag, the receipt counter — does not change while a receipt is reserved
+(`receipts_in_flight`: Recover finishes it into the folder in use, under its pattern; a file already written under
+the old name would be written again under the new one). The `receipts` command makes the same check when it moves
+`sendReceiptDir`. Config-command flow; `restore` puts
 `config.yaml` back. Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
 `documents` (and refuses index entries holding a frozen rule).
 

@@ -216,6 +216,11 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 	if strings.TrimSpace(t.SendReceiptDir) != "" && t.ERP != config.ERPHasavshevet {
 		return refuse(CodeSpecInvalid, "leave sendReceiptDir empty: only Hasavshevet takes receipt files", "sendReceiptDir is set for erp %s", t.ERP)
 	}
+	// A reserved receipt is finished into the receipt folder in use: it does
+	// not move under one (review m5, as the documents command).
+	if err := a.documentsIdle(a.cur, t); err != nil {
+		return err
+	}
 	if !t.ReceiptsConfigured() {
 		return nil
 	}

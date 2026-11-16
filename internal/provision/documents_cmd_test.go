@@ -197,14 +197,37 @@ func TestDocuments_InFlight(t *testing.T) {
 			t.Errorf("%s: %v, want %s", name, err, CodeFolderInFlight)
 		}
 	}
-	// The pattern may change (the frozen name stays the order's).
+	// Review m5: any other attribute waits too — the pattern decides the
+	// "number taken" scan, the layout the record, the test flag whether a
+	// production order may be written there.
+	for name, f := range map[string]*FolderInput{
+		"pattern":          {Kind: "orders", Path: herp, NamePattern: "ORD_{n}.doc", Layout: "legacy"},
+		"temporary prefix": {Kind: "orders", Path: herp, NamePattern: "{prefix}IMOVEIN_{n}.doc", TempPrefix: "TMP_", Layout: "legacy"},
+		"layout":           {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "official"},
+		"test":             {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy", Test: true},
+	} {
+		_, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+			in.ChangeSet = "cs-documents-pt"
+			in.Folders = map[string]*FolderInput{"herp": f}
+		}), false)
+		if r := (*Refusal)(nil); !errors.As(err, &r) || r.Code != CodeFolderInFlight {
+			t.Errorf("%s change with an order in flight: %v, want %s", name, err, CodeFolderInFlight)
+		}
+	}
+	// Set again as it is: nothing changes, nothing waits.
 	if _, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
-		in.ChangeSet = "cs-documents-pt"
-		in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: "ORD_{n}.doc", Layout: "legacy"}}
+		in.ChangeSet = "cs-documents-same"
+		in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
 	}), false); err != nil {
-		t.Errorf("pattern change: %v", err)
+		t.Errorf("the same folder again: %v", err)
 	}
 	_ = os.Remove(entry)
+	if _, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.ChangeSet = "cs-documents-pt2"
+		in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: herp, NamePattern: "ORD_{n}.doc", Layout: "legacy"}}
+	}), false); err != nil {
+		t.Errorf("pattern change with nothing in flight: %v", err)
+	}
 
 	rix := filepath.Join(sys.dir, "receipts", "index")
 	if err := os.MkdirAll(rix, 0o700); err != nil {
@@ -220,6 +243,33 @@ func TestDocuments_InFlight(t *testing.T) {
 	}), false)
 	if r := (*Refusal)(nil); !errors.As(err, &r) || r.Code != CodeReceiptsInFlight {
 		t.Fatalf("receipts binding with one reserved: %v", err)
+	}
+	// Review m5: the bound folder's pattern or test flag waits too (a file
+	// written under the old name would be written again under the new one).
+	_, err = ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.ChangeSet = "cs-documents-rp"
+		in.Folders = map[string]*FolderInput{"herp_receipts": {Kind: "receipts", Path: kupain, NamePattern: "KUP_{n}.doc"}}
+	}), false)
+	if r := (*Refusal)(nil); !errors.As(err, &r) || r.Code != CodeReceiptsInFlight {
+		t.Fatalf("the bound folder's pattern with one reserved: %v", err)
+	}
+	// And the receipts command's sendReceiptDir, when it is the folder in use.
+	sys2, fdb2, _ := handInstallBox(t)
+	env2 := testEnv(sys2, fdb2)
+	cfg, _ := readConfig(t, sys2.dir)
+	cfg.SendReceiptDir = mkdir(t, "kupain_old")
+	writeConfig(t, sys2.dir, cfg)
+	rix2 := filepath.Join(sys2.dir, "receipts", "index")
+	if err := os.MkdirAll(rix2, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rix2, "r.json"), []byte(`{"key":"r","number":7,"state":"reserved"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved := mkdir(t, "kupain_new")
+	_, err = ApplyReceipts(context.Background(), env2, receiptsInput(func(in *ReceiptsInput) { in.SendReceiptDir = &moved }), false)
+	if r := (*Refusal)(nil); !errors.As(err, &r) || r.Code != CodeReceiptsInFlight {
+		t.Fatalf("receipts moving sendReceiptDir with one reserved: %v", err)
 	}
 }
 

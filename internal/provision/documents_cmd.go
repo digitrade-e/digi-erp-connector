@@ -160,9 +160,9 @@ func ApplyDocuments(ctx context.Context, env Env, in DocumentsInput, check bool)
 
 // checkDocuments: each folder set is a folder on this machine, not a link or
 // junction, outside the data directory, that only the administrators can
-// write to (review M1); a folder removed exists and holds no unfinished order
-// frozen for it; the receipts' folder or counter changes only while no
-// receipt is reserved (Recover finishes one into the folder in use).
+// write to (review M1); a folder removed exists; and no folder that
+// unfinished work uses, nor the receipt binding, changes under it
+// (documentsIdle).
 func (a *applier) checkDocuments(in DocumentsInput) error {
 	checked := map[string]bool{}
 	for _, k := range sortedFolderKeys(in.Folders) {
@@ -170,9 +170,6 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 		if f == nil {
 			if _, ok := a.cur.Documents.Folders[k]; !ok {
 				return refuse(CodeFolderUnknown, "name a configured folder to remove", "there is no folder %s", k)
-			}
-			if r := a.folderIdle(k, "removed"); r != nil {
-				return r
 			}
 			continue
 		}
@@ -193,11 +190,6 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 			return err
 		}
 		checked[k] = true
-		if old, ok := a.cur.Documents.Folders[k]; ok && (old.Kind != f.Kind || !sameFolder(old.Path, p)) {
-			if r := a.folderIdle(k, "moved or retyped"); r != nil {
-				return r
-			}
-		}
 	}
 	// The receipt folder a binding names (it may have been set earlier).
 	if k := strings.TrimSpace(a.tgt.Documents.Receipts.Folder); in.Receipts != nil && k != "" && !checked[k] && a.tgt.ReceiptDir() != "" {
@@ -205,17 +197,63 @@ func (a *applier) checkDocuments(in DocumentsInput) error {
 			return err
 		}
 	}
-	if a.cur.ReceiptDir() != a.tgt.ReceiptDir() || a.cur.ReceiptCounterKey() != a.tgt.ReceiptCounterKey() {
+	return a.documentsIdle(a.cur, a.tgt)
+}
+
+// documentsIdle refuses changing, from cur to tgt, what unfinished work
+// depends on (review m5): any attribute of a folder with unfinished orders
+// frozen for it — its path (where the file goes), kind, name pattern and
+// temporary prefix (the "number taken" scan), layout (the record), test flag
+// (whether production may write there) — and the receipt binding — the
+// receipt folder, its name pattern and test flag, the receipt counter —
+// while a receipt is reserved: Recover or a repeat finishes it into the
+// folder in use, under its pattern (a reserved receipt whose file was written
+// under the old name would be written again under the new one: two copies a
+// kupain*.doc importer takes both of). Restore runs it too (review m9).
+func (a *applier) documentsIdle(cur, tgt config.Config) error {
+	for _, k := range cur.FolderKeys() {
+		nf, ok := tgt.Documents.Folders[k]
+		if ok && sameFolderConfig(cur.Documents.Folders[k], nf) {
+			continue
+		}
+		what := "removed"
+		if ok {
+			what = "changed (path, kind, name pattern, temporary prefix, layout or test)"
+		}
+		if r := a.folderIdle(k, what); r != nil {
+			return r
+		}
+	}
+	if !sameReceiptBinding(cur, tgt) {
 		n, err := hasavshevet.ReceiptsInFlight(a.dir)
 		if err != nil {
 			return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the receipt index: %v", err)
 		}
 		if n > 0 {
 			return refuse(CodeReceiptsInFlight, "let the reserved receipts finish (a repeat of their key, or the next start), then run it again",
-				"%d receipt(s) are reserved: they would be finished into the new folder or under the new counter", n)
+				"%d receipt(s) are reserved: they would be finished into another folder, under another name or another counter", n)
 		}
 	}
 	return nil
+}
+
+// sameFolderConfig reports whether two typed folders write the same file the
+// same way.
+func sameFolderConfig(a, b config.FolderConfig) bool {
+	return a.Kind == b.Kind && a.NamePattern == b.NamePattern && a.TempPrefix == b.TempPrefix && a.Layout == b.Layout &&
+		a.Test == b.Test && sameFolder(strings.TrimSpace(a.Path), strings.TrimSpace(b.Path))
+}
+
+// sameReceiptBinding reports whether receipts go to the same folder, under
+// the same name pattern and test flag, from the same counter.
+func sameReceiptBinding(a, b config.Config) bool {
+	test := func(c config.Config) bool {
+		f, ok := c.Documents.Folders[strings.TrimSpace(c.Documents.Receipts.Folder)]
+		return ok && f.Test
+	}
+	da, db := a.ReceiptDir(), b.ReceiptDir()
+	return (da == db || (da != "" && db != "" && sameFolder(da, db))) && a.ReceiptNamePattern() == b.ReceiptNamePattern() &&
+		a.ReceiptCounterKey() == b.ReceiptCounterKey() && test(a) == test(b)
 }
 
 // folderIdle refuses when unfinished orders (reserved, or waiting for a
@@ -227,7 +265,7 @@ func (a *applier) folderIdle(k, what string) *Refusal {
 	}
 	if n > 0 {
 		return refuse(CodeFolderInFlight, "let them be written (or resolve them, docs/troubleshooting.md), then run it again",
-			"%d order(s) frozen for folder %s are not finished: a resend would write into the folder %s", n, k, what)
+			"%d order(s) frozen for folder %s are not finished, and the folder would be %s under them (a resend writes by it)", n, k, what)
 	}
 	return nil
 }
