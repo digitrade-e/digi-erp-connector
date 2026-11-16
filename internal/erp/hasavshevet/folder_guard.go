@@ -39,10 +39,11 @@ import (
 //
 // Review m1: one slow folder holds up no other. The folders are read in
 // parallel, each read waited on at most FolderReadTimeout: one that does not
-// finish in time (a lookup hung on an unresponsive domain controller) leaves
-// only its folder unknown — refused behind the link — and records its result
-// whenever it ends; one read per folder at a time, so a hung one never piles
-// up. A request for a folder never read, and not being read, starts its
+// finish in time (a lookup hung on an unresponsive domain controller) records
+// its result whenever it ends, and meanwhile its folder keeps its last read's
+// answer (review R4-3: an allowed folder is not refused for a slow re-check),
+// or is unknown — refused behind the link — when it was never read; one read
+// per folder at a time, so a hung one never piles up. A request for a folder never read, and not being read, starts its
 // read (bounded the same way); the tick reads such a folder too.
 
 // The guard's keys for the importers (review T1): read before each run.
@@ -250,9 +251,11 @@ func (g *FolderGuard) startCheckLocked(key string) {
 // check reads folder key's writers (in a goroutine of its own: it may wait
 // on the domain controller), waits for them at most readTimeout, and records
 // the result, logging what changed. The caller marked the folder checking.
-// A read that does not finish in time leaves the folder unknown — refused
-// behind the link — and still checking: its result is recorded whenever it
-// ends, and no other read of the folder starts meanwhile (review m1).
+// A read that does not finish in time leaves the folder still checking: its
+// result is recorded whenever it ends, and no other read of the folder starts
+// meanwhile (review m1). Until then a folder read before keeps that read's
+// answer — allowed stays allowed, refused stays refused (review R4-3) — and
+// one never read is unknown, refused behind the link.
 func (g *FolderGuard) check(key string) {
 	g.mu.Lock()
 	f := g.folders[key]
@@ -286,11 +289,27 @@ func (g *FolderGuard) check(key string) {
 	case r := <-done:
 		g.record(key, r.who, r.err, g.now().Sub(start))
 	case <-timer.C:
+		// Review R4-3: a read that does not finish in time is no answer. A folder read before keeps what that read
+		// found until this one ends — an allowed folder stays allowed (a slow domain controller must not turn its
+		// ten-minute re-check into 503s), a refused one stays refused; only a folder never read is unknown (refused
+		// behind the link).
 		g.mu.Lock()
-		f.state, f.why, f.checked = guardUnknown, fmt.Sprintf("reading who can write to it did not finish in %s", g.readTimeout), g.now()
+		before := f.state
+		if before == guardUnknown {
+			f.state, f.why, f.checked = guardUnknown, fmt.Sprintf("reading who can write to it did not finish in %s", g.readTimeout), g.now()
+		}
 		g.mu.Unlock()
-		g.log.Warn(fmt.Sprintf("FOLDER CHECK: reading who can write to %s (%s) did not finish in %s: unknown — refused behind the link — until it does; "+
-			"the other folders are not held up", name, path, g.readTimeout))
+		switch before {
+		case guardAllowed:
+			g.log.Warn(fmt.Sprintf("FOLDER CHECK: re-reading who can write to %s (%s) did not finish in %s: it stays allowed, as its last read found it, "+
+				"until this read ends; the other folders are not held up", name, path, g.readTimeout))
+		case guardRefused:
+			g.log.Warn(fmt.Sprintf("FOLDER CHECK: re-reading who can write to %s (%s) did not finish in %s: it stays refused until this read ends",
+				name, path, g.readTimeout))
+		default:
+			g.log.Warn(fmt.Sprintf("FOLDER CHECK: reading who can write to %s (%s) did not finish in %s: unknown — refused behind the link — until it does; "+
+				"the other folders are not held up", name, path, g.readTimeout))
+		}
 		g.wg.Add(1)
 		go func() {
 			defer g.wg.Done()

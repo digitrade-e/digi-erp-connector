@@ -198,8 +198,10 @@ leaves SYSTEM and Administrators full control and Users read. Then:
    again at most once a minute when an order or a receipt needs it, an allowed one every ten minutes — no restart
    needed (`folder-acl` and `documents` restart it anyway). server.log says `FOLDER ALLOWED` when a refused folder is
    the administrators' only again. The folders are read in parallel, each waited on at most 10 s (review m1): a read
-   hung on an unresponsive domain controller logs `FOLDER CHECK: … did not finish in 10s` and leaves only that folder
-   unknown (refused behind the link) until it ends; a request for a folder not read yet starts its read.
+   hung on an unresponsive domain controller logs `FOLDER CHECK: … did not finish in 10s` and holds up no other folder.
+   Until it ends, a folder read before keeps that read's answer (review R4-3, v1.0.31): an allowed folder stays allowed
+   — a slow domain controller causes no `503` at its ten-minute re-check — and a refused one stays refused; only a
+   folder never read is unknown (refused behind the link). A request for a folder not read yet starts its read.
 
 ## File endpoint returns INVALID_FILE_PATH
 
