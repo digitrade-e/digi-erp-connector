@@ -17,6 +17,7 @@ type fakeProcs struct {
 	procs  []RunningProcess
 	killed []uint32
 	stuck  map[uint32]bool // ending it fails: it stays
+	reuse  map[uint32]RunningProcess
 	err    error
 }
 
@@ -35,14 +36,30 @@ func (f *fakeProcs) list(name string) ([]RunningProcess, error) {
 	return out, nil
 }
 
-func (f *fakeProcs) kill(pid uint32) error {
+// kill plays killProcess: the process that has pid NOW is ended only when its image is image (the check on the
+// handle that ends it).
+func (f *fakeProcs) kill(pid uint32, image string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.killed = append(f.killed, pid)
 	if f.stuck[pid] {
 		return errors.New("access is denied")
 	}
-	f.procs = slices.DeleteFunc(f.procs, func(p RunningProcess) bool { return p.PID == pid })
+	if f.reuse != nil {
+		if p, ok := f.reuse[pid]; ok { // between the listing and the kill, another process took the PID
+			f.procs = slices.DeleteFunc(f.procs, func(q RunningProcess) bool { return q.PID == pid })
+			f.procs = append(f.procs, p)
+			delete(f.reuse, pid)
+		}
+	}
+	at := slices.IndexFunc(f.procs, func(p RunningProcess) bool { return p.PID == pid })
+	if at < 0 {
+		return errors.New("no such process")
+	}
+	if !samePath(f.procs[at].Image, image) {
+		return errNotThatProcess
+	}
+	f.procs = slices.Delete(f.procs, at, at+1)
 	return nil
 }
 
@@ -149,5 +166,26 @@ func TestTheSetupClosesApplications(t *testing.T) {
 		if !slices.Contains(strings.Fields(setupArgs), flag) {
 			t.Errorf("the setup is not run with %s", flag)
 		}
+	}
+}
+
+// Review m5: the image is checked on the handle that ends the process. A PID another process took between the listing
+// and the kill is not ended — that process stays — and the window that went away is not in the way of the setup.
+func TestAReusedPIDIsNeverEnded(t *testing.T) {
+	g := newRunnerRig(t, true)
+	other := RunningProcess{PID: 101, Session: 1, Image: filepath.Join("C:", "Windows", "notepad.exe")}
+	f := &fakeProcs{procs: []RunningProcess{{PID: 101, Session: 2, Image: installedGUI}}, reuse: map[uint32]RunningProcess{101: other}}
+	withProcs(&g.r, f)
+	if _, err := g.r.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.procs, other) {
+		t.Fatalf("the process that took the PID was ended: %v", f.procs)
+	}
+	if r := g.result(t); r.ClosedApps == nil || r.ClosedApps.Found != 1 || r.ClosedApps.StillOpen != 0 || g.ran != 1 || r.Error != "" {
+		t.Fatalf("closed %+v, ran %d, error %q", r.ClosedApps, g.ran, r.Error)
+	}
+	if !g.log.has("not the installed connector") {
+		t.Fatalf("not logged: %v", g.log.lines)
 	}
 }

@@ -73,10 +73,11 @@ type UpgradeRunner struct {
 	PickupDir  func() string
 	HTTPClient *http.Client  // Fetch's (link.yaml's proxy)
 	HealthPoll time.Duration // between health rounds; 0 = 15 s
-	// ListProcesses lists the processes named name, every session; KillProcess ends one (upgrade_close.go: the
-	// connector's windows are ended before each setup). Nil ListProcesses: none is looked for.
+	// ListProcesses lists the processes named name, every session; KillProcess ends process pid only when its image is
+	// image, checked on the handle that ends it (upgrade_close.go: the connector's windows are ended before each
+	// setup). Nil ListProcesses: none is looked for.
 	ListProcesses func(name string) ([]RunningProcess, error)
-	KillProcess   func(pid uint32) error
+	KillProcess   func(pid uint32, image string) error
 	// FormatFloor reads DataDir\format-floor (plan 088 D11): "" when none is recorded. Nil = formatfloor.Read. The
 	// runner never rolls back below it, nor below its own compiled formatfloor.RollbackFloor.
 	FormatFloor func() (string, error)

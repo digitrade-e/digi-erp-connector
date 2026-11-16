@@ -1,6 +1,7 @@
 package link
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -14,8 +15,9 @@ import (
 // reports with no reboot reason — a process in another Terminal Services session comes back as
 // RmRebootReasonSessionMismatch, so Inno leaves it open and the setup fails. The runner therefore ends, before each
 // setup (the upgrade's and the rollback's), every process whose image is the INSTALLED digi-erp-connector.exe — by full
-// path, not by name — in every session, and waits up to closeAppsWait for them to be gone. What was open is lost
-// unsaved. One still open then means the setup cannot replace the file: it is not run, and the result says why.
+// path, not by name — in every session, and waits up to closeAppsWait for them to be gone. Each is ended through the
+// one handle its image was read on (review m5): a PID another process took meanwhile is never ended. What was open is
+// lost unsaved. One still open then means the setup cannot replace the file: it is not run, and the result says why.
 
 const (
 	guiExe        = "digi-erp-connector.exe"
@@ -38,6 +40,9 @@ type ClosedApps struct {
 	Sessions  []uint32 `json:"sessions,omitempty"` // the sessions they were open in
 	Error     string   `json:"error,omitempty"`    // the processes could not be listed
 }
+
+// errNotThatProcess: the PID no longer names the installed connector (another process took it): it is not ended.
+var errNotThatProcess = errors.New("not the installed connector")
 
 // samePath compares two Windows paths: cleaned, without case.
 func samePath(a, b string) bool {
@@ -74,7 +79,7 @@ func (r UpgradeRunner) closeConnectorWindows(installDir string) *ClosedApps {
 		if !slices.Contains(c.Sessions, p.Session) {
 			c.Sessions = append(c.Sessions, p.Session)
 		}
-		if err := r.KillProcess(p.PID); err != nil {
+		if err := r.KillProcess(p.PID, exe); err != nil {
 			r.Log.Warn(fmt.Sprintf("link upgrade %s: ending the connector window %d (session %d): %v", r.Ticket, p.PID, p.Session, err))
 		}
 	}

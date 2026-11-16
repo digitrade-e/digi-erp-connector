@@ -4,6 +4,7 @@ package link
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"unsafe"
 
@@ -44,20 +45,35 @@ func imagePath(pid uint32) string {
 		return ""
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
+	img, _ := imageOf(h)
+	return img
+}
+
+// imageOf is the executable of the process h names, as a Win32 path.
+func imageOf(h windows.Handle) (string, error) {
 	buf := make([]uint16, windows.MAX_LONG_PATH)
 	n := uint32(len(buf))
 	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil {
-		return ""
+		return "", err
 	}
-	return windows.UTF16ToString(buf[:n])
+	return windows.UTF16ToString(buf[:n]), nil
 }
 
-// killProcess ends a process at once (TerminateProcess: no chance to save).
-func killProcess(pid uint32) error {
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
+// killProcess ends process pid at once (TerminateProcess: no chance to save) — only when its executable is image. One
+// handle does both: the image is read through the handle that ends it, so a PID that another process took meanwhile is
+// never ended (review m5: the image was read on one handle and the process ended by PID on another).
+func killProcess(pid uint32, image string) error {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
+	got, err := imageOf(h)
+	if err != nil {
+		return fmt.Errorf("process %d: its image cannot be read, so it is not ended: %w", pid, err)
+	}
+	if !samePath(got, image) {
+		return fmt.Errorf("%w: process %d is %s now", errNotThatProcess, pid, got)
+	}
 	return windows.TerminateProcess(h, 1)
 }
