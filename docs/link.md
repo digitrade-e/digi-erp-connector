@@ -48,8 +48,12 @@ From v1.0.29 (Digitrade plan 086) also, each a fixed `provision` command line
 | `receipt-seed` | `receipt-seed <N>`, one argument N (1–9 digits) — the receipt number store, write-if-absent | none |
 | `daemon-restart`, `daemon-stop`, `daemon-start` | `daemon <action>`, optional argument `--assume-idle` | none |
 
-A command whose input carries a password (**sealed only** above) is refused `input_not_sealed`, and never run,
-unless its input is sealed to this server's key: the relay never sees it in clear, whatever the sender does.
+A command whose input carries a password is refused `input_not_sealed`, and never run, unless its input is sealed to
+this server's key: `auth`, `db` (**sealed only** above), `apply` and `apply-check` always, and any other command —
+`discover` with `db.password`, say — whenever its input holds a password field (`password`, `passwd`, `pwd`, `secret`
+in any key, at any depth, with a value). The refusal guards against a mistake on the sender's side, nothing more: an
+unsealed input has already crossed the relay when this server refuses it. Keeping the relay from reading a password is
+the sender's job — digi-mcp seals the input of every command it sends.
 
 Since v1.0.29 (Digitrade plan 086) the set also has, run by `provision` the same way: **`logs`** (the tail of
 `server.log`, `link.log`, `ui.log` or either service's Event Log, redacted on this server before it is sent) and

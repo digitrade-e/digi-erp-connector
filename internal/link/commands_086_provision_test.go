@@ -112,3 +112,40 @@ func TestASecretCarryingCommandMustBeSealed(t *testing.T) {
 		t.Fatal("the password reached the log")
 	}
 }
+
+// Review m5: apply and apply-check carry the DB and API passwords, and discover db.password; they join the sealed-only
+// set (discover — and any other command — whenever its stdin holds a password field). digi-mcp seals every command, so
+// this guards against a sender's mistake; the stdin has crossed the relay by then.
+func TestEveryCommandWithAPasswordMustBeSealed(t *testing.T) {
+	r := newRelay(t)
+	priv, kr := team(t, 1)
+	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
+	for _, c := range []struct {
+		command, stdin string
+		refused        bool
+	}{
+		{"apply", `{"version":1}`, true},
+		{"apply-check", `{"version":1}`, true},
+		{"discover", `{"db":{"host":"127.0.0.1","user":"sa","password":"S3cret-sa"}}`, true},
+		{"discover", `{"DB":{"Password":"S3cret-sa"}}`, true},
+		{"options", `{"version":1,"auth":{"password":"S3cret-api"}}`, true},
+		{"discover", `{}`, false},
+		{"discover", `{"db":{"user":"sa","password":""}}`, false},
+		{"options", `{"version":1,"options":{"debug":true}}`, false},
+	} {
+		before := b.runner.count()
+		raw, _ := envelope(priv, "team-1", "bfl-read", c.command, nil, []byte(c.stdin), time.Now())
+		_, sa := send(t, rc, raw, []byte(c.stdin))
+		a := answerOf(sa)
+		ran := b.runner.count() > before
+		if c.refused && (a.Refusal != CodeInputNotSealed || ran) {
+			t.Errorf("%s %s in clear: refusal %q, ran %v", c.command, c.stdin, a.Refusal, ran)
+		}
+		if !c.refused && (a.Refusal != "" || !ran) {
+			t.Errorf("%s %s: refusal %q, ran %v", c.command, c.stdin, a.Refusal, ran)
+		}
+	}
+	if b.log.has("S3cret") {
+		t.Fatal("a password reached the log")
+	}
+}

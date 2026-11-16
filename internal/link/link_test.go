@@ -645,7 +645,7 @@ func TestARelayCannotPassOffARefusalAsTheAnswer(t *testing.T) {
 	priv, kr := team(t, 1)
 	b, rc := pairedBox(t, r, "bfl-read", kr, "127.0.0.1:1", nil)
 	stdin := []byte(`{}`)
-	raw, e := envelope(priv, "team-1", "bfl-read", "apply", nil, stdin, time.Now())
+	raw, e := envelope(priv, "team-1", "bfl-read", "options", nil, stdin, time.Now()) // apply must be sealed (review m5)
 	var s linkproto.Signed
 	_ = json.Unmarshal(raw, &s)
 	sig := []byte(s.Sig)

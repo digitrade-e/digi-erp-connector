@@ -105,8 +105,56 @@ func init() {
 	}
 }
 
-// MustBeSealed reports whether command's stdin must arrive sealed.
-func MustBeSealed(command string) bool { return sealedOnly086[command] }
+// sealedOnlyBase are the base commands whose stdin always carries a password: apply's spec holds the DB and API
+// credentials (review m5).
+var sealedOnlyBase = map[string]bool{
+	"apply":       true,
+	"apply-check": true,
+}
+
+// MustBeSealed reports whether command's stdin must arrive sealed whatever it holds.
+func MustBeSealed(command string) bool { return sealedOnly086[command] || sealedOnlyBase[command] }
+
+// MustBeSealedInput reports whether this command with this stdin must arrive sealed: always for MustBeSealed's, and for
+// any other whenever its stdin holds a password field with a value (discover's db.password; review m5). It guards
+// against a sender's mistake only — an unsealed stdin has already crossed the relay when the box refuses it; digi-mcp
+// seals every command.
+func MustBeSealedInput(command string, stdin []byte) bool {
+	return MustBeSealed(command) || carriesPassword(stdin)
+}
+
+// passwordKey is a JSON key that names a credential.
+var passwordKey = regexp.MustCompile(`(?i)password|passwd|pwd|secret`)
+
+// carriesPassword: stdin is JSON with, at any depth, a password-like key holding a non-empty string.
+func carriesPassword(stdin []byte) bool {
+	var v any
+	if json.Unmarshal(stdin, &v) != nil {
+		return false // not JSON: provision refuses it without reading a field
+	}
+	var walk func(any) bool
+	walk = func(v any) bool {
+		switch t := v.(type) {
+		case map[string]any:
+			for k, x := range t {
+				if s, ok := x.(string); ok && s != "" && passwordKey.MatchString(k) {
+					return true
+				}
+				if walk(x) {
+					return true
+				}
+			}
+		case []any:
+			for _, x := range t {
+				if walk(x) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(v)
+}
 
 // daemonCmd086 is provision's daemon <action>, optionally with --assume-idle.
 func daemonCmd086(action string) func([]string) ([]string, bool) {
