@@ -155,7 +155,9 @@ kind) at the pickup or receipt folder; a name pattern outside the closed grammar
 ASCII stem starting with a letter and ending in a letter or `_` — review m11: a digit would run into the number —, `{n}`, `.doc`; no device name); `tempPrefix` without `{prefix}` or the reverse; an
 orders folder without `layout`; a test receipt counter into a production folder, or a production one (today's
 store included) into a test folder (review m10: a gap in the tax-document series); a test receipt folder with a model
-(b) receipt importer. Never downgrade a box with this block below v1.0.30.
+(b) receipt importer. Never downgrade a box with this block below v1.0.30: its recovery pushes the production
+counters into the test ranges and its GUI save drops the block — the repair is in
+[troubleshooting.md](troubleshooting.md#a-downgrade-below-v1030-plan-087).
 
 ## Data directory permissions (Windows)
 

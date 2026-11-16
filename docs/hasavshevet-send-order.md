@@ -385,8 +385,11 @@ folder's writers at its start: behind the link an order into one others can writ
 nothing reserved (a re-queue waits the same way) — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to).
 
 **Downgrade.** Never put a build older than v1.0.30 back on a box that has counters or folders configured, or that
-took an order with a rule: it ignores `documents` (lenient YAML) and refuses index entries holding a `rule` (strict
-decode: `ORDER_INDEX_UNREADABLE` for those keys).
+took an order with a rule: it ignores `documents` (lenient YAML), refuses index entries holding a `rule` (strict
+decode: `ORDER_INDEX_UNREADABLE` for those keys), its global recovery pushes `lastOrderNumber.json` past every
+range's history (its production orders take test-range numbers; upgraded back, the production counter is above its
+`max`: `COUNTER_EXHAUSTED`), and its GUI's save drops the `documents` block. The hand repair:
+[troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).
 
 ---
 

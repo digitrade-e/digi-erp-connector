@@ -442,7 +442,9 @@ receipt folder, its name pattern or test flag, the receipt counter — does not 
 the old name would be written again under the new one). The `receipts` command makes the same check when it moves
 `sendReceiptDir`. Config-command flow; `restore` puts
 `config.yaml` back. Never downgrade a box below v1.0.30 with folders or counters in place: an older build ignores
-`documents` (and refuses index entries holding a frozen rule).
+`documents` (and refuses index entries holding a frozen rule), its recovery pushes the production counters into the
+test ranges, and its GUI save drops the block —
+[troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).
 
 ## `restore` and pre-images without files
 

@@ -288,3 +288,45 @@ when `history\<n>\IMOVEIN_<n>.doc` already exists or another entry holds `n`.
 It logs `ORDER NOT QUEUED AGAIN: order <n> (historyId=…) is retryable, but …`
 with the reason, answers the repeat as `failed` and leaves the entry as it is —
 fix the entry by the steps above.
+
+## A downgrade below v1.0.30 (plan 087)
+
+**Never put a build older than v1.0.30 back on a box with `documents` (counters or typed folders) in `config.yaml`,
+or that took an order with a documentRule.** It is worse than an ignored setting (review m12):
+
+- **v1.0.29 ignores `documents`** (its YAML reading is lenient): it numbers every order from `lastOrderNumber.json`
+  and every receipt from `receiptNumber.json`, writes them where `sendOrderPickupDir` / `sendReceiptDir` say (a bound
+  receipt folder is forgotten), and answers `/api/v2/sendOrder` 404.
+- **Its recovery is global**, not per range: it moves `lastOrderNumber.json` past the highest
+  `sendOrderDir\history\<n>` of *every* range — test counters' and other counters' included — so its next production
+  order takes a number in a test range (9 000 000+ at BFL), written to the production destination. The receipt store
+  jumps the same way past the highest receipt in `history\receipts`. Index entries holding a `rule` are refused by its
+  strict decoder (`ORDER INDEX ENTRY SKIPPED`; a repeat of such a key answers 500 `ORDER_INDEX_UNREADABLE` — nothing is
+  written twice).
+- **A save from v1.0.29's GUI drops the whole `documents` block** (its config has no such field).
+
+Upgraded back, the adopted production counter (e.g. `b2b`, 1 000 000–1 999 999) holds a number above its `max`:
+every order without a rule answers `503 COUNTER_EXHAUSTED`, and no command can lower it — `start-from` only moves
+forward, and a `range` holding the number would overlap the test counter's. The per-range recovery of the test
+counter moves it past the numbers v1.0.29 issued there, so none is issued twice; only the production counter needs a
+hand.
+
+**The hand repair** — with the service stopped (`GET /api/sendOrder` `{"queued":0,"running":0}` first), as an
+administrator, on the box:
+
+1. **Put `documents` back** if a v1.0.29 GUI save dropped it: copy `config.yaml` from a backup made before the
+   downgrade, or from the pre-image of a change set made after the last `counters` / `documents` command
+   (`DataDir\provision\<changeSet>\`); otherwise digi-mcp sends the `documents` and `counters` commands again once
+   step 3 is done (a `create` of today's store refuses a store above its `max`).
+2. **Note what v1.0.29 wrote outside its range.** Each `sendOrderDir\history\<n>` folder dated after the downgrade
+   with `n` in a test (or another counter's) range is a real order written to production under that number: it is in
+   Hashavshevet (Asmahta `n`) — nothing to undo, but the books should know. The same for `history\receipts\<n>`.
+3. **Set each production store back to the highest number its own range issued.** `state`'s `counters` (it reads
+   the files; the service may stay stopped) give `highestIssued` per range — the highest index entry or history folder
+   *inside the range*. Write `{"lastOrderNumber": <b2b's highestIssued>}` into
+   `sendOrderDir\lastOrderNumber.json`, and `{"nextReceiptNumber": <receipts' highestIssued + 1>}` (keep `seededAt`)
+   into `DataDir\receipts\receiptNumber.json`. This is the one time a store goes back by hand, and it is safe only
+   because every number above it that v1.0.29 issued lies in another counter's range: check that no index entry and
+   no history folder inside the counter's range is above the value you write.
+4. **Start the service** and read `GET /api/counters`: each counter's `remaining` above 0, no `error`, `last` = the
+   value written; `state`'s `counters` agree.
