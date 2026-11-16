@@ -4,6 +4,7 @@ package dataacl
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -306,5 +307,57 @@ func TestLockdown_LongPaths(t *testing.T) {
 	}
 	if got := ownerAndDACL(t, longPath(file)); !sameDACL(got, before) {
 		t.Errorf("the deep file after the restore:\n got  %s\n want %s", got, before)
+	}
+}
+
+// writeDACL writes one entry's DACL through its handle and nothing else
+// (review T2): a protected entry stays protected with its explicit entries,
+// an inheriting one keeps its inherited entries and its auto-inherited mark,
+// and writing a folder never touches what is in it.
+func TestWriteDACL_KeepsInheritanceAndTouchesNoChild(t *testing.T) {
+	root := longTemp(t)
+	d := filepath.Join(root, "d")
+	f, g := filepath.Join(d, "f.txt"), filepath.Join(d, "g.txt")
+	mkfile(t, f)
+	mkfile(t, g)
+	setDACL(t, d, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	setDACL(t, f, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	show := func(p string) string {
+		s, ctl := daclOf(t, p)
+		return fmt.Sprintf("%s [%#x]", s, ctl)
+	}
+	fBefore, gBefore := show(f), show(g)
+	t.Logf("before: d %s\n f %s\n g %s", show(d), fBefore, gBefore)
+	tr, err := newTrust()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(p string, root bool) {
+		t.Helper()
+		n, err := open(p, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer windows.CloseHandle(n.h)
+		e, _, err := planEntry(p, n, nil, tr, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeDACL(p, n.h, e.after, root || e.protected, e.autoInherited); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s (protected %v, auto-inherited %v): now %s", filepath.Base(p), root || e.protected, e.autoInherited, show(p))
+	}
+	write(d, true)
+	if show(f) != fBefore || show(g) != gBefore {
+		t.Errorf("writing the folder changed what is in it:\n f %s (was %s)\n g %s (was %s)", show(f), fBefore, show(g), gBefore)
+	}
+	write(f, false)
+	if s, ctl := daclOf(t, f); ctl&windows.SE_DACL_PROTECTED == 0 || strings.Contains(s, ";ID;") || !strings.Contains(s, "(A;;0x1200a9;;;BU)") {
+		t.Errorf("f after its write: %s [%#x]", s, ctl)
+	}
+	write(g, false)
+	if s, ctl := daclOf(t, g); ctl&windows.SE_DACL_PROTECTED != 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 || !strings.Contains(s, ";ID;") {
+		t.Errorf("g after its write: %s [%#x]", s, ctl)
 	}
 }
