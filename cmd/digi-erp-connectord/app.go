@@ -346,8 +346,9 @@ func (a *serverApp) Stop(ctx context.Context) {
 // documentRule's, or the default order counter (lastOrderNumber.json).
 func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, counters *hasavshevet.CounterSet, log logger.LoggerService) *hasavshevet.OrderQueue {
 	numStore := counters.OrderNumberStore()
-	if numStore == nil {
-		numStore = hasavshevet.NewOrderNumberStore(filepath.Join(cfg.SendOrderDir, "lastOrderNumber.json"))
+	if dir := strings.TrimSpace(cfg.SendOrderDir); numStore == nil && filepath.IsAbs(dir) {
+		// never a relative path: the service's working folder is System32 (review m1)
+		numStore = hasavshevet.NewOrderNumberStore(filepath.Join(dir, "lastOrderNumber.json"))
 	}
 	queue := hasavshevet.NewOrderQueue(hasavshevet.NewSender(dbConn, cfg, numStore, log), log)
 	queue.UseCounters(counters)

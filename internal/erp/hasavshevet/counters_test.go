@@ -211,3 +211,42 @@ func TestScanIssued_PerRange(t *testing.T) {
 		t.Errorf("in flight for herp_test: %d", n)
 	}
 }
+
+// Review m1: a counter whose store has no absolute folder — lastOrderNumber
+// adopted with sendOrderDir empty or relative, a store of its own with a
+// relative data directory — never reads or writes the working folder (the
+// service's is System32): it fails closed.
+func TestNewCounterSet_NeverARelativeStorePath(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	for name, tc := range map[string]struct {
+		sendOrderDir, dataDir, key string
+	}{
+		"lastOrderNumber, no sendOrderDir":       {"", t.TempDir(), "b2b"},
+		"lastOrderNumber, relative sendOrderDir": {"orders", t.TempDir(), "b2b"},
+		"its own store, relative data directory": {t.TempDir(), "", "shop"},
+		"receiptNumber, relative data directory": {t.TempDir(), "data", "rcpt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Config{ERP: config.ERPHasavshevet, SendOrderDir: tc.sendOrderDir, Documents: config.DocumentsConfig{
+				Counters: map[string]config.CounterConfig{
+					"b2b":  {Kind: config.DocumentKindOrders, Min: 1, Max: 999, Store: config.CounterStoreLastOrderNumber},
+					"shop": {Kind: config.DocumentKindOrders, Min: 1000, Max: 1999},
+					"rcpt": {Kind: config.DocumentKindReceipts, Min: 2000, Max: 2999, Store: config.CounterStoreReceiptNumber},
+				}}}
+			c := mustCounter(t, NewCounterSet(cfg, tc.dataDir), tc.key)
+			if c.Path != "" || c.StorePresent() {
+				t.Errorf("path %q, present %v: want no path", c.Path, c.StorePresent())
+			}
+			if _, err := c.Peek(); !errors.Is(err, ErrCounterMissing) {
+				t.Errorf("Peek = %v, want ErrCounterMissing", err)
+			}
+			if err := c.RaiseTo(0); err == nil {
+				t.Error("RaiseTo wrote a store without a folder")
+			}
+			if des, _ := os.ReadDir(cwd); len(des) != 0 {
+				t.Errorf("the working folder got %v", des)
+			}
+		})
+	}
+}

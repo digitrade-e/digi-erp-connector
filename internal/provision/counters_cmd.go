@@ -242,6 +242,12 @@ func (a *applier) counterConfigChange(ctx context.Context, in CountersInput) err
 			return refuse(CodeCounterUnknown, "list the counters (state, or GET /api/counters) and name one of them", "there is no configured counter %s", in.Key)
 		case in.Op != CounterOpCreate && cur.Retired:
 			return refuse(CodeCounterRetired, "a retired counter keeps its range and issues nothing; create another", "counter %s is retired", in.Key)
+		case in.Op == CounterOpCreate && in.Store == config.CounterStoreLastOrderNumber &&
+			(!a.cur.OrdersConfigured() || !filepath.IsAbs(strings.TrimSpace(a.cur.SendOrderDir))):
+			// review m1: the order counter lives in sendOrderDir; without one its
+			// store would have no folder (never the working folder).
+			return refuse(CodeCounterStore, "configure orders first (the orders command), or create a counter with a store of its own",
+				"store %s is the order counter in sendOrderDir, and this box writes no orders (sendOrderDir %q)", in.Store, a.cur.SendOrderDir)
 		}
 		c, r := a.counterOf(a.tgt, in.Key)
 		if r != nil {

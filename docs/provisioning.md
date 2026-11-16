@@ -368,7 +368,9 @@ Each op takes exactly its fields (another one is `spec_invalid`): `create` kind,
 - **`create`** adds `documents.counters.<key>` to `config.yaml`. `store` adopts one of today's stores **in place**:
   `lastOrderNumber` (`sendOrderDir\lastOrderNumber.json`, kind orders) or `receiptNumber`
   (`DataDir\receipts\receiptNumber.json`, kind receipts); otherwise the counter has a store of its own,
-  `DataDir\counters\<key>.json` `{"last": N}`. Within a kind, today's store is adopted **before any other counter of
+  `DataDir\counters\<key>.json` `{"last": N}`. `lastOrderNumber` needs orders configured (an absolute
+  `sendOrderDir`; otherwise `counter_store` — its store would have no folder, and a store path is never relative:
+  such a counter fails closed). Within a kind, today's store is adopted **before any other counter of
   that kind** (the daemon's own check, `config_refused`): the order counter numbers the orders sent without a
   documentRule. A kind with no configured counter keeps today's store under its implicit key (`orders` /
   `receipts`, range 1–999 999 999), so a box writing both adopts one store, then the other, in either order. The

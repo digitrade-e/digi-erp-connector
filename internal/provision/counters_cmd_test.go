@@ -410,3 +410,33 @@ func TestCounters_AdoptBothStoresOnAnOrdersAndReceiptsBox(t *testing.T) {
 		t.Errorf("keys %q %q", cfg.ReceiptCounterKey(), cfg.DefaultOrderCounterKey())
 	}
 }
+
+// Review m1: adopting lastOrderNumber on a box that writes no orders is
+// refused; before, create passed CheckConfig and its stopped-service step
+// wrote {"lastOrderNumber": 0} into the working folder (System32 for the
+// service).
+func TestCounters_AdoptingLastOrderNumberNeedsOrders(t *testing.T) {
+	sys, fdb, _ := handInstallBox(t)
+	env := testEnv(sys, fdb)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.SendOrderDir = ""
+	writeConfig(t, sys.dir, cfg)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	_, err := ApplyCounters(context.Background(), env, countersIn("create", "b2b", func(in *CountersInput) {
+		in.Kind, in.Store, in.Min, in.Max = "orders", config.CounterStoreLastOrderNumber, i64(1_000_000), i64(1_999_999)
+	}), false)
+	if r := wantRefusal(t, err, CodeCounterStore); !strings.Contains(r.Message, "writes no orders") {
+		t.Errorf("refusal %+v", r)
+	}
+	if des, _ := os.ReadDir(cwd); len(des) != 0 {
+		t.Fatalf("the working folder got %v", des)
+	}
+	// A store of its own is fine on such a box.
+	if _, err := ApplyCounters(context.Background(), env, countersIn("create", "shop", func(in *CountersInput) {
+		in.ChangeSet = "cs-counters-shop-01"
+		in.Kind, in.Min, in.Max = "orders", i64(5_000_000), i64(5_999_999)
+	}), false); err != nil {
+		t.Fatalf("a store of its own: %v", err)
+	}
+}

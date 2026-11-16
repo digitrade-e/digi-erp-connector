@@ -124,12 +124,18 @@ func (c *Counter) RaiseTo(last int64) error {
 		return s.raiseTo(last)
 	case *CounterFile:
 		return s.raiseTo(last)
+	case unusableStore:
+		return fmt.Errorf("counter %s: %w", c.Key, s.err)
 	}
 	return fmt.Errorf("counter %s: its store cannot be set", c.Key)
 }
 
-// StorePresent reports whether the counter's store file exists.
+// StorePresent reports whether the counter's store file exists (never for a
+// store without a folder: Path "").
 func (c *Counter) StorePresent() bool {
+	if c.Path == "" {
+		return false
+	}
 	_, err := os.Lstat(c.Path)
 	return err == nil
 }
@@ -148,6 +154,24 @@ func CounterStorePath(dataDir, key string) string {
 	return filepath.Join(dataDir, "counters", key+".json")
 }
 
+// unusableStore is the store of a counter whose file has no folder: an empty
+// or relative sendOrderDir or data directory (review m1). A relative path
+// would be the process's working folder — the service's is
+// C:\Windows\System32 — written as SYSTEM, so the path is never built:
+// every read is err, and RaiseTo refuses it.
+type unusableStore struct{ err error }
+
+func (u unusableStore) Peek() (int64, error)    { return 0, u.err }
+func (u unusableStore) advancePast(int64) error { return u.err }
+
+// absFolder is dir trimmed when it is an absolute folder, else "".
+func absFolder(dir string) string {
+	if d := strings.TrimSpace(dir); d != "" && filepath.IsAbs(d) {
+		return d
+	}
+	return ""
+}
+
 // NewCounterSet builds the counters of cfg. With none configured it holds
 // today's two stores under their implicit keys — the order counter when orders
 // are configured, the receipt store when receipts are — with the range
@@ -157,18 +181,41 @@ func CounterStorePath(dataDir, key string) string {
 // (config.ValidateDocuments).
 func NewCounterSet(cfg config.Config, dataDir string) *CounterSet {
 	s := &CounterSet{byKey: map[string]*Counter{}}
-	orderPath := filepath.Join(strings.TrimSpace(cfg.SendOrderDir), "lastOrderNumber.json")
+	// Never a relative store path (review m1): with sendOrderDir empty or
+	// relative the order counter's store has no folder, and with dataDir
+	// relative neither has any other store. Such a counter fails closed.
+	orderDir, data := absFolder(cfg.SendOrderDir), absFolder(dataDir)
+	orderStore := func(refuseMissing bool) (string, numberSource) {
+		if orderDir == "" {
+			return "", unusableStore{fmt.Errorf("%w: the order counter lives in sendOrderDir, and sendOrderDir %q is not an absolute folder",
+				ErrCounterMissing, strings.TrimSpace(cfg.SendOrderDir))}
+		}
+		p := filepath.Join(orderDir, "lastOrderNumber.json")
+		s.orderStore = NewOrderNumberStore(p)
+		s.orderStore.refuseMissing = refuseMissing
+		return p, s.orderStore
+	}
+	dataStore := func(p func(string) string, open func(string) numberSource) (string, numberSource) {
+		if data == "" {
+			return "", unusableStore{fmt.Errorf("%w: the data directory %q is not an absolute folder", ErrCounterMissing, dataDir)}
+		}
+		path := p(data)
+		return path, open(path)
+	}
+	receiptStore := func() (string, numberSource) {
+		return dataStore(ReceiptNumberStorePath, func(p string) numberSource { return NewReceiptNumberStore(p) })
+	}
 	if !cfg.CountersConfigured() {
 		if cfg.OrdersConfigured() {
-			s.orderStore = NewOrderNumberStore(orderPath)
+			p, src := orderStore(false)
 			s.add(&Counter{Key: config.ImplicitOrderCounterKey, Kind: config.DocumentKindOrders, Min: 1, Max: config.MaxDocumentNumber,
-				Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: orderPath, src: s.orderStore})
+				Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: p, src: src})
 			s.defaultKey = config.ImplicitOrderCounterKey
 		}
 		if cfg.ReceiptsConfigured() {
-			p := ReceiptNumberStorePath(dataDir)
+			p, src := receiptStore()
 			s.add(&Counter{Key: config.ImplicitReceiptCounterKey, Kind: config.DocumentKindReceipts, Min: 1, Max: config.MaxDocumentNumber,
-				Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: NewReceiptNumberStore(p)})
+				Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: src})
 			s.receiptKey = config.ImplicitReceiptCounterKey
 		}
 		return s
@@ -178,15 +225,13 @@ func NewCounterSet(cfg config.Config, dataDir string) *CounterSet {
 		c := &Counter{Key: k, Kind: cc.Kind, Min: cc.Min, Max: cc.Max, Test: cc.Test, Retired: cc.Retired, Store: cc.Store}
 		switch cc.Store {
 		case config.CounterStoreLastOrderNumber:
-			s.orderStore = NewOrderNumberStore(orderPath)
-			s.orderStore.refuseMissing = true
-			c.Path, c.src = orderPath, s.orderStore
+			c.Path, c.src = orderStore(true)
 		case config.CounterStoreReceiptNumber:
-			c.Path = ReceiptNumberStorePath(dataDir)
-			c.src = NewReceiptNumberStore(c.Path)
+			c.Path, c.src = receiptStore()
 		default:
-			c.Path = CounterStorePath(dataDir, k)
-			c.src = NewCounterFile(c.Path, cc.Kind)
+			kind := cc.Kind
+			c.Path, c.src = dataStore(func(d string) string { return CounterStorePath(d, k) },
+				func(p string) numberSource { return NewCounterFile(p, kind) })
 		}
 		s.add(c)
 	}
@@ -194,15 +239,14 @@ func NewCounterSet(cfg config.Config, dataDir string) *CounterSet {
 	// implicit key (counters are adopted one kind at a time) — the order
 	// counter failing closed now that counters are configured.
 	if cfg.OrdersConfigured() && cfg.ImplicitCounter(config.DocumentKindOrders) {
-		s.orderStore = NewOrderNumberStore(orderPath)
-		s.orderStore.refuseMissing = true
+		p, src := orderStore(true)
 		s.add(&Counter{Key: config.ImplicitOrderCounterKey, Kind: config.DocumentKindOrders, Min: 1, Max: config.MaxDocumentNumber,
-			Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: orderPath, src: s.orderStore})
+			Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: p, src: src})
 	}
 	if cfg.ReceiptsConfigured() && cfg.ImplicitCounter(config.DocumentKindReceipts) {
-		p := ReceiptNumberStorePath(dataDir)
+		p, src := receiptStore()
 		s.add(&Counter{Key: config.ImplicitReceiptCounterKey, Kind: config.DocumentKindReceipts, Min: 1, Max: config.MaxDocumentNumber,
-			Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: NewReceiptNumberStore(p)})
+			Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: src})
 	}
 	if cfg.OrdersConfigured() {
 		s.defaultKey = cfg.DefaultOrderCounterKey()
