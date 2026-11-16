@@ -222,7 +222,13 @@ func (r UpgradeRunner) rollback(job UpgradeJob, tdir string, res *UpgradeResult)
 		return done()
 	}
 	started := r.Now()
-	code, err := r.RunSetup(setup, filepath.Join(tdir, "rollback-setup.log"), setupTimeout)
+	logPath := filepath.Join(tdir, "rollback-setup.log")
+	defer func() {
+		if !rb.OK && rb.ExitCode != -1 {
+			res.RollbackSetupLogTail = tailLines(logPath, 40, 300)
+		}
+	}()
+	code, err := r.RunSetup(setup, logPath, setupTimeout)
 	rb.ExitCode = code
 	if err != nil {
 		rb.Error = "the rollback's setup: " + err.Error()

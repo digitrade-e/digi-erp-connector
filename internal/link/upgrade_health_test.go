@@ -147,8 +147,8 @@ func TestTheRunnerRollsBackAnUnhealthyUpgrade(t *testing.T) {
 		!strings.Contains(r.Error, "1.0.29, the build it replaced, was installed again and is healthy") || resultOutcome(r) != linkproto.OutcomeRolledBack {
 		t.Fatalf("error %q", r.Error)
 	}
-	if len(g.setups) != 2 || g.setups[1] != "rollback-"+setupFile("1.0.29")+"="+string(g.oldSetup) {
-		t.Fatalf("setups run %v", g.setups)
+	if len(g.setups) != 2 || g.setups[1] != "rollback-"+setupFile("1.0.29")+"="+string(g.oldSetup) || r.RollbackSetupLogTail != nil {
+		t.Fatalf("setups run %v, rollback log tail %q", g.setups, r.RollbackSetupLogTail)
 	}
 	if _, err := os.Stat(filepath.Join(g.tdir, "rollback-"+setupFile("1.0.29"))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the rollback's setup was kept")
@@ -205,6 +205,9 @@ func TestOneRollbackOnly(t *testing.T) {
 	if g.ran != 2 || r.Rollback == nil || r.Rollback.OK || !strings.Contains(r.Rollback.Error, "not healthy after it either") ||
 		r.Rollback.Health == nil || r.Rollback.Health.OK || resultOutcome(r) != linkproto.OutcomeUnhealthy {
 		t.Fatalf("ran %d rollback %+v", g.ran, r.Rollback)
+	}
+	if len(r.RollbackSetupLogTail) == 0 || r.RollbackSetupLogTail[0] != "Log opened." {
+		t.Fatalf("the rollback's setup log: %q", r.RollbackSetupLogTail)
 	}
 }
 

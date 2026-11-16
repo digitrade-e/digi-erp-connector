@@ -165,6 +165,8 @@ type UpgradeResult struct {
 	// (G-143; upgrade_close.go). Absent when none was open.
 	ClosedApps         *ClosedApps `json:"closedApps,omitempty"`
 	RollbackClosedApps *ClosedApps `json:"rollbackClosedApps,omitempty"`
+	// RollbackSetupLogTail is the end of the rollback's setup log (rollback-setup.log) when the rollback failed.
+	RollbackSetupLogTail []string `json:"rollbackSetupLogTail,omitempty"`
 }
 
 var (

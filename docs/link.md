@@ -278,7 +278,8 @@ for the ticket's own rollback; a second failure leaves the box as that setup lef
 still running when the runner stops waiting is never followed by a health check or a second setup. DIG-1297's rule
 holds for it too: never below 1.0.25 on a box with a pickup folder. The result gains `health`
 `{ok, minutes, seconds, checks:[{name, ok, detail}]}` and `rollback`
-`{to, sha256, exitCode, ok, installedVersion, services, health, startedAt, finishedAt, error?}`; its outcome is `ok`,
+`{to, sha256, exitCode, ok, installedVersion, services, health, startedAt, finishedAt, error?}` (and, when the rollback
+failed, `rollbackSetupLogTail` from `rollback-setup.log` in the ticket's folder); its outcome is `ok`,
 `failed` (the setup or the services failed, and the box was healthy as it was), `unhealthy` or `rolled_back`.
 
 Every later build must keep writing `link\session.json` and keep `state`'s `daemon` fields (`asked`, `version`,
