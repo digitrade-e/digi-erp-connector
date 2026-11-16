@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -60,6 +61,17 @@ type Config struct {
 	LiveEvery    time.Duration // default 60 s (§11 finding 6)
 	LiveTimeout  time.Duration // default 15 s
 	PendingRetry time.Duration // default 30 s while a pairing waits for confirmation
+
+	// AutoEvery is the auto-update check's period (plan 088), default 10 min ± 1 min; negative: no scheduler (tests
+	// call autoCheck themselves). AutoFirst is the first check's delay after start, default 1–3 min.
+	AutoEvery time.Duration
+	AutoFirst time.Duration
+	// ReportBudget is the most report streams one connection opens in a minute, default 5: the relay ends a
+	// connection whose box opens more than six.
+	ReportBudget int
+	// DeliveryEvery is the least time between two policy deliveries the link takes on one connection, default 10 s
+	// (review m2); negative: no gate (tests).
+	DeliveryEvery time.Duration
 }
 
 // Link keeps one box connected to the relay.
@@ -79,6 +91,19 @@ type Link struct {
 	loggedAt map[string]time.Time // logEvery
 
 	status liveStatus // for link-status (plan 086 C5)
+
+	// plan 088: the session marker, the connection reports go to, policy deliveries and the scheduler
+	sessionMu   sync.Mutex
+	curMu       sync.Mutex
+	cur         *conn
+	policySlots chan struct{}
+	refusedMu   sync.Mutex
+	refused     []linkproto.ReportRefusal // the last policy delivery's refusals
+	statedMu    sync.Mutex
+	stated      statedPlace // the tenant and ring the relay last stated: information only
+	autoMu      sync.Mutex
+	autoKick    chan struct{}
+	autoChecks  atomic.Int64 // checks run (tests read it)
 }
 
 // liveStatus is the link's own view of its connection, for link-status.
@@ -89,6 +114,7 @@ type liveStatus struct {
 	epoch       int64
 	relay       string // the relay instance that answered (Welcome.Relay)
 	connectedAt time.Time
+	liveAt      time.Time // the relay last said the current connection is the one it routes to (plan 088)
 	lastErr     string
 	lastErrAt   time.Time
 }
@@ -96,15 +122,29 @@ type liveStatus struct {
 func (s *liveStatus) up(epoch int64, relay string, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.connected, s.epoch, s.relay, s.connectedAt = true, epoch, relay, at
+	s.connected, s.epoch, s.relay, s.connectedAt, s.liveAt = true, epoch, relay, at, at
 }
 
-func (s *liveStatus) down(epoch int64) {
+// down marks the connection of epoch closed; false when another one is current (a move made it so).
+func (s *liveStatus) down(epoch int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.epoch == epoch {
 		s.connected = false
+		return true
 	}
+	return false
+}
+
+// live records that the relay answered that epoch's connection is current; false when it is not the live one.
+func (s *liveStatus) live(epoch int64, at time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.connected || s.epoch != epoch {
+		return false
+	}
+	s.liveAt = at
+	return true
 }
 
 func (s *liveStatus) failed(err error, at time.Time) {
@@ -132,7 +172,17 @@ func New(cfg Config) *Link {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
 	}
-	l := &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64)}
+	if cfg.AutoEvery == 0 {
+		cfg.AutoEvery = 10 * time.Minute
+	}
+	if cfg.ReportBudget <= 0 {
+		cfg.ReportBudget = 5
+	}
+	if cfg.DeliveryEvery == 0 {
+		cfg.DeliveryEvery = 10 * time.Second
+	}
+	l := &Link{cfg: cfg, cmdSlots: make(chan struct{}, 2), dataSlots: make(chan struct{}, 64),
+		policySlots: make(chan struct{}, 1), autoKick: make(chan struct{}, 1)}
 	l.status.started = cfg.Now()
 	return l
 }
@@ -154,6 +204,11 @@ type conn struct {
 	ctl     net.Conn
 	move    chan string // a reason to move to a new connection: goaway, not_current
 	liveAns chan bool
+	// policies: the relay opened a policy stream on this connection (plan 088), so it takes report streams; the box
+	// opens one on no other connection (an older relay closes a connection whose box opens a second stream).
+	policies   atomic.Bool
+	reports    reportGate
+	deliveries deliveryGate // review m2: at most one delivery taken per DeliveryEvery
 }
 
 var (
@@ -163,6 +218,8 @@ var (
 
 // Run keeps the box connected until ctx ends.
 func (l *Link) Run(ctx context.Context) error {
+	l.resumeUpgrades() // review m7: a ticket a restart cut short in its health window
+	go l.runAuto(ctx)  // plan 088: the auto-update scheduler
 	backoff := time.Second
 	quietUnpaired := false // "not paired" is logged once, not every 15 s
 	for ctx.Err() == nil {
@@ -193,9 +250,24 @@ func (l *Link) Run(ctx context.Context) error {
 			continue
 		}
 		backoff = time.Second
+		l.setCurrent(c)
 		l.serve(ctx, c)
 	}
 	return ctx.Err()
+}
+
+// setCurrent names the connection unsolicited reports go to (plan 088): the one the link serves.
+func (l *Link) setCurrent(c *conn) {
+	l.curMu.Lock()
+	defer l.curMu.Unlock()
+	l.cur = c
+}
+
+// current is the connection the link serves now, nil between connections.
+func (l *Link) current() *conn {
+	l.curMu.Lock()
+	defer l.curMu.Unlock()
+	return l.cur
 }
 
 // serve runs c until it dies, moving to a new connection first when the relay
@@ -210,10 +282,16 @@ func (l *Link) serve(ctx context.Context, c *conn) {
 		select {
 		case <-ctx.Done():
 			_ = c.sess.Close()
+			if l.status.down(c.epoch) {
+				l.writeSession() // the service stops: the marker no longer says connected
+			}
 			return
 		case <-c.sess.CloseChan():
 			l.cfg.Log.Warn(fmt.Sprintf("link: connection to %s (epoch %d) closed", c.relay, c.epoch))
-			l.status.down(c.epoch)
+			if l.status.down(c.epoch) {
+				l.writeSession()
+			}
+			l.setCurrent(nil)
 			return
 		case <-live.C:
 			go l.checkLive(c)
@@ -254,6 +332,7 @@ func (l *Link) serve(ctx context.Context, c *conn) {
 		_ = c.sess.GoAway()
 		go drain(c)
 		c = next
+		l.setCurrent(c)
 		rotate.Reset(l.rotateAfter())
 	}
 }
@@ -344,6 +423,7 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 	go l.accept(c)
 	l.cfg.Log.Info(fmt.Sprintf("link: connected to %q as %q (epoch %d)", w.Relay, w.Box, w.Epoch))
 	l.status.up(w.Epoch, w.Relay, l.cfg.Now())
+	l.writeSession()
 	return c, 0, nil
 }
 
@@ -386,6 +466,8 @@ func (l *Link) checkLive(c *conn) {
 			case c.move <- "not_current":
 			default:
 			}
+		} else if l.status.live(c.epoch, l.cfg.Now()) {
+			l.writeSession() // plan 088: the runner's health check reads when the relay last confirmed this connection
 		}
 	case <-time.After(l.cfg.LiveTimeout):
 		l.cfg.Log.Warn(fmt.Sprintf("link: no liveness answer in %s; reconnecting", l.cfg.LiveTimeout))
@@ -400,7 +482,7 @@ func (l *Link) accept(c *conn) {
 		if err != nil {
 			return
 		}
-		go l.handleStream(st)
+		go l.handleStream(c, st)
 	}
 }
 

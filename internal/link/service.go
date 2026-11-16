@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/formatfloor"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 )
 
@@ -25,6 +26,11 @@ func (a *App) Start() error {
 	if err := a.Machine.Protect(); err != nil {
 		a.Log.Error("link: cannot start", err)
 		return err
+	}
+	// Plan 088 D11: every build raises DataDir\format-floor at start (the daemon refuses to start when it cannot; the
+	// link stays up whatever, so the box can still be reached).
+	if _, err := formatfloor.Raise(a.Machine.DataDir, formatfloor.RollbackFloor); err != nil {
+		a.Log.Error("link: recording the format floor in DataDir\\format-floor", err)
 	}
 	cfg, err := a.Machine.Config()
 	if err != nil {

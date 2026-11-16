@@ -132,7 +132,7 @@ connector, or restart it yourself.
 | `409 DOCUMENT_RULE_CONFLICT` (plan 087) | The `historyId` was accepted with another `documentRule` (or none). The rule is fixed at reservation; a re-release under the new rule is a new key from the B2B. |
 | `503 FOLDER_TEST_CHANGED` (plan 087 review R2) | A retryable order's folder changed its test flag since the order was reserved (only a hand edit gets past `documents` and `restore`): a test order would land in production, or the reverse. Nothing is written; `state`'s `orders.folderTestChanged` lists them. Put the flag back (or resolve the order by hand, § The order index). |
 | `503 FOLDER_WRITABLE` (orders or receipts), provision `folder_writable`, log `FOLDER REFUSED` / `FOLDER WRITABLE` | Accounts besides the administrators can write to a folder the connector writes documents into. See [A folder others can write to](#a-folder-others-can-write-to). |
-| `503 IMPORTER_WRITABLE` (orders or receipts), log `IMPORTER REFUSED` / `IMPORTER WRITABLE` | Review T1: accounts besides the administrators — `trustedWriters` too — can change the importer the connector runs as LocalSystem (has.exe or the BAT, its folder or one above). Behind the link it is not run and nothing is reserved; a queued order stays retryable. Let only SYSTEM and Administrators write the importer and its folders (`icacls`, as an administrator); the daemon reads it again at most once a minute when an order or receipt needs it. Off the link it runs, with the warning. |
+| `503 IMPORTER_WRITABLE` (orders or receipts), log `IMPORTER REFUSED` / `IMPORTER WRITABLE` | Review T1: accounts besides the administrators — `trustedWriters` too — can change the importer the connector runs as LocalSystem (has.exe or the BAT, its folder or one above), or, since v1.0.31, the parameter file has.exe is handed (`hasParamFile`, `hasReceiptParamFile`; review R4-4: the reason says `its parameter file …`); a parameter file that does not exist refuses too. Behind the link it is not run and nothing is reserved; a queued order stays retryable. Let only SYSTEM and Administrators write the importer and its folders (`icacls`, as an administrator); the daemon reads it again at most once a minute when an order or receipt needs it. Off the link it runs, with the warning. |
 | provision `folder_has_executables` | Review T1: `folder-acl` never locks down a folder that holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`). Move the programs out of the document folder, or leave that folder alone. |
 | Two orders interfered with each other | Should be impossible — the queue is single-worker. If the customer has *another* process importing IMOVEIN files from the same directory, that is the collision. Give the connector its own directory. |
 
@@ -198,8 +198,10 @@ leaves SYSTEM and Administrators full control and Users read. Then:
    again at most once a minute when an order or a receipt needs it, an allowed one every ten minutes — no restart
    needed (`folder-acl` and `documents` restart it anyway). server.log says `FOLDER ALLOWED` when a refused folder is
    the administrators' only again. The folders are read in parallel, each waited on at most 10 s (review m1): a read
-   hung on an unresponsive domain controller logs `FOLDER CHECK: … did not finish in 10s` and leaves only that folder
-   unknown (refused behind the link) until it ends; a request for a folder not read yet starts its read.
+   hung on an unresponsive domain controller logs `FOLDER CHECK: … did not finish in 10s` and holds up no other folder.
+   Until it ends, a folder read before keeps that read's answer (review R4-3, v1.0.31): an allowed folder stays allowed
+   — a slow domain controller causes no `503` at its ten-minute re-check — and a refused one stays refused; only a
+   folder never read is unknown (refused behind the link). A request for a folder not read yet starts its read.
 
 ## File endpoint returns INVALID_FILE_PATH
 
@@ -352,3 +354,40 @@ administrator, on the box:
    no history folder inside the counter's range is above the value you write.
 4. **Start the service** and read `GET /api/counters`: each counter's `remaining` above 0, no `error`, `last` = the
    value written; `state`'s `counters` agree.
+
+## The box did not upgrade itself (auto-update, v1.0.31)
+
+`link-status` (or provision's `state`, `link.autoUpgrade`) says why, in `effective.why`
+([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)):
+
+| `why` | Meaning, and the way on |
+|---|---|
+| `no_policy` | No policy names this box: none was published for every box or for a list holding its id. A lost `link\policy.json` (a reinstall) is not a reason: the box holds what its seq floors keep. The tenant and ring the relay states play no part. |
+| `policy_hold` | The deciding policy holds (`hold`, or no target) — a box list's hold outranks every box's target — or a hold issued at or after the deciding target brakes it, at any scope (`braked` names the target it overrides). A box list issued after that hold moves its boxes again. |
+| `policy_expired` | The deciding policy expired (or the box's clock is behind its issue time): it holds for its scope and never falls back to a less specific policy. Publish a new one for that scope (a box list naming the box, to return it to the fleet's target). |
+| `policy_revoked` | The deciding policy was signed by a team key now below the box's epoch floor: it holds for its scope until a policy signed by a current key replaces it. |
+| `scheduled` | It will: `nextWindow` is when, in the box's local time. A `waiting` entry says why the last check in the window did not (`orders_pending`, `busy`); `last` with `outcome: refused` says why the last attempt failed (a download, a digest) — tried again in the next window; `outcome: deferred`: the runner found orders queued right before the setup and did not run it — tried again at the next check. |
+| `up_to_date` | The box already runs the target or a newer build. |
+| `upgrading` | A ticket is running: `last.ticket`, and `upgrade-result` with it. |
+| `stopped` | This target ended unhealthy under this policy (`rolled_back`, `unhealthy`, `unhealthy_no_rollback`, `rollback_below_floor`, `unhealthy_link_inconclusive`), or failed three times; `last` has the health checks and the rollback. A newer policy (a higher seq, even for the same release) tries again. |
+| `auto_upgrade_off`, `admin_off` | `link.yaml` turns it off (`autoUpgrade: false`, `admin: false`). |
+| `state_unreadable` | `link.yaml` names a key the link does not know (a misspelt `autoUpgrade`?), `link\autoupgrade.json` does not read, or the seq floors in the secrets store do not read (or `link\policy.json` does not read and no floors were ever kept): the box refuses every delivery and holds — fix by hand, on Digitrade's request. `error` names the file. A `policy.json` that does not read, with the floors readable, is no reason: the floors and the policies kept with them stand in, and the next delivery writes the file back. |
+
+A policy refused on delivery is in `refused` with its code: `seq_not_newer` (the box holds this scope key at that seq
+or a higher one — publish a newer seq: box lists share one counter), `wrong_scope` (not every box, and no list holding
+this box's id), `expired`, `malformed` (a seq above 2147483647, a lifetime over 90 days, a window shorter than
+`healthMinutes` + 30 minutes…), `key_revoked` / `key_unknown` / `signature_refused` (not signed by a team key this build
+trusts at its epoch floor).
+
+## An automatic upgrade ended unhealthy and the new build stayed (v1.0.31)
+
+The result (`upgrade-result`, or `last` in `link-status`) names the runner's `outcome`; the new build is installed and
+a person decides — upgrade over the link to a fixed release, or downgrade by hand at the server (provisioning.md: never
+below 1.0.25 on a box with a pickup folder, never below `format-floor`).
+
+| `outcome` | Why there was no rollback |
+|---|---|
+| `unhealthy_no_rollback` | No signed digest names the setup of the build replaced (a policy's `rollbacks` lacked it, or the command had no `rollback`), or the signed one disagrees with the digest this box recorded when it installed that build. digi-mcp fills `rollbacks` from its pins: pin the build the box ran. |
+| `rollback_below_floor` | The build replaced is below `DataDir\format-floor` (the new build changed a file format the old one cannot read), below the runner's compiled floor, or the floor cannot be read. A `format-floor` that does not hold a release number (`1.0.30`) is left as it is by every start and blocks every rollback: put back the highest release that has run on the box, by hand. |
+| `unhealthy_link_inconclusive` | Only the new link failed, and the relay's `/readyz` did not answer 200 from the box: the relay, its registry, or the way to it (the proxy) was down, or the instance was draining — not proven the build (relay 0.3.0's `/readyz` answers 200 only while its registry answers within 2 s). Check `link-status` once the relay is back; the box is likely fine. |
+| `unhealthy` | The rollback ran and did not end healthy, its checks refused its setup (a download, a digest), or the server restarted during the rollback (or twice in the health window): read `rollback`, `runner.log` and `setup.log` in `upgrade\<ticket>\`. |

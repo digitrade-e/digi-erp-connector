@@ -70,6 +70,11 @@ func PlainDir(path string) error {
 	return err
 }
 
+// FinalDirPath is the path Windows resolves directory dir to, read from a handle opened on it without following it
+// (GetFinalPathNameByHandle: \\?\C:\x) — an 8.3 name, a trailing dot, a SUBST or mapped drive come back as what they
+// are. A reparse point or a file is refused; one that does not exist wraps os.ErrNotExist.
+func FinalDirPath(dir string) (string, error) { return plainFinalPath(dir) }
+
 // plainFinalPath opens dir (not following it) and returns its final path; a reparse point or a file is refused.
 func plainFinalPath(dir string) (string, error) {
 	n, err := open(dir, windows.READ_CONTROL)

@@ -34,6 +34,9 @@ type State struct {
 	PairCode string `yaml:"pairCode,omitempty"` // a code waiting to be redeemed; cleared after
 	Admin    *bool  `yaml:"admin,omitempty"`    // nil = on
 	Proxy    string `yaml:"proxy,omitempty"`    // an HTTP proxy URL; empty = the machine's
+	// AutoUpgrade is the client's off switch for managed auto-update (plan 088): false = the box never upgrades on
+	// its own, whatever policy it holds. nil = on. Set by hand only, like admin: the link never writes it.
+	AutoUpgrade *bool `yaml:"autoUpgrade,omitempty"`
 
 	unknownKeys bool // link.yaml names a key the link does not know: commands are refused (UnknownKeys)
 }
@@ -52,6 +55,9 @@ func (s State) RelayURL() string {
 // AdminOn reports whether signed commands may run.
 func (s State) AdminOn() bool { return s.Admin == nil || *s.Admin }
 
+// AutoUpgradeOn reports whether the box may upgrade itself under a policy (plan 088).
+func (s State) AutoUpgradeOn() bool { return s.AutoUpgrade == nil || *s.AutoUpgrade }
+
 // Secrets is the box's secret store (DPAPI on Windows: internal/secrets).
 type Secrets interface {
 	Get(key string) ([]byte, error)
@@ -64,6 +70,9 @@ var ErrNoSecret = errors.New("link: secret not found")
 const (
 	secretKeys     = "link_box_keys"
 	secretMinEpoch = "link_min_key_epoch"
+	// secretPolicyFloors is the seq floor per policy scope key (plan 088 review m3, m4), kept apart from
+	// link\policy.json so that a policy file deleted, lost or unreadable never reopens a replay.
+	secretPolicyFloors = "link_policy_floors"
 )
 
 // Store keeps the link's state under one directory.
@@ -73,6 +82,9 @@ type Store struct {
 
 	mu     sync.Mutex
 	nonces map[string]int64 // nonce → expiry (unix); loaded lazily
+
+	policyMu sync.Mutex // link\policy.json (plan 088)
+	autoMu   sync.Mutex // link\autoupgrade.json (plan 088)
 }
 
 func (s *Store) statePath() string { return filepath.Join(s.Dir, "link.yaml") }

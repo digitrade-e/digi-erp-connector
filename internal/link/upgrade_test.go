@@ -271,8 +271,13 @@ func TestUpgradeAssumeIdleAndAStoppedDaemon(t *testing.T) {
 	if exit != 0 || !ans.Accepted {
 		t.Fatalf("assumeIdle: %+v", ans)
 	}
-	if _, err := os.Stat(filepath.Join(g.dir, "upgrade", ticket, jobFile)); err != nil {
-		t.Fatal(err)
+	var assumed UpgradeJob
+	jb, err := os.ReadFile(filepath.Join(g.dir, "upgrade", ticket, jobFile))
+	if err == nil {
+		err = json.Unmarshal(jb, &assumed)
+	}
+	if err != nil || !assumed.AssumeIdle { // review m6: the runner does not ask the queue again either
+		t.Fatalf("job %+v (%v)", assumed, err)
 	}
 	g2 := newUpgradeRig(t, "v1.0.29")
 	g2.runner.state, g2.runner.queue = "stopped", ""
@@ -716,5 +721,125 @@ func TestVersionsAndTickets(t *testing.T) {
 	a, b := TicketFor("bm9uY2U="), TicketFor("bm9uY2U=")
 	if a != b || !ticketRe.MatchString(a) || a == TicketFor("other") {
 		t.Fatalf("%s %s", a, b)
+	}
+}
+
+// Review m7: when the link starts, it starts again the runner of a ticket a restart cut short after its setup — only
+// when its runner copy is still the file the link made, the ticket has no result and it has a health marker.
+func TestTheLinkResumesATicketCutShortAfterItsSetup(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		tune    func(dir, tdir, ticket string)
+		resumed bool
+	}{
+		{"cut in the health window", nil, true},
+		{"its runner copy changed", func(_, tdir, _ string) {
+			_ = os.WriteFile(filepath.Join(tdir, runnerExe), []byte("MZ something else"), 0o700)
+		}, false},
+		{"it has a result", func(dir, _, ticket string) {
+			_ = os.MkdirAll(filepath.Join(dir, "results"), 0o700)
+			_ = os.WriteFile(resultPath(dir, ticket), []byte(`{}`), 0o600)
+		}, false},
+		{"no health marker", func(_, tdir, _ string) { _ = os.Remove(filepath.Join(tdir, healthMarkerFile)) }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, ticket := t.TempDir(), strings.Repeat("cd", 16)
+			tdir := filepath.Join(dir, "upgrade", ticket)
+			_ = os.MkdirAll(tdir, 0o700)
+			runner := []byte("MZ the runner copy")
+			_ = os.WriteFile(filepath.Join(tdir, runnerExe), runner, 0o700)
+			job, _ := json.Marshal(UpgradeJob{Ticket: ticket, From: "1.0.31", To: "1.0.32", Setup: setupFile("1.0.32"), HealthMinutes: 15,
+				RunnerSHA256: sha(runner)})
+			_ = os.WriteFile(filepath.Join(tdir, jobFile), job, 0o600)
+			_ = os.WriteFile(filepath.Join(tdir, healthMarkerFile), []byte(`{"phase":"health"}`), 0o600)
+			if c.tune != nil {
+				c.tune(dir, tdir, ticket)
+			}
+			sp := &spawned{}
+			_, kr := team(t, 1)
+			b := startBox(t, newRelay(t), State{}, kr, "127.0.0.1:1", func(cfg *Config) {
+				forTests088(cfg)
+				cfg.Upgrade = UpgradeConfig{DataDir: dir, Spawn: sp.spawn}
+			})
+			deadline := time.Now().Add(300 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				sp.mu.Lock()
+				n := len(sp.calls)
+				sp.mu.Unlock()
+				if n > 0 {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			sp.mu.Lock()
+			defer sp.mu.Unlock()
+			want := filepath.Join(tdir, runnerExe) + "|" + tdir + "|upgrade-run|" + ticket
+			if c.resumed && (len(sp.calls) != 1 || strings.Join(sp.calls[0], "|") != want) {
+				t.Fatalf("spawned %v", sp.calls)
+			}
+			if !c.resumed && len(sp.calls) != 0 {
+				t.Fatalf("resumed: %v", sp.calls)
+			}
+			if c.name == "its runner copy changed" && !b.log.has("not resumed") {
+				t.Fatalf("not logged: %v", b.log.lines)
+			}
+		})
+	}
+}
+
+// Review N10: a ticket deferred for queued orders keeps its checked setup, and the next attempt at the same target and
+// digest takes it instead of downloading it again — after the release's SHA256SUMS line is fetched again, and only when
+// the file still hashes to the digest.
+func TestADeferredTicketsSetupIsNotDownloadedAgain(t *testing.T) {
+	deferred := func(g *upgradeRig, ticket string, body []byte, to, digest string) string {
+		tdir := filepath.Join(g.dir, "upgrade", ticket)
+		_ = os.MkdirAll(tdir, 0o700)
+		_ = os.WriteFile(filepath.Join(tdir, setupFile(to)), body, 0o600)
+		res, _ := json.Marshal(UpgradeResult{Ticket: ticket, From: "1.0.29", To: to, SHA256: digest, Outcome: linkproto.OutcomeDeferred,
+			FinishedAt: time.Now(), Error: "orders_pending: 1 order(s) queued right before the setup"})
+		_ = os.MkdirAll(filepath.Join(g.dir, "results"), 0o700)
+		_ = os.WriteFile(resultPath(g.dir, ticket), res, 0o600)
+		return tdir
+	}
+	setupPath := "v1.0.30/" + setupFile("1.0.30")
+	// the same target and digest: taken, not downloaded
+	g := newUpgradeRig(t, "v1.0.29")
+	old := deferred(g, strings.Repeat("d1", 16), g.setup, "1.0.30", sha(g.setup))
+	ans, _, ticket := g.upgrade(t, g.spec("1.0.30", sha(g.setup)))
+	if !ans.Accepted || g.rel.hit(setupPath) != 0 || g.rel.hit("v1.0.30/SHA256SUMS") != 1 {
+		t.Fatalf("%+v: the setup downloaded %d times, SHA256SUMS %d", ans, g.rel.hit(setupPath), g.rel.hit("v1.0.30/SHA256SUMS"))
+	}
+	if got, err := fileSHA256(filepath.Join(g.dir, "upgrade", ticket, setupFile("1.0.30"))); err != nil || got != sha(g.setup) {
+		t.Fatalf("the new ticket's setup: %q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(old, setupFile("1.0.30"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the setup was copied, not moved: it is on disk twice")
+	}
+	if !g.b.log.has("downloaded is taken again, checked") {
+		t.Fatal("not logged")
+	}
+	// a file that no longer hashes to the digest, another target, another digest, a ticket that was not deferred: download
+	for _, c := range []struct {
+		name string
+		make func(g *upgradeRig)
+	}{
+		{"changed since", func(g *upgradeRig) {
+			deferred(g, strings.Repeat("d2", 16), []byte("MZ something else"), "1.0.30", sha(g.setup))
+		}},
+		{"another digest", func(g *upgradeRig) {
+			deferred(g, strings.Repeat("d3", 16), g.setup, "1.0.30", strings.Repeat("ef", 32))
+		}},
+		{"not deferred", func(g *upgradeRig) {
+			tdir := deferred(g, strings.Repeat("d4", 16), g.setup, "1.0.30", sha(g.setup))
+			res, _ := json.Marshal(UpgradeResult{Ticket: strings.Repeat("d4", 16), To: "1.0.30", SHA256: sha(g.setup), Outcome: linkproto.OutcomeFailed})
+			_ = os.WriteFile(resultPath(g.dir, strings.Repeat("d4", 16)), res, 0o600)
+			_ = tdir
+		}},
+	} {
+		g := newUpgradeRig(t, "v1.0.29")
+		c.make(g)
+		if ans, _, _ := g.upgrade(t, g.spec("1.0.30", sha(g.setup))); !ans.Accepted || g.rel.hit(setupPath) != 1 {
+			t.Errorf("%s: %+v, downloaded %d times", c.name, ans, g.rel.hit(setupPath))
+		}
 	}
 }

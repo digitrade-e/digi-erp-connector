@@ -70,6 +70,9 @@ type System interface {
 	// itself, that is a reparse point (a junction, a symbolic link, a mount
 	// point); "" when none is (review T3).
 	ReparsePointOn(path string) (string, error)
+	// FinalPath is the path an existing folder resolves to, read from a handle on it (dataacl.FinalDirPath:
+	// \\?\C:\x on Windows); an error wrapping os.ErrNotExist when there is no such folder (review R4-1).
+	FinalPath(dir string) (string, error)
 	ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error)
 	RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (restored, skipped int, err error)
 }

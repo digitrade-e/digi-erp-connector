@@ -250,3 +250,104 @@ func TestFolderGuard_AHungReadHoldsUpNoOtherFolder(t *testing.T) {
 		t.Errorf("%d reads of the hung folder, want 1 (no pile-up)", reads)
 	}
 }
+
+// Review R4-3: the ten-minute re-check of an allowed folder that does not finish in time keeps it allowed until the
+// read gives an answer — a slow domain controller causes no 503 — and the answer, when it comes, decides. A refused
+// folder whose re-read hangs stays refused; one never read is still unknown.
+func TestFolderGuard_ASlowRecheckKeepsTheLastAnswer(t *testing.T) {
+	b := newGuardBox(t)
+	g := b.guard(true)
+	g.readTimeout = 50 * time.Millisecond
+	g.checkAll()
+	if err := g.Allowed("slow"); err != nil {
+		t.Fatalf("slow, read once: %v", err)
+	}
+	// ten minutes on, its re-read hangs
+	b.set(func(b *guardBox) { b.now = b.now.Add(FolderRecheckAllowed); b.gate = make(chan struct{}) })
+	g.tick()
+	for i := 0; i < 3; i++ {
+		if err := g.Allowed("slow"); err != nil {
+			t.Fatalf("slow while its re-read hangs: %v (a slow domain controller made it refused)", err)
+		}
+	}
+	if !b.log.warned("it stays allowed, as its last read found it") {
+		t.Errorf("warnings %v", b.log.warns)
+	}
+	// the answer, when it comes, decides: someone opened it up meanwhile
+	b.set(func(b *guardBox) { b.who["slow"] = []dataacl.Writer{usersW} })
+	b.mu.Lock()
+	gate := b.gate
+	b.mu.Unlock()
+	close(gate)
+	g.wg.Wait()
+	if err := g.Allowed("slow"); !errors.Is(err, ErrFolderWritable) || !strings.Contains(err.Error(), `BUILTIN\Users`) {
+		t.Fatalf("slow once its re-read answered: %v", err)
+	}
+	// refused, its lazy re-read hangs: it stays refused
+	b.set(func(b *guardBox) { b.now = b.now.Add(FolderRecheckRefused); b.gate = make(chan struct{}) })
+	if err := g.Allowed("slow"); !errors.Is(err, ErrFolderWritable) {
+		t.Fatalf("refused, re-read starting: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond) // the re-read's wait ends
+	if err := g.Allowed("slow"); !errors.Is(err, ErrFolderWritable) || !strings.Contains(err.Error(), `BUILTIN\Users`) {
+		t.Fatalf("refused while its re-read hangs: %v", err)
+	}
+	b.mu.Lock()
+	gate = b.gate
+	b.mu.Unlock()
+	close(gate)
+	g.wg.Wait()
+	// never read, its first read hangs: unknown, refused behind the link
+	fresh := newGuardBox(t)
+	fresh.gate = make(chan struct{})
+	h := fresh.guard(true)
+	h.readTimeout = 50 * time.Millisecond
+	h.checkAll()
+	if err := h.Allowed("slow"); !errors.Is(err, ErrFolderWritable) || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("never read: %v", err)
+	}
+	close(fresh.gate)
+	h.wg.Wait()
+}
+
+// Review R4-4: an importer's guard entry reads the parameter file has.exe is handed too — hasParamFile (relative: in
+// sendOrderDir) for orders, hasReceiptParamFile for receipts — with nobody exempt; one others can change, or one that
+// cannot be read, refuses the importer behind the link.
+func TestFolderGuard_TheImportersParameterFiles(t *testing.T) {
+	b := newGuardBox(t)
+	hash := filepath.Join(filepath.Dir(b.cfg.SendOrderDir), "Hash7")
+	b.cfg.HasExePath, b.cfg.HasParamFile = filepath.Join(hash, "has.exe"), "digi.prm"
+	b.cfg.HasReceiptParamFile = filepath.Join(hash, "kupain.prm")
+	b.cfg.SendOrderPickupDir, b.cfg.SendOrderFormat = "", ""
+	if got := b.cfg.OrderImporterFiles(); len(got) != 2 || got[1] != filepath.Join(b.cfg.SendOrderDir, "digi.prm") {
+		t.Fatalf("the order importer's files: %v", got)
+	}
+	b.who = map[string][]dataacl.Writer{"digi.prm": {usersW}}
+	g := b.guard(true)
+	g.checkAll()
+	err := g.Allowed(KeyOrderImporter)
+	if !errors.Is(err, ErrImporterWritable) || !strings.Contains(err.Error(), "its parameter file "+filepath.Join(b.cfg.SendOrderDir, "digi.prm")) {
+		t.Fatalf("a parameter file Users can change: %v", err)
+	}
+	if err := g.Allowed(KeyReceiptImporter); err != nil {
+		t.Fatalf("the receipt importer, its files the administrators' only: %v", err)
+	}
+	// a trusted writer is no exemption here, and a receipt parameter file that does not read refuses too
+	b.set(func(b *guardBox) {
+		b.who = map[string][]dataacl.Writer{"kupain.prm": {schedulerW}}
+		b.errs = map[string]error{"digi.prm": errors.New("the file was not found")}
+	})
+	g = b.guard(true)
+	g.checkAll()
+	if err := g.Allowed(KeyReceiptImporter); !errors.Is(err, ErrImporterWritable) || !strings.Contains(err.Error(), `BFL\wizsched (its parameter file`) {
+		t.Fatalf("a receipt parameter file the ERP's account can change: %v", err)
+	}
+	if err := g.Allowed(KeyOrderImporter); !errors.Is(err, ErrImporterWritable) || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("a parameter file that does not read: %v", err)
+	}
+	// a BAT importer hands nothing: only the BAT is read
+	b.cfg.HasBatFile = filepath.Join(hash, "digi.bat")
+	if got := b.cfg.OrderImporterFiles(); len(got) != 1 || got[0] != b.cfg.HasBatFile {
+		t.Fatalf("a BAT importer's files: %v", got)
+	}
+}

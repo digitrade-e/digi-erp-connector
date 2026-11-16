@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -516,11 +517,24 @@ func handInstallSpec(sendOrderDir string) Spec {
 
 // handInstallBox is the pilot box before provisioning: its config, the sa password in the
 // store, the daemon running on that config.
+// longTempDir is t.TempDir() by its long name: the Windows CI's is C:\Users\RUNNER~1\…, an 8.3 short name link mode
+// refuses for every folder it takes, apply's sendOrderDir included (reviews m6, R4-1).
+func longTempDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	if runtime.GOOS == "windows" {
+		if long, err := filepath.EvalSymlinks(d); err == nil {
+			return long
+		}
+	}
+	return d
+}
+
 func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 	t.Helper()
 	d := newFakeDaemon(t)
 	sys := newFakeSys(t, d)
-	orders := filepath.Join(t.TempDir(), "digiorders")
+	orders := filepath.Join(longTempDir(t), "digiorders")
 	if err := os.MkdirAll(orders, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -535,6 +549,17 @@ func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 }
 
 func (s *fakeSys) FolderRules() FolderRules { return s.folderRules }
+
+// FinalPath is the test's final path for dir (finalPath), else \\?\<dir> for a folder that exists.
+func (s *fakeSys) FinalPath(dir string) (string, error) {
+	if f, ok := s.finalPath[dir]; ok {
+		return f, nil
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return "", err
+	}
+	return `\\?\` + dir, nil
+}
 
 // ReparsePointOn is the test's answer for path, else whether path itself is
 // a link: the test's temp folder above it is the machine's (on macOS /var is

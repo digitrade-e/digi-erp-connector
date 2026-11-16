@@ -39,10 +39,11 @@ import (
 //
 // Review m1: one slow folder holds up no other. The folders are read in
 // parallel, each read waited on at most FolderReadTimeout: one that does not
-// finish in time (a lookup hung on an unresponsive domain controller) leaves
-// only its folder unknown — refused behind the link — and records its result
-// whenever it ends; one read per folder at a time, so a hung one never piles
-// up. A request for a folder never read, and not being read, starts its
+// finish in time (a lookup hung on an unresponsive domain controller) records
+// its result whenever it ends, and meanwhile its folder keeps its last read's
+// answer (review R4-3: an allowed folder is not refused for a slow re-check),
+// or is unknown — refused behind the link — when it was never read; one read
+// per folder at a time, so a hung one never piles up. A request for a folder never read, and not being read, starts its
 // read (bounded the same way); the tick reads such a folder too.
 
 // The guard's keys for the importers (review T1): read before each run.
@@ -75,6 +76,8 @@ const (
 type guardedFolder struct {
 	f    config.WriteFolder
 	file bool // an importer's file: read with the file walk (Writers), no trusted writer
+	// params are the importer's other files, read with it (review R4-4): has.exe's parameter file
+	params []string
 
 	trusted  map[string]bool // documents.trustedWriters, none where an importer runs (review T1)
 	enforced bool            // behind the link and typed: refused while writable or unknown
@@ -105,12 +108,15 @@ type FolderGuard struct {
 // fileWriters (dataacl.Writers) reads an importer file's writers — the file,
 // its folder, every folder above — for the importer entries
 // (KeyOrderImporter, KeyReceiptImporter; review T1): behind the link an
-// importer others can write to is not run; no trusted writer is exempt.
+// importer others can write to is not run; no trusted writer is exempt. An
+// importer entry reads has.exe's parameter file too (review R4-4): who can
+// change what has.exe is told to import changes the import.
 func NewFolderGuard(cfg config.Config, linked bool, writers func(string) ([]dataacl.Writer, error), fileWriters func(string) ([]string, error), log logger.LoggerService) *FolderGuard {
 	g := &FolderGuard{writers: writers, fileWriters: fileWriters, log: log, now: time.Now, readTimeout: FolderReadTimeout, folders: map[string]*guardedFolder{}}
-	for key, p := range map[string]string{KeyOrderImporter: cfg.OrderImporter(), KeyReceiptImporter: cfg.ReceiptImporter()} {
-		if p != "" && fileWriters != nil {
-			g.folders[key] = &guardedFolder{f: config.WriteFolder{Name: "the " + strings.TrimPrefix(key, "importer:") + " importer", Path: p}, file: true, enforced: linked}
+	for key, files := range map[string][]string{KeyOrderImporter: cfg.OrderImporterFiles(), KeyReceiptImporter: cfg.ReceiptImporterFiles()} {
+		if len(files) > 0 && fileWriters != nil {
+			g.folders[key] = &guardedFolder{f: config.WriteFolder{Name: "the " + strings.TrimPrefix(key, "importer:") + " importer", Path: files[0]},
+				params: files[1:], file: true, enforced: linked}
 			g.order = append(g.order, key)
 		}
 	}
@@ -250,13 +256,15 @@ func (g *FolderGuard) startCheckLocked(key string) {
 // check reads folder key's writers (in a goroutine of its own: it may wait
 // on the domain controller), waits for them at most readTimeout, and records
 // the result, logging what changed. The caller marked the folder checking.
-// A read that does not finish in time leaves the folder unknown — refused
-// behind the link — and still checking: its result is recorded whenever it
-// ends, and no other read of the folder starts meanwhile (review m1).
+// A read that does not finish in time leaves the folder still checking: its
+// result is recorded whenever it ends, and no other read of the folder starts
+// meanwhile (review m1). Until then a folder read before keeps that read's
+// answer — allowed stays allowed, refused stays refused (review R4-3) — and
+// one never read is unknown, refused behind the link.
 func (g *FolderGuard) check(key string) {
 	g.mu.Lock()
 	f := g.folders[key]
-	path, name, trusted, file := f.f.Path, f.f.Name, f.trusted, f.file
+	path, name, trusted, file, params := f.f.Path, f.f.Name, f.trusted, f.file, f.params
 	g.mu.Unlock()
 
 	type result struct {
@@ -269,6 +277,18 @@ func (g *FolderGuard) check(key string) {
 		var r result
 		if file {
 			r.who, r.err = g.fileWriters(path) // an importer: nobody exempt
+			for _, p := range params {         // review R4-4: and the parameter file it is handed
+				if r.err != nil {
+					break
+				}
+				who, err := g.fileWriters(p)
+				if err != nil {
+					r.err = fmt.Errorf("its parameter file %s: %w", p, err)
+				}
+				for _, w := range who {
+					r.who = append(r.who, w+" (its parameter file "+p+")")
+				}
+			}
 		} else {
 			var all []dataacl.Writer
 			all, r.err = g.writers(path)
@@ -286,11 +306,27 @@ func (g *FolderGuard) check(key string) {
 	case r := <-done:
 		g.record(key, r.who, r.err, g.now().Sub(start))
 	case <-timer.C:
+		// Review R4-3: a read that does not finish in time is no answer. A folder read before keeps what that read
+		// found until this one ends — an allowed folder stays allowed (a slow domain controller must not turn its
+		// ten-minute re-check into 503s), a refused one stays refused; only a folder never read is unknown (refused
+		// behind the link).
 		g.mu.Lock()
-		f.state, f.why, f.checked = guardUnknown, fmt.Sprintf("reading who can write to it did not finish in %s", g.readTimeout), g.now()
+		before := f.state
+		if before == guardUnknown {
+			f.state, f.why, f.checked = guardUnknown, fmt.Sprintf("reading who can write to it did not finish in %s", g.readTimeout), g.now()
+		}
 		g.mu.Unlock()
-		g.log.Warn(fmt.Sprintf("FOLDER CHECK: reading who can write to %s (%s) did not finish in %s: unknown — refused behind the link — until it does; "+
-			"the other folders are not held up", name, path, g.readTimeout))
+		switch before {
+		case guardAllowed:
+			g.log.Warn(fmt.Sprintf("FOLDER CHECK: re-reading who can write to %s (%s) did not finish in %s: it stays allowed, as its last read found it, "+
+				"until this read ends; the other folders are not held up", name, path, g.readTimeout))
+		case guardRefused:
+			g.log.Warn(fmt.Sprintf("FOLDER CHECK: re-reading who can write to %s (%s) did not finish in %s: it stays refused until this read ends",
+				name, path, g.readTimeout))
+		default:
+			g.log.Warn(fmt.Sprintf("FOLDER CHECK: reading who can write to %s (%s) did not finish in %s: unknown — refused behind the link — until it does; "+
+				"the other folders are not held up", name, path, g.readTimeout))
+		}
 		g.wg.Add(1)
 		go func() {
 			defer g.wg.Done()

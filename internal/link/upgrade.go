@@ -88,11 +88,8 @@ func init() {
 	selfCommands[CommandUpgradeResult] = (*Link).upgradeResult
 }
 
-type upgradeInput struct {
-	Version    string `json:"version"`
-	SHA256     string `json:"sha256"`
-	AssumeIdle bool   `json:"assumeIdle,omitempty"`
-}
+// defaultHealthMinutes is a command's health check when it names none (plan 088 D5); a policy names its own.
+const defaultHealthMinutes = 15
 
 // UpgradeAnswer is upgrade's answer: accepted with its ticket, or a refusal (exit 1).
 type UpgradeAnswer struct {
@@ -127,6 +124,20 @@ type UpgradeJob struct {
 	DaemonWasRunning bool      `json:"daemonWasRunning"`
 	By               string    `json:"by,omitempty"`
 	AcceptedAt       time.Time `json:"acceptedAt"`
+	// Plan 088. HealthMinutes > 0 turns the health check and the one rollback on (D5). Auto and Policy: the scheduler
+	// started it, following that policy. Rollback is the signed digest of the build replaced (D8: the policy's or the
+	// command's) — the only setup a rollback runs; nil, no rollback. FromSHA256 is that build's setup as this box
+	// recorded it (a ticket or a policy installed it), when it knows: a cross-check, never a reason to roll back.
+	FromSHA256    string                 `json:"fromSha256,omitempty"`
+	HealthMinutes int                    `json:"healthMinutes,omitempty"`
+	Auto          bool                   `json:"auto,omitempty"`
+	Policy        *PolicyRef             `json:"policy,omitempty"`
+	Rollback      *linkproto.RollbackPin `json:"rollback,omitempty"`
+	// AssumeIdle: the command said to go ahead without the order queue (the runner does not check it again).
+	AssumeIdle bool `json:"assumeIdle,omitempty"`
+	// RunnerSHA256 is the runner copy's digest: the link starts it again after a restart in the health window (review
+	// m7) only when it is still that file.
+	RunnerSHA256 string `json:"runnerSha256,omitempty"`
 }
 
 // UpgradeResult is DataDir\results\upgrade-<ticket>.json.
@@ -141,6 +152,22 @@ type UpgradeResult struct {
 	Services         map[string]string `json:"services,omitempty"`         // after: service → state
 	Error            string            `json:"error,omitempty"`
 	SetupLogTail     []string          `json:"setupLogTail,omitempty"` // the setup's log's end when it failed
+	// Plan 088: the setup's digest as checked, whether the scheduler started it (and under which policy), the health
+	// check after the setup and the one rollback after an unhealthy one (D5).
+	SHA256   string                     `json:"sha256,omitempty"`
+	Auto     bool                       `json:"auto,omitempty"`
+	Policy   *PolicyRef                 `json:"policy,omitempty"`
+	Health   *linkproto.UpgradeHealth   `json:"health,omitempty"`
+	Rollback *linkproto.UpgradeRollback `json:"rollback,omitempty"`
+	// ClosedApps and RollbackClosedApps: the connector windows ended before the setup and before the rollback's
+	// (G-143; upgrade_close.go). Absent when none was open.
+	ClosedApps         *ClosedApps `json:"closedApps,omitempty"`
+	RollbackClosedApps *ClosedApps `json:"rollbackClosedApps,omitempty"`
+	// RollbackSetupLogTail is the end of the rollback's setup log (rollback-setup.log) when the rollback failed.
+	RollbackSetupLogTail []string `json:"rollbackSetupLogTail,omitempty"`
+	// Outcome is the runner's own verdict, one of linkproto's Outcome* codes (plan 088 §2b: some outcomes leave the new
+	// build in place, and only the runner knows why). A result without it is judged by resultOutcome.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 var (
@@ -210,11 +237,11 @@ func (l *Link) upgrade(env linkproto.Envelope, stdin []byte) ([]byte, int) {
 	return answer(ans, 0)
 }
 
-// acceptUpgrade runs every check that can fail before the runner starts, in order, and starts it.
+// acceptUpgrade checks a command's input (linkproto.UpgradeSpec) and starts the upgrade (startUpgrade).
 func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswer, error) {
-	var in upgradeInput
+	var in linkproto.UpgradeSpec
 	if err := decodeStrictJSON(stdin, &in); err != nil {
-		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", `send {"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:true}`, "the input does not decode: %v", err)
+		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", `send {"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:true,"healthMinutes"?:5-120,"rollback"?:{"version","sha256"}}`, "the input does not decode: %v", err)
 	}
 	to, ok := parseVersion(versionRe, in.Version)
 	if !ok {
@@ -224,6 +251,39 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	if !sha256Re.MatchString(sha) {
 		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", "sha256 is the setup's SHA-256, 64 hex digits", "sha256 is not 64 hex digits")
 	}
+	if in.HealthMinutes != 0 && (in.HealthMinutes < linkproto.MinHealthMinutes || in.HealthMinutes > linkproto.MaxHealthMinutes) {
+		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", "healthMinutes is 5 to 120, or left out (15)", "healthMinutes %d is out of range", in.HealthMinutes)
+	}
+	if err := in.Check(); err != nil {
+		return UpgradeAnswer{}, upgradeRefuse("spec_invalid", "rollback is the build this box runs now: {\"version\":\"1.0.30\",\"sha256\":\"<its setup's 64 hex>\"}", "%v", err)
+	}
+	var rollback *linkproto.RollbackPin
+	if in.Rollback != nil {
+		rollback = &linkproto.RollbackPin{Version: strings.TrimSpace(in.Rollback.Version), SHA256: strings.ToLower(strings.TrimSpace(in.Rollback.SHA256))}
+	}
+	return l.startUpgrade(upgradeRequest{To: to, SHA256: sha, AssumeIdle: in.AssumeIdle, Ticket: TicketFor(env.Nonce), By: env.By,
+		HealthMinutes: in.HealthMinutes, Rollback: rollback, command: true})
+}
+
+// upgradeRequest is one upgrade to start: a signed command's, or the scheduler's under a policy (plan 088).
+type upgradeRequest struct {
+	To            version
+	SHA256        string // the setup's, lowercase hex
+	AssumeIdle    bool
+	Ticket        string
+	By            string
+	HealthMinutes int        // 0 = defaultHealthMinutes
+	Policy        *PolicyRef // the scheduler's: the policy it follows
+	// Rollback is the signed digest of the build this box runs (plan 088 D8): the policy's for that build, or the
+	// command's spec. The runner rolls back to nothing else; nil = no automatic rollback.
+	Rollback *linkproto.RollbackPin
+	command  bool // a command holds one of the two command slots itself
+}
+
+// startUpgrade runs every check that can fail before the runner starts, in order, and starts it. The command and the
+// scheduler share it: the scheduler decides only when (plan 088 D2).
+func (l *Link) startUpgrade(req upgradeRequest) (UpgradeAnswer, error) {
+	to, sha, ticket := req.To, req.SHA256, req.Ticket
 	from, ok := parseVersion(buildRe, l.cfg.Build)
 	if !ok {
 		return UpgradeAnswer{}, upgradeRefuse("version_unknown", "install a release by hand once", "this link's build %q is not a release, so newer cannot be judged", l.cfg.Build)
@@ -232,6 +292,12 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 		return UpgradeAnswer{}, upgradeRefuse("not_newer", "upgrade only to a newer release; a downgrade is a person's job at the server",
 			"%s is not newer than the running %s", to, from)
 	}
+	if rb := req.Rollback; rb != nil {
+		if v, ok := parseVersion(versionRe, rb.Version); !ok || v != from {
+			return UpgradeAnswer{}, upgradeRefuse("rollback_not_running", "name the build this box runs now (state: version), or leave rollback out",
+				"rollback names %q, but this box runs %s: a rollback can only install the build the upgrade replaces", rb.Version, from)
+		}
+	}
 	if l.cfg.Daemon != nil {
 		if cfg, err := l.cfg.Daemon.Load(); err == nil && strings.TrimSpace(cfg.SendOrderPickupDir) != "" && to.less(pickupMinVersion) {
 			return UpgradeAnswer{}, upgradeRefuse("downgrade_pickup", "remove sendOrderPickupDir first, or choose a release from 1.0.25 on",
@@ -239,14 +305,17 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 		}
 	}
 	dir := l.upgradeDataDir()
-	ticket := TicketFor(env.Nonce)
 	if busy, other := runningTicket(dir, l.cfg.Now()); busy {
 		return UpgradeAnswer{}, upgradeRefuse("upgrade_running", "wait for it: upgrade-result with its ticket", "the upgrade of ticket %s is still running", other)
 	}
 	// Review M1: never beside another command — a provision.exe still running would make the setup fail on a file in
 	// use — nor beside a provisioning run (DataDir\provision\.lock, WinRM's included), whose service stop and rollback
-	// would cross the setup's. This command holds one of the two slots.
-	if len(l.cmdSlots) > 1 {
+	// would cross the setup's. A command holds one of the two slots; the scheduler none.
+	own := 0
+	if req.command {
+		own = 1
+	}
+	if len(l.cmdSlots) > own {
 		return UpgradeAnswer{}, upgradeRefuse(busyCode, "wait for the other command to end and ask again", "another command is running on this box")
 	}
 	if l.cfg.Upgrade.Protect != nil {
@@ -264,7 +333,7 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "the provision lock: %v", err)
 	}
 	defer func() { _ = held.Unlock() }()
-	daemonRunning, err := l.orderQueueIdle(in.AssumeIdle)
+	daemonRunning, err := l.orderQueueIdle(req.AssumeIdle)
 	if err != nil {
 		return UpgradeAnswer{}, err
 	}
@@ -283,7 +352,7 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	defer cancel()
 	base := releasePrefix + "v" + to.String() + "/"
 	setup := setupFile(to.String())
-	listed, err := l.releaseSum(ctx, base+sumsFile, setup)
+	listed, err := releaseSum(ctx, l.cfg.HTTPClient, base+sumsFile, setup)
 	if err != nil {
 		return UpgradeAnswer{}, err
 	}
@@ -291,8 +360,11 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 		return UpgradeAnswer{}, upgradeRefuse("sha256_mismatch", "pin the setup's digest from the release's SHA256SUMS",
 			"the envelope pins %s but release v%s's SHA256SUMS lists %s for %s", sha, to, listed, setup)
 	}
-	got, err := l.download(ctx, base+setup, filepath.Join(tdir, setup))
-	if err != nil {
+	got := ""
+	if from := reuseSetup(dir, to, sha, tdir); from != "" {
+		got = sha
+		l.cfg.Log.Info(fmt.Sprintf("link: the setup of %s that deferred ticket %s downloaded is taken again, checked: no second download", to, from))
+	} else if got, err = download(ctx, l.cfg.HTTPClient, base+setup, filepath.Join(tdir, setup)); err != nil {
 		return UpgradeAnswer{}, err
 	}
 	if got != sha {
@@ -309,8 +381,21 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	if err := copyFile(self, runner); err != nil {
 		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "copying the runner: %v", err)
 	}
+	runnerSHA, err := fileSHA256(runner)
+	if err != nil {
+		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "reading the runner copy: %v", err)
+	}
+	health := req.HealthMinutes
+	if health == 0 {
+		health = defaultHealthMinutes
+	}
 	job := UpgradeJob{Ticket: ticket, From: from.String(), To: to.String(), SHA256: sha, Setup: setup,
-		InstallDir: l.cfg.InstallDir, DaemonWasRunning: daemonRunning, By: env.By, AcceptedAt: l.cfg.Now().UTC()}
+		InstallDir: l.cfg.InstallDir, DaemonWasRunning: daemonRunning, By: req.By, AcceptedAt: l.cfg.Now().UTC(),
+		FromSHA256: l.knownSetupSHA(from.String()), HealthMinutes: health, Auto: req.Policy != nil, Policy: req.Policy,
+		AssumeIdle: req.AssumeIdle, RunnerSHA256: runnerSHA}
+	if req.Rollback != nil {
+		job.Rollback = &linkproto.RollbackPin{Version: from.String(), SHA256: req.Rollback.SHA256}
+	}
 	b, _ := json.MarshalIndent(job, "", "  ")
 	if err := atomicfile.Write(filepath.Join(tdir, jobFile), b, 0o600); err != nil {
 		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "writing the job: %v", err)
@@ -328,6 +413,41 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	}
 	accepted = true
 	return UpgradeAnswer{Accepted: true, Ticket: ticket, From: from.String(), To: to.String()}, nil
+}
+
+// reuseSetup moves into tdir the setup a deferred ticket for the same target left in its folder (review N10: a setup
+// deferred for queued orders is not downloaded again at every attempt). The ticket's result must say deferred, to
+// this version, with this digest, and the file must hash to it now; the release's SHA256SUMS line was fetched again
+// just before, and the runner hashes the setup once more before it runs it. It returns the ticket whose setup was
+// taken, "" when none was (then the setup is downloaded as ever). A ticket's folder lives until pruneUpgrades drops it.
+func reuseSetup(dataDir string, to version, sha, tdir string) string {
+	root := filepath.Join(dataDir, upgradeDirs.tickets)
+	entries, _ := os.ReadDir(root)
+	type cand struct {
+		ticket string
+		at     time.Time
+	}
+	var cands []cand
+	for _, e := range entries {
+		if !e.IsDir() || !ticketRe.MatchString(e.Name()) || filepath.Join(root, e.Name()) == tdir {
+			continue
+		}
+		if res, err := readResult(dataDir, e.Name()); err == nil && res.Outcome == linkproto.OutcomeDeferred && res.To == to.String() && res.SHA256 == sha {
+			cands = append(cands, cand{e.Name(), res.FinishedAt})
+		}
+	}
+	slices.SortFunc(cands, func(a, b cand) int { return b.at.Compare(a.at) })
+	name := setupFile(to.String())
+	for _, c := range cands {
+		src := filepath.Join(root, c.ticket, name)
+		if got, err := fileSHA256(src); err != nil || got != sha {
+			continue
+		}
+		if err := os.Rename(src, filepath.Join(tdir, name)); err == nil {
+			return c.ticket
+		}
+	}
+	return ""
 }
 
 // orderQueueIdle asks provision's state whether the daemon holds accepted orders (a restart loses them). daemonRunning
@@ -382,9 +502,9 @@ func (l *Link) orderQueueIdle(assumeIdle bool) (daemonRunning bool, err error) {
 }
 
 // releaseSum fetches the release's SHA256SUMS and returns the digest it lists for file.
-func (l *Link) releaseSum(ctx context.Context, url, file string) (string, error) {
+func releaseSum(ctx context.Context, client *http.Client, url, file string) (string, error) {
 	var buf bytes.Buffer
-	if _, err := l.fetch(ctx, url, &buf, maxSums); err != nil {
+	if _, err := fetch(ctx, client, url, &buf, maxSums); err != nil {
 		return "", err
 	}
 	var found []string
@@ -405,13 +525,13 @@ func (l *Link) releaseSum(ctx context.Context, url, file string) (string, error)
 }
 
 // download fetches url into path and returns the SHA-256 of what was written.
-func (l *Link) download(ctx context.Context, url, path string) (string, error) {
+func download(ctx context.Context, client *http.Client, url, path string) (string, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", upgradeRefuse("runner_failed", "check the disk (state: disk)", "creating %s: %v", filepath.Base(path), err)
 	}
 	h := sha256.New()
-	_, err = l.fetch(ctx, url, io.MultiWriter(f, h), maxSetup)
+	_, err = fetch(ctx, client, url, io.MultiWriter(f, h), maxSetup)
 	if cerr := f.Close(); err == nil && cerr != nil {
 		err = upgradeRefuse("runner_failed", "check the disk (state: disk)", "writing %s: %v", filepath.Base(path), cerr)
 	}
@@ -424,8 +544,11 @@ func (l *Link) download(ctx context.Context, url, path string) (string, error) {
 
 // fetch GETs url through the link's own HTTP client (its proxy, plan 083 O5) into w, at most max bytes. A redirect
 // may not leave the scheme (GitHub sends release files on to its object store over HTTPS).
-func (l *Link) fetch(ctx context.Context, url string, w io.Writer, max int64) (int64, error) {
-	c := *l.cfg.HTTPClient
+func fetch(ctx context.Context, client *http.Client, url string, w io.Writer, max int64) (int64, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	c := *client
 	first := c.CheckRedirect
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || req.URL.Scheme != via[0].URL.Scheme {
@@ -558,7 +681,53 @@ func ticketPending(dataDir, ticket string, now time.Time) (pending, lost bool) {
 	if runnerHoldsLock(dataDir) || now.Sub(fi.ModTime()) < runnerGrace {
 		return true, false
 	}
+	// review m7: a ticket the link is resuming (it touched the health marker) counts as running until its runner holds
+	// the lock
+	if mi, err := os.Stat(filepath.Join(dataDir, upgradeDirs.tickets, ticket, healthMarkerFile)); err == nil && now.Sub(mi.ModTime()) < runnerGrace {
+		return true, false
+	}
 	return false, true
+}
+
+// resumeUpgrades starts again the runner of a ticket a restart of the server cut short after its setup (review m7):
+// a health marker and no result, no runner holding the lock, and the runner copy still the file the link made. One at
+// a time; the runner itself resumes at most once. Called when the link starts.
+func (l *Link) resumeUpgrades() {
+	dir := l.upgradeDataDir()
+	entries, _ := os.ReadDir(filepath.Join(dir, upgradeDirs.tickets))
+	for _, e := range entries {
+		ticket := e.Name()
+		if !e.IsDir() || !ticketRe.MatchString(ticket) {
+			continue
+		}
+		tdir := filepath.Join(dir, upgradeDirs.tickets, ticket)
+		if _, err := os.Stat(filepath.Join(tdir, healthMarkerFile)); err != nil {
+			continue
+		}
+		if _, err := os.Stat(resultPath(dir, ticket)); err == nil || runnerHoldsLock(dir) {
+			continue
+		}
+		job, err := readJob(dir, ticket)
+		runner := filepath.Join(tdir, runnerExe)
+		got, herr := fileSHA256(runner)
+		if err != nil || job.RunnerSHA256 == "" || herr != nil || got != job.RunnerSHA256 {
+			l.cfg.Log.Warn(fmt.Sprintf("link: upgrade %s was cut short after its setup, but its runner copy is not the one the link made "+
+				"(%v, %v): not resumed; upgrade-result answers lost", ticket, err, herr))
+			continue
+		}
+		now := time.Now()
+		_ = os.Chtimes(filepath.Join(tdir, healthMarkerFile), now, now)
+		spawn := l.cfg.Upgrade.Spawn
+		if spawn == nil {
+			spawn = spawnDetached
+		}
+		if err := spawn(runner, []string{"upgrade-run", ticket}, tdir); err != nil {
+			l.cfg.Log.Error("link: resuming upgrade "+ticket, err)
+			continue
+		}
+		l.cfg.Log.Info(fmt.Sprintf("link: upgrade %s was cut short after its setup (the server restarted): its runner goes on with the health check", ticket))
+		return
+	}
 }
 
 // runningTicket finds a ticket still running.

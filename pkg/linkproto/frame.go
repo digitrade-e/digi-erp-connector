@@ -13,6 +13,7 @@ const (
 	StreamData    byte = 'D' // a raw TCP pipe to the connector's API on 127.0.0.1
 	StreamCommand byte = 'C' // one signed command: frames Signed, stdin; answers stdout, SignedAnswer
 	StreamControl byte = 'K' // the box's one stream toward the relay: Control messages
+	// StreamPolicy ('P') and StreamReport ('R') are plan 088's: policy.go.
 )
 
 // MaxControlFrame bounds a control or envelope frame; stdin and stdout frames

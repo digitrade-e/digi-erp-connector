@@ -628,6 +628,13 @@ goes whole — sqlcmd's `-P`, a URL's password (up to the last `@`), DPAPI blobs
 shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; at most 64 MiB is read backwards per
 answer.
 
+**`state`'s `link.autoUpgrade`** (v1.0.31, plan 088) is managed auto-update: `link.yaml`'s `autoUpgrade` switch as it
+reads now, and the link's last view from `link\autoupgrade.json` — the policies it holds, what decides (and a target a
+later hold brakes), the next window and check — with the last automatic upgrade's outcome, health and rollback read
+afresh from its result ([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)). Downgrading by
+hand: never below `DataDir\format-floor` either — it names the oldest release that reads every file format the builds
+on this box wrote (plan 088 D11).
+
 **`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
 the credential in `config.yaml` (an error says so when the daemon runs another one) — and only when the socket at
 `config.yaml`'s address belongs to the service's own process (the TCP table against the service manager's PID);
@@ -670,7 +677,8 @@ the WinRM path is unchanged:
 Every path a command takes behind the link is a plain path on a local drive with no `.`/`..`/empty part and none of
 cmd.exe's characters, and — since the system-folder rules compare text — none Windows resolves to another folder
 (plan 087 review m6): no `~` (an 8.3 short name, `C:\PROGRA~1`), no `:` after the drive letter (a stream), no part
-ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`).
+ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`). `apply`'s `sendOrderDir` included
+(review R4-1, v1.0.31: before, only `orders`, `receipts` and `documents` took the rule for theirs).
 
 ### Where a document folder may be
 
@@ -685,8 +693,11 @@ set or move, are refused (`folder_forbidden`) when they are, are in, or hold:
 - or when any part of the path is `AppData`, `System Volume Information` or `$Recycle.Bin`.
 
 And none has a junction, a symbolic link or a mount point anywhere on its path (`folder_reparse`): `C:\Users\All
-Users` is a link to `C:\ProgramData`, which a rule reading only text would never see. `C:\xampp\htdocs\herp` and
-`C:\xampp\htdocs\herp\receipts` (BFL) pass. Folders left where they were are not judged again.
+Users` is a link to `C:\ProgramData`, which a rule reading only text would never see. A `sendOrderDir`, pickup or
+receipt folder that exists already is also judged by the path its handle resolves to (`GetFinalPathNameByHandle`), as
+a `folder-acl` target is (review R4-1, v1.0.31): it must be on a local drive, pass the rules above, and be the
+configured path itself (`folder_reparse` otherwise — a SUBST or mapped drive, an 8.3 name). `C:\xampp\htdocs\herp`
+and `C:\xampp\htdocs\herp\receipts` (BFL) pass. Folders left where they were are not judged again.
 
 These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
 takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login

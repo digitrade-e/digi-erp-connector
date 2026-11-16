@@ -34,6 +34,10 @@ type LinkStatus struct {
 
 	StartedAt     time.Time `json:"startedAt"`
 	UptimeSeconds int64     `json:"uptimeSeconds"`
+
+	// AutoUpgrade is managed auto-update (plan 088): the policies this box holds, what decides now, the next check and
+	// the last automatic upgrade.
+	AutoUpgrade *AutoUpgradeStatus `json:"autoUpgrade,omitempty"`
 }
 
 // ProxyStatus is the way to the relay: Via is the proxy's host:port, empty when direct.
@@ -121,6 +125,8 @@ func (l *Link) Status() LinkStatus {
 	} else {
 		s.Daemon = DaemonStatus{Address: l.cfg.APIAddr, TLS: l.cfg.APITLS}
 	}
+	auto := l.autoStatus()
+	s.AutoUpgrade = &auto
 	return s
 }
 

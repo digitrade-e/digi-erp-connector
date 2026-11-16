@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -166,7 +167,7 @@ func TestApplyCheckBehindTheLinkTakesALoopbackListen(t *testing.T) {
 func TestLinkModeRefusesTheReviewsBypasses(t *testing.T) {
 	t.Setenv("SystemDrive", "C:")
 	sysDirs := []string{`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`}
-	orders := filepath.Join(t.TempDir(), "orders")
+	orders := filepath.Join(longTempDir(t), "orders")
 	loop := func(s Spec) Spec { s.APIListen = "127.0.0.1:8082"; s.Firewall = nil; return s }
 	base := func() Spec { return loop(handInstallSpec(orders)) }
 	bat := func(p string) Spec { return withImporter(base(), ImporterSpec{Mode: "bat", HasBatFile: p}) }
@@ -212,5 +213,39 @@ func TestLinkModeRefusesTheReviewsBypasses(t *testing.T) {
 		if r := spec.ValidateFor(true, sysDirs); r != nil {
 			t.Errorf("%s: %v", name, r)
 		}
+	}
+}
+
+// Review R4-1: behind the link, apply's sendOrderDir takes link mode's path rule, as the orders, receipts and
+// documents commands take theirs: an 8.3 short name, a part ending in a dot, the \\?\ prefix and a share are refused
+// before anything is read. Over WinRM the rule is not apply's.
+func TestApplyBehindTheLinkTakesTheLinkPathRuleForSendOrderDir(t *testing.T) {
+	sysDirs := []string{`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`}
+	loop := func(s Spec) Spec { s.APIListen = "127.0.0.1:8082"; s.Firewall = nil; return s }
+	for _, c := range []struct {
+		dir, why string // why: what the refusal says (where it is the same on every OS)
+	}{
+		{`C:\PROGRA~1\Vendor\orders`, "8.3 short name"},
+		{`C:\Windows.\System32\orders`, "ends in a dot or a space"},
+		{`C:\Hash7\orders \x`, "ends in a dot or a space"},
+		{`\\?\C:\Windows\Temp\orders`, ""},
+		{`\\fileserver\share\orders`, ""},
+	} {
+		r := loop(handInstallSpec(c.dir)).ValidateFor(true, sysDirs)
+		if r == nil || r.Code != CodeSpecInvalid || !strings.Contains(r.Message, "sendOrderDir") || !strings.Contains(r.Message, c.why) {
+			t.Errorf("%s: %v", c.dir, r)
+		}
+	}
+	// an OS-native folder (absolute everywhere): link mode refuses its 8.3 spelling, WinRM does not judge it
+	root := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "srv")
+	short := filepath.Join(root, "HASH7~1", "orders")
+	if r := loop(handInstallSpec(short)).ValidateFor(true, sysDirs); r == nil || !strings.Contains(r.Message, "8.3 short name") {
+		t.Errorf("linked %s: %v", short, r)
+	}
+	if r := handInstallSpec(short).ValidateFor(false, sysDirs); r != nil {
+		t.Errorf("WinRM %s: %v", short, r)
+	}
+	if r := loop(handInstallSpec(filepath.Join(root, "digiorders"))).ValidateFor(true, sysDirs); r != nil {
+		t.Errorf("a plain folder: %v", r)
 	}
 }

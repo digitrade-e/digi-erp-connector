@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,4 +134,51 @@ func TestFolderPaths_Commands(t *testing.T) {
 		t.Fatalf("herp: %v", err)
 	}
 	_ = orders
+}
+
+// Review R4-1: behind the link, a sendOrderDir that exists is judged by the path its handle resolves to — a SUBST or
+// mapped drive, an 8.3 name or a trailing dot is what Windows makes of it — for apply as for the orders command.
+func TestFolderPaths_TheResolvedPathOfAnExistingFolder(t *testing.T) {
+	sys, env, _, _ := aclBox(t)
+	linkBox(t, sys)
+	sys.writers, sys.parentWriters = nil, nil
+	programData := mkdir(t, "ProgramData", "Vendor")
+	sys.folderRules = FolderRules{Dirs: []string{filepath.Dir(programData)}, Parts: []string{"$Recycle.Bin"}}
+	moved := mkdir(t, "orders3")
+	elsewhere := `\\?\` + filepath.Join(filepath.Dir(moved), "elsewhere")
+	spec := func() Spec {
+		s := handInstallSpec(moved)
+		s.APIListen, s.Firewall = "127.0.0.1:8082", nil
+		return s
+	}
+	for _, c := range []struct {
+		final, code string
+	}{
+		{elsewhere, CodeFolderReparse},              // a SUBST or mapped drive, an 8.3 name: another folder than the text
+		{`\\?\` + programData, CodeFolderForbidden}, // it resolves into ProgramData
+		{`\\?\UNC\fileserver\share\orders`, CodeFolderReparse},
+	} {
+		sys.finalPath = map[string]string{moved: c.final}
+		_, err := ApplyOrders(context.Background(), env, ordersInput(func(in *OrdersInput) { in.SendOrderDir = &moved }), true)
+		wantRefusal(t, err, c.code)
+		_, err = ApplyCheck(context.Background(), env, spec())
+		wantRefusal(t, err, c.code)
+	}
+	// a folder that resolves to itself, and one not made yet (it has only its text, which link mode's path rule
+	// judged): no path refusal — whatever else the command then asks for
+	sys.finalPath = nil
+	notAPathRefusal := func(what string, err error) {
+		t.Helper()
+		var r *Refusal
+		if errors.As(err, &r) && (r.Code == CodeFolderReparse || r.Code == CodeFolderForbidden) {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	_, err := ApplyOrders(context.Background(), env, ordersInput(func(in *OrdersInput) { in.SendOrderDir = &moved }), true)
+	notAPathRefusal("a folder that resolves to itself", err)
+	_, err = ApplyCheck(context.Background(), env, spec())
+	notAPathRefusal("apply, a folder that resolves to itself", err)
+	fresh := filepath.Join(filepath.Dir(moved), "not-yet")
+	_, err = ApplyOrders(context.Background(), env, ordersInput(func(in *OrdersInput) { in.SendOrderDir = &fresh }), true)
+	notAPathRefusal("a folder not made yet", err)
 }

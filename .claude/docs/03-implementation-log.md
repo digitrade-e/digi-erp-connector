@@ -323,3 +323,68 @@ where Windows resolves them — no reparse point on the path, never in or holdin
 install or data folders, never in an AppData — and `folder-acl` judges the handle's final path too (T3); `state` lists
 the recorded pre-images (T5); the guard reads in parallel with a 10 s bound per read (m1); a refused receipt folder
 skips the recovery scan (m2); `acceptUnreadable` is one total per command (m3).
+
+## 2026-11-16 — plan 088 A: managed auto-update (for v1.0.31)
+
+Digitrade plan 088 (the box upgrades itself to a release a person approved once), builder A, branch
+`feat/088-auto-update`:
+
+- `pkg/linkproto/policy.go` (pushed first, commit 962048e, which the relay and digi-mcp pin): the signed
+  `UpgradePolicy` of plan 088 §3, `SignPolicy` / `VerifySignedPolicy` / `VerifyPolicy` (canonical bytes only,
+  domain-separated signature), `ActiveAt`, `Applies`, `MostSpecific`, `Effective`, window `Start` / `NextStart` in box
+  time, `PolicyDelivery`, the signed `Report`, stream types `P` and `R`.
+- The link: policy streams verified at the epoch floor and kept per scope in `link\policy.json` (seq never lower, fail
+  closed); signed reports, only to a relay that sent policies, at most five a minute; the scheduler (10 min ± 1) runs the
+  upgrade command's own path in the policy's window with the queue idle — one attempt per window per target, a
+  rolled-back target stopped until a newer policy; `link\autoupgrade.json`; `link\session.json`; `link.yaml
+  autoUpgrade`.
+- The runner: health within `healthMinutes` and one rollback to the exact build replaced (release SHA256SUMS + the
+  recorded `fromSha256`), closing plan 086's review m10; before each setup it ends the installed GUI in every session
+  (digi-mcp G-143: Inno's `/CLOSEAPPLICATIONS` cannot reach another Terminal Services session — GROOPY's failure).
+- `link-status` and `state` show the policies, what decides, the next check, the last automatic upgrade.
+
+## 2026-11-16 — plan 088: the security review's fixes (D8–D13, B1, M1–M3, m1–m7, m9–m11, m16, m17)
+
+Same branch, before any merge (v1.0.31 is unreleased, so the policy format changed in place, `v` still 1). The review
+(B1, M1–M4, m1–m17) found that a rollback could install whatever the network served, that the relay's tenant/ring
+could undo holds, that a later hold did not brake a more specific target, that a rollback had no data floor; plan 088
+§2b decided D8–D13.
+
+- `pkg/linkproto` (commit fcd0277, which the relay and digi-mcp re-pin): scopes `all` / `boxes:[ids]` (D9; ring,
+  tenant and box scope types removed), `rollbacks` on a policy and `rollback` on `UpgradeSpec` (D8), `Decide` (D10:
+  the most specific decides, an expired policy holds for its scope, a hold issued at or after a moving policy wins),
+  seq ≤ 2³¹−1, lifetime ≤ 90 days, a window ≥ healthMinutes + 30 min (D13, m16, m17), new outcome and why codes.
+- The runner: rolls back only to a signed digest (B1), never below `DataDir\format-floor` (D11, new
+  `internal/formatfloor`, raised by the daemon and the link at start), and keeps the new build on a link-only failure
+  while the relay is not ready (D12); checks the order queue again right before the setup (m6); ends windows
+  through the handle it checked (m5); resumes the health check once after a restart (m7, `health.json`).
+- The link: the relay's statements are information only (M1); deliveries coalesced, writes and kicks only on a
+  change (m2); seq floors in the secrets store, never pruned, judge every policy (m3, m4); a retired key's floor no
+  longer binds (m1); stops and failures tallied apart from the attempts (m10); `knownSetupSHA` at the epoch floor (m11).
+- Not here: M4, m13–m15 are digi-mcp's; the relay's 90-day cap comes with its linkproto re-pin; m8 (a CI contract
+  test for the health probe's fields) and m12 (binding a policy to a relay) are open.
+
+## 2026-11-16 — plan 088: the second security review's fixes (N1, N5, N10)
+
+The re-review of `1aed12f` found every round-1 finding fixed and one new MAJOR; `pkg/linkproto` is unchanged (the relay
+and digi-mcp stay pinned at `fcd0277`):
+
+- N1: the DPAPI floor record keeps, per scope key, the signed policy that set the floor (its exact bytes); `loadHeld`
+  makes the floors the authority and `policy.json` their mirror, so a reinstall (which deletes `link\`) loses no
+  expired list hold and no expired brake — the relay never delivers an expired policy again. A kept list comes back
+  only when it names the box's id.
+- N5: D12 asks the relay's `/readyz` (200 only while its registry answers), not `/healthz`.
+- N10: a deferred ticket keeps its checked setup; the next attempt at the same release and digest takes it.
+
+## 2026-11-16 — plan 088: main (v1.0.30) merged in; plan 087's fourth review's minors (R4-1, R4-3, R4-4)
+
+- origin/main (fb93e4f, plan 087, v1.0.30) merged into `feat/088-auto-update` with a merge commit — no rebase:
+  linkproto `fcd0277`, which relay 0.3.0 (in production) and digi-mcp pin, stays reachable and `pkg/linkproto` is
+  byte-identical to it. Conflicts were docs only (both kept). `formatfloor.RollbackFloor` stays `1.0.30`: v1.0.30
+  introduced the counter and order-index formats, and plan 088 changes no format a v1.0.30 daemon reads.
+- R4-1: behind the link `apply`'s `sendOrderDir` takes link mode's path rule, and a `sendOrderDir`, pickup or receipt
+  folder that exists is judged by the path its handle resolves to (`System.FinalPath`, `dataacl.FinalDirPath`).
+- R4-3: a guard re-check that does not finish in 10 s keeps the folder's last answer (no 503 every ten minutes on a
+  slow domain controller); only a folder never read is unknown.
+- R4-4: the importer guard reads the parameter file has.exe is handed (`OrderImporterFiles`, `ReceiptImporterFiles`).
+- D12's comments now say what the relays serve: 0.3.0's `/readyz` checks its registry; 0.2.0's only said draining.

@@ -345,34 +345,58 @@ func (c Config) ReceiptImporter() string {
 // scheduler must write to, is never taken for an importer's.
 func (c Config) ImporterFiles() []string {
 	var out []string
-	add := func(p, dir string) {
-		if p = strings.TrimSpace(p); p == "" {
-			return
+	for _, p := range append(c.OrderImporterFiles(), c.ReceiptImporterFiles()...) {
+		if !slices.Contains(out, p) {
+			out = append(out, p)
 		}
-		if !filepath.IsAbs(p) { // has.exe reads a relative parameter file in its working directory
-			if dir = strings.TrimSpace(dir); dir == "" {
-				return
+	}
+	return out
+}
+
+// OrderImporterFiles are the files the order importer runs or hands to has.exe:
+// its BAT, or has.exe and the parameter file (hasParamFile, a relative one in
+// sendOrderDir); none when no order importer runs. The first is OrderImporter.
+func (c Config) OrderImporterFiles() []string {
+	if c.OrderImporter() == "" {
+		return nil
+	}
+	if bat := strings.TrimSpace(c.HasBatFile); bat != "" {
+		return importerFiles([2]string{bat, ""})
+	}
+	return importerFiles([2]string{c.HasExePath, ""}, [2]string{c.HasParamFile, c.SendOrderDir})
+}
+
+// ReceiptImporterFiles are the receipt importer's files: its BAT, or has.exe
+// and hasReceiptParamFile (a relative one in the receipt folder); none when
+// no receipt importer runs. The first is ReceiptImporter.
+func (c Config) ReceiptImporterFiles() []string {
+	if c.ReceiptImporter() == "" {
+		return nil
+	}
+	if bat := strings.TrimSpace(c.HasReceiptBatFile); bat != "" {
+		return importerFiles([2]string{bat, ""})
+	}
+	return importerFiles([2]string{c.HasExePath, ""}, [2]string{c.HasReceiptParamFile, c.ReceiptDir()})
+}
+
+// importerFiles lists each {path, working directory}: a relative path is in
+// the working directory (has.exe reads its parameter file there); one with
+// no directory to be in, and an empty one, is left out.
+func importerFiles(files ...[2]string) []string {
+	var out []string
+	for _, f := range files {
+		p, dir := strings.TrimSpace(f[0]), strings.TrimSpace(f[1])
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			if dir == "" {
+				continue
 			}
 			p = filepath.Join(dir, p)
 		}
 		if !slices.Contains(out, p) {
 			out = append(out, p)
-		}
-	}
-	if c.OrderImporter() != "" {
-		if bat := strings.TrimSpace(c.HasBatFile); bat != "" {
-			add(bat, "")
-		} else {
-			add(c.HasExePath, "")
-			add(c.HasParamFile, c.SendOrderDir)
-		}
-	}
-	if c.ReceiptImporter() != "" {
-		if bat := strings.TrimSpace(c.HasReceiptBatFile); bat != "" {
-			add(bat, "")
-		} else {
-			add(c.HasExePath, "")
-			add(c.HasReceiptParamFile, c.ReceiptDir())
 		}
 	}
 	return out

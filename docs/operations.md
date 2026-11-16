@@ -121,6 +121,25 @@ while no order is queued. A detached runner runs the setup silently and writes
 again when a failed setup left them stopped. Details: [link.md § Upgrade over the link](link.md#upgrade-over-the-link).
 v1.0.29 itself is installed by hand on a v1.0.28 box — the last time.
 
+From v1.0.31 the runner also asks the order queue again right before the setup (with orders still queued after 5
+minutes it defers the setup), ends any connector window open on the server, in any user's session, before the setup
+(the setup cannot close one in another RDP session — **unsaved changes there are lost**), and after the setup waits
+for the box to be healthy — both services as before, the connector logging in and answering with the new build, the
+new link connected — rolling back once to the exact release it replaced when it is not, and only to a setup whose
+digest Digitrade signed, never below `DataDir\format-floor`. A server restarted during that health check resumes it
+when the link starts again. Details: [link.md § Health and the one rollback](link.md#health-and-the-one-rollback).
+
+### Managed auto-update (v1.0.31 on, plan 088)
+
+A box on v1.0.31 or later upgrades itself, in a maintenance window, to a release Digitrade approved for it — a signed
+upgrade policy for every box or for an explicit list of boxes (digi-mcp turns a tenant or a ring into box ids when it
+signs) — with the same checks as an upgrade over the link, and only while no order is queued. Digitrade publishes
+policies through digi-mcp (`connector_rollout`): a canary list first, then the rest once it reports healthy; a hold
+issued later stops every rollout it overrides. Boxes on v1.0.29/v1.0.30 get v1.0.31 by an upgrade over the link
+first. The client's IT turns it off with `autoUpgrade: false` in `link.yaml` (`admin: false` stops it too);
+`digi-erp-connector-link.exe status` shows it. What a box holds and decides: `link-status`, provision's `state`, and
+the Event Log. Details: [link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031).
+
 ## Reboots
 
 A reboot does **not** give the daemon its graceful stop. On an OS shutdown
@@ -211,7 +230,10 @@ In order of preference:
    that touches it.
 
 Any deployment script should verify health after the change and roll itself back
-automatically if the probe fails, so a failed deploy never leaves the API down.
+automatically if the probe fails, so a failed deploy never leaves the API down. An
+upgrade over the link (v1.0.31 on) does this itself: one rollback to the exact release
+it replaced, when its digest is signed and it is not below the format floor
+([link.md § Health and the one rollback](link.md#health-and-the-one-rollback)).
 
 ## Logs
 
