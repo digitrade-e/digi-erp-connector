@@ -34,9 +34,17 @@ is for this box, that it has not expired and was not seen before, and the digest
 `--check`), `verify`, `restore <change-set>`; or answers `hashes` itself (the digests of the installed executables).
 There is no shell and no other program. Every answer is signed by this server's key.
 
+Since v1.0.29 (Digitrade plan 086) the set also has, run by `provision` the same way: **`logs`** (the tail of
+`server.log`, `link.log`, `ui.log` or either service's Event Log, redacted on this server before it is sent) and
+**`state`** (read-only diagnostics). And, answered by the link itself: **`link-status`**, **`upgrade`** and
+**`upgrade-result`** (below). See [§ Plan 086 commands](#plan-086-commands-v1029).
+
 ## For the client's IT
 
 - **State:** `link.yaml` in `%ProgramData%\digi-erp-connector\` — the relay, this box's id once paired, the proxy.
+- **Upgrades over the link** leave their trace in `upgrade\<ticket>\` (`job.json`, `runner.log`, `setup.log`) and
+  `results\upgrade-<ticket>.json` in the same folder, and in the Event Log. `admin: false` refuses them like every
+  other command.
 - **Turn remote commands off:** set `admin: false` in `link.yaml`. Data keeps flowing (the shop's sync and orders);
   every command is refused and logged.
 - **Every command** is logged to `link.log` (same folder) and to the Windows **Event Log** (Application, source
@@ -68,6 +76,51 @@ Digitrade gives a code (`ABCDE-FGHJK`, single use, 30 minutes):
 
 It prints a **fingerprint**; read it to Digitrade, who confirm it before anything else happens. `status` shows the
 relay, the box id and whether commands are on; `fingerprint` prints it again.
+
+## Plan 086 commands (v1.0.29)
+
+| command | stdin | answer |
+|---|---|---|
+| `logs` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?:RFC3339,"maxLines"?:≤2000,"grep"?:"literal"}` | `provision logs`: `{"source","lines":[…oldest first],"truncated","files"}` |
+| `state` | `{}` | `provision state`: services, the daemon's queue and health, config.yaml against the service start and the model, order and receipt numbers and indexes, the pickup folder, TLS expiry, `link.yaml` (no secrets), free disk |
+| `link-status` | none | the relay, box, `admin`, the proxy (host only) and where it came from, the team-key epoch floor, the live connection, the last connect error, the daemon address and TLS piped to, uptime |
+| `upgrade` | `{"version":"1.0.30","sha256":"<64 hex>","assumeIdle"?:bool}` | `{"accepted":true,"ticket","from","to"}` at once, or `{"accepted":false,"refusal":{code,message,fix}}` (exit 1) |
+| `upgrade-result` | `{"ticket":"…"}` | the result file, `{"ticket","pending":true}`, or `{"ticket","pending":false,"lost":true,"error"}` |
+
+**`logs` and `state` cross the relay signed, not sealed** (plan 086 D1): the same trust as the data path. Nothing
+secret leaves this server: every log line is redacted here first (this box's own API password, signing secret and
+database passwords in every form, `Authorization`/bearer values, JWTs, `password=`/`secret`/`token` values, a
+connection string's `Password=…;`, a URL's password, DPAPI blobs), and `state` reports no secret at all. Logs are read
+by handle only: a link, a hard link or a file outside the data directory in a log's place is refused, never followed.
+
+**The data path follows the daemon.** The link reads the daemon's address, TLS and certificate from `config.yaml`
+again whenever it (or the certificate) changes, so an `apply` that moves the port or turns TLS on reaches the data
+path at the next call — no restart of the link. Until the daemon restarts on a new port, the previous address is
+tried second. The link also starts on a server with no `config.yaml` yet: commands work, data waits for one.
+
+### Upgrade over the link
+
+`upgrade` installs **only an official release of this repository**, and only a newer one (plan 086 D2): the link
+downloads `SHA256SUMS` and `digi-erp-connector-setup-<version>.exe` itself, from
+`https://github.com/digitrade-e/digi-erp-connector/releases/download/v<version>/` only (compiled in), through its own
+proxy, and runs the setup only when its SHA-256 equals **both** the digest in the signed envelope and the release's
+`SHA256SUMS` line. It refuses while the connector holds queued orders (unless `assumeIdle`), a build that is not a
+release (`dev`), and a server whose pickup folder (DIG-1297) the target would ignore. Every check runs before it
+answers `accepted`; a refused upgrade leaves nothing behind.
+
+The setup stops the link itself, so the link hands over to a **runner**: a copy of `digi-erp-connector-link.exe` in
+`%ProgramData%\digi-erp-connector\upgrade\<ticket>\`, started detached (it outlives the link and is outside the
+install folder the setup replaces). It waits 10 s for the answer to leave, checks the setup's digest again, runs it
+`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=…`, starts the link again — and the connector, if it was
+running — when a failed setup left them stopped, reads the installed build and writes
+`%ProgramData%\digi-erp-connector\results\upgrade-<ticket>.json`:
+`{ticket, from, to, exitCode, startedAt, finishedAt, error?, installedVersion, services, setupLogTail?}`. The ticket is
+the first 32 hex digits of the SHA-256 of the envelope's nonce. The ticket's folder keeps `job.json`, `runner.log`
+and the setup's `setup.log`; the setup itself is deleted after, and the oldest finished tickets are removed (ten
+kept). Each step is also in the Event Log (Application, source `digi-erp-connector-link`).
+
+A release from v1.0.29 on lists its setup in `SHA256SUMS` (release-windows.yml); v1.0.29 is the last version that must
+be installed by hand on a v1.0.28 box.
 
 ## Behind the link, `provision` is stricter
 

@@ -168,6 +168,24 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 - The strict decoder's key walk descends only where the Go type nests (≤ 8 levels) and skips other values with `Decode` — walking them token by token cost O(depth²) memory.
 - Every text value is edge-trimmed on the RAW value, then `normalize1255`, then strict Windows-1255; widths are encoded bytes (U+FB2A and an inner line break are two).
 
+## Link diagnostics and upgrade (plan 086 C4/C5/C8)
+
+`digi-erp-connector-link` (internal/link, docs/link.md) runs signed commands from a fixed set: provision commands
+(commands.go, plus commands_086.go: `logs`, `state`) and ones it answers itself (`selfCommands`: `hashes`,
+`link-status`, `upgrade`, `upgrade-result`). A test pins both sets — adding one is a reviewed change.
+
+| command | where | hard rules |
+|---|---|---|
+| `logs` | provision/logs.go | read-only; files in DataDir only, by handle (`dataacl.OpenRead`: no reparse point, no hard link, final path under DataDir); every line redacted on the box before it is measured (D1: answers are signed, not sealed); ≤ 900 KiB |
+| `state` | provision/state.go | writes nothing (no file, no DACL, no DB); the daemon only through its read-only routes; no secret, not even set/missing; a receipt's request never read out |
+| `link-status` | link/linkstatus.go | proxy by host only; URL credentials dropped from errors |
+| `upgrade` / `upgrade-result` | link/upgrade.go, upgrade_runner.go, upgrade_windows.go | D2: official release only (compiled-in `releasePrefix`, tests alone change it), newer than the link's build, setup SHA-256 = envelope pin = release SHA256SUMS line; every check before `accepted`; the runner is a detached copy of the link in DataDir\upgrade\<ticket>\ (never in the install folder the setup replaces); a failed setup's stopped services are started again; results through plain folders only |
+
+The data path reads the daemon's address/TLS per stream (`DaemonWatch`, link/daemon.go) — never cache it at service
+start again: an apply that moved the port stranded the data path until someone restarted the link. The link starts
+without config.yaml (a fresh install). release-windows.yml lists the setup in SHA256SUMS; the box refuses an upgrade
+without that line.
+
 ## Tests
 
 `go test ./...` — table-driven, stdlib only, `t.TempDir()` for FS, `httptest` for HTTP.

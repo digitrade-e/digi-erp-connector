@@ -21,6 +21,8 @@ can run it the same way in an elevated PowerShell. The code is
 | `apply --check --spec -` | the spec | Every check `apply` makes, its refusals included, then what it would change (`check`) | nothing |
 | `options [--check] --spec -` | `{"version":1,"changeSet","options":{…},"assumeIdle"?,"expect"?}` | Sets `options` (below) on a connector that is already configured, and nothing else: no credential, database, listener, firewall or service setting is read from stdin or changed | `config.yaml` |
 | `version` | none | Prints the build's version | nothing |
+| `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`). Plan 086 C4 | nothing |
+| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk. Plan 086 C4 | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
@@ -237,6 +239,27 @@ it. Unchanged values write nothing, and restart only a running daemon older than
 | `preimage_missing` | `restore` was given an unknown change set, or one that changed nothing |
 | `unsupported_os` | not Windows |
 | `internal_error` | the tool itself failed; run `verify` to see the box's state |
+
+## `logs` and `state` (plan 086 C4)
+
+Both are read-only and travel the link signed, not sealed (plan 086 D1), so nothing secret may be in them.
+
+**`logs`** reads only the connector's own files in the data directory — `server.log` (and `server.log.<UTC>.old`,
+`server-<UTC>.log`), `link.log` (and `link.log.1`), `ui.log` (and `ui.log.<UTC>.old`), the newest three by time — by
+handle (`dataacl.OpenRead`): a reparse point, a multiply-linked file or a file whose final path is outside the data
+directory is refused (`log_unreadable`), never followed. `events-daemon` / `events-link` read the Application Event
+Log of `digi-erp-connectord` / `digi-erp-connector-link` (Get-WinEvent, fixed script). A line without a time of its
+own (a continuation) has the time of the line above it. Every line is redacted before it is measured: every form of
+this box's own secrets (`config.yaml`'s API password and signing secret, the database passwords in the secret store),
+`Authorization` and bearer values, JWTs, `password`/`secret`/`token`/`api_key`/`pairCode` values in `k=v`, `k: v`,
+`"k":"v"` and T-SQL `PASSWORD = N'…'` forms, a connection string's `Password=…;`, a URL's password, DPAPI blobs.
+Lines are cut at 4 KiB; at most 64 MiB is read backwards per answer.
+
+**`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
+the credential in `config.yaml` (an error says so when the daemon runs another one). `missingKeys` are the keys the
+model always writes that `config.yaml` lacks (their defaults apply); `unknownKeys` are keys it does not know (left from
+an older build, or misspelt). Index entries are read for their number and state only (a receipt's request never
+leaves); each state lists its highest 50 numbers. A part that cannot be read carries its own `error`.
 
 ## Behind the link (link mode)
 
