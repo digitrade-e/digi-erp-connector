@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -226,6 +227,25 @@ func TestState_NeverSendsTheCredentialToAPortTheDaemonDoesNotHold(t *testing.T) 
 	env.LocalAddr = func(string) string { return sqAddr }
 	if _, res, _ = runState(t, stateSys{fakeSys: sys}, env, `{}`); res.Daemon.Asked || !strings.Contains(res.Daemon.Error, "nothing listens") || len(got) != 0 {
 		t.Fatalf("no listener: %+v, squatter got %q", res.Daemon, got)
+	}
+}
+
+// A host name in apiListen (a hand-written config.yaml says localhost) is checked at every address it resolves to.
+func TestDaemonAt_AHostName(t *testing.T) {
+	sys, _, _ := handInstallBox(t)
+	old := lookupIP
+	t.Cleanup(func() { lookupIP = old })
+	lookupIP = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}, nil }
+	sys.listeners = []Listener{{Address: "127.0.0.1", Port: 8080, PID: 4242}}
+	if err := daemonAt(sys, "localhost:8080"); err != nil {
+		t.Fatalf("the daemon on one of its addresses: %v", err)
+	}
+	sys.listeners = append(sys.listeners, Listener{Address: "::1", Port: 8080, PID: 31337})
+	if err := daemonAt(sys, "localhost:8080"); !errors.Is(err, errNotTheDaemon) || !strings.Contains(err.Error(), "31337") {
+		t.Fatalf("a squatter on the other address: %v", err)
+	}
+	if err := daemonAt(sys, "localhost:9999"); !errors.Is(err, errNotTheDaemon) {
+		t.Fatalf("nothing on the port: %v", err)
 	}
 }
 

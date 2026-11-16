@@ -44,17 +44,26 @@ func (e Env) daemonFor(cfg config.Config) daemon {
 // sent there (review m7).
 var errNotTheDaemon = errors.New("not the connector's service")
 
+// lookupIP resolves a host name of apiListen (a hand-written config.yaml may say localhost); tests replace it.
+var lookupIP = net.LookupIP
+
 // daemonAt checks that the socket listening at addr belongs to the process the service manager runs as the
 // connector (review m7). config.yaml can name a port the running daemon does not listen on — written after its start
 // (ConfigNewerThanStart), or the daemon failed to bind — and a local user may hold that port: POST /auth/token would
-// hand them the credential in clear. The listener bound to addr's own address wins over one bound to every address,
-// as in the kernel.
+// hand them the credential in clear. The listener bound to an address wins over one bound to every address, as in the
+// kernel. A host name is checked at every address it resolves to (the client may dial any): each one's listener, if
+// any, must be the service's, and one at least must be.
 func daemonAt(sys System, addr string) error {
 	host, p, err := net.SplitHostPort(addr)
 	port, perr := strconv.Atoi(p)
-	ip := net.ParseIP(host)
-	if err != nil || perr != nil || ip == nil {
-		return fmt.Errorf("%w: %s is not an address on this machine", errNotTheDaemon, addr)
+	if err != nil || perr != nil {
+		return fmt.Errorf("%w: %s is not an address", errNotTheDaemon, addr)
+	}
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		if ips, err = lookupIP(host); err != nil || len(ips) == 0 {
+			return fmt.Errorf("%w: %s does not resolve on this machine: %v", errNotTheDaemon, host, err)
+		}
 	}
 	svc, err := sys.Service(ServiceName)
 	if err != nil {
@@ -67,25 +76,33 @@ func daemonAt(sys System, addr string) error {
 	if err != nil {
 		return fmt.Errorf("%w: read the TCP table: %v", errNotTheDaemon, err)
 	}
-	var found *Listener
+	served := false
+	for _, ip := range ips {
+		l := listenerAt(ls, ip, port)
+		switch {
+		case l == nil:
+		case l.PID != svc.ProcessID:
+			return fmt.Errorf("%w: %s is held by process %d %s, not the %s service (process %d); its credential was not sent",
+				errNotTheDaemon, net.JoinHostPort(ip.String(), p), l.PID, l.Process, ServiceName, svc.ProcessID)
+		default:
+			served = true
+		}
+	}
+	if !served {
+		return fmt.Errorf("%w: nothing listens on %s (the service, process %d, runs another config or has not bound it yet)", errNotTheDaemon, addr, svc.ProcessID)
+	}
+	return nil
+}
+
+// listenerAt is the socket the kernel hands a connection to ip:port: one bound to ip, else one bound to every address.
+func listenerAt(ls []Listener, ip net.IP, port int) *Listener {
 	for _, exact := range []bool{true, false} {
 		for i := range ls {
 			lip := net.ParseIP(ls[i].Address)
 			if ls[i].Port == port && lip != nil && ((exact && lip.Equal(ip)) || (!exact && lip.IsUnspecified())) {
-				found = &ls[i]
-				break
+				return &ls[i]
 			}
 		}
-		if found != nil {
-			break
-		}
-	}
-	switch {
-	case found == nil:
-		return fmt.Errorf("%w: nothing listens on %s (the service, process %d, runs another config or has not bound it yet)", errNotTheDaemon, addr, svc.ProcessID)
-	case found.PID != svc.ProcessID:
-		return fmt.Errorf("%w: %s is held by process %d %s, not the %s service (process %d); its credential was not sent",
-			errNotTheDaemon, addr, found.PID, found.Process, ServiceName, svc.ProcessID)
 	}
 	return nil
 }
