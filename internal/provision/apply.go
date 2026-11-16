@@ -253,7 +253,7 @@ func (a *applier) run(ctx context.Context) error {
 	if err := api.CheckConfig(check); err != nil {
 		return refuse(CodeConfigRefused, "fix the spec: the connector would refuse to start on this config", "%v", err)
 	}
-	for _, f := range []func() error{a.checkSetFolderPaths, a.checkImporterStated, a.checkFilesExist, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
+	for _, f := range []func() error{a.checkSetFolderPaths, a.checkImporterStated, a.checkFilesExist, a.checkLinkedPaths, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
 		if err := f(); err != nil {
 			return err
 		}

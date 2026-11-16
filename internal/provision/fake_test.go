@@ -574,6 +574,17 @@ func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 
 func (s *fakeSys) FolderRules() FolderRules { return s.folderRules }
 
+// FinalFilePath is the test's final path for path (finalPath), else \\?\<path> for a file that exists.
+func (s *fakeSys) FinalFilePath(path string) (string, error) {
+	if f, ok := s.finalPath[path]; ok {
+		return f, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", err
+	}
+	return `\\?\` + path, nil
+}
+
 // FinalPath is the test's final path for dir (finalPath), else \\?\<dir> for a folder that exists.
 func (s *fakeSys) FinalPath(dir string) (string, error) {
 	if f, ok := s.finalPath[dir]; ok {

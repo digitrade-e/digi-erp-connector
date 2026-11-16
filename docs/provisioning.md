@@ -744,6 +744,14 @@ cmd.exe's characters, and — since the system-folder rules compare text — non
 ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`). `apply`'s `sendOrderDir` included
 (review R4-1, v1.0.31: before, only `orders`, `receipts` and `documents` took the rule for theirs).
 
+Then the box judges where Windows resolves them (review m6's rest, v1.0.32 — R4-1's and T3's helpers): the image
+folders `options` and `apply` set, and the importer files (`has.exe`, the BATs, the parameter files) `apply`, `orders`
+and `receipts` set, are refused when a junction, symbolic link or mount point is anywhere on the path, its own name
+included, or — once they exist — when the path the handle resolves to (opened without following it) is not the
+configured path itself (a SUBST or mapped drive, an 8.3 name, a link above). An image folder is
+`image_folder_forbidden`, an importer file `importer_not_erp`. Paths left as they were are not judged again; WinRM is
+unchanged.
+
 ### Where a document folder may be
 
 Plan 087 review T3. A typed folder (`documents`, behind the link), every `folder-acl` target (link or WinRM), and —

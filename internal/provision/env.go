@@ -73,6 +73,9 @@ type System interface {
 	// FinalPath is the path an existing folder resolves to, read from a handle on it (dataacl.FinalDirPath:
 	// \\?\C:\x on Windows); an error wrapping os.ErrNotExist when there is no such folder (review R4-1).
 	FinalPath(dir string) (string, error)
+	// FinalFilePath is FinalPath for a file (v1.0.32, review m6's rest: the
+	// importer files a command names behind the link).
+	FinalFilePath(path string) (string, error)
 	ApplyFolderLockdown(dir string, trusted []string, plan dataacl.LockdownPlan) (int, error)
 	RestoreFolderACL(dir string, entries []dataacl.FolderEntry) (restored, skipped int, err error)
 }
