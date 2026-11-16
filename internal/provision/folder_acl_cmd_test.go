@@ -219,6 +219,12 @@ func TestFolderACL_ImporterFoldersAndExecutables(t *testing.T) {
 	if len(sys.lastTrusted) != 1 {
 		t.Errorf("trusted writers for herp: %v", sys.lastTrusted)
 	}
+	// Review T2: the trusted writer has no entry of its own (the fake plan
+	// lists only Users): it is told it keeps no write.
+	res, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true)
+	if err != nil || !warned(res, `trusted_writer_no_write: BFL\wizsched`) {
+		t.Errorf("--check: %v %v", res.Warnings, err)
+	}
 	// An executable found by the walk.
 	sys.executables = map[string][]string{herp: {`lib\wtsapi32.dll`}}
 	_, err = ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true)

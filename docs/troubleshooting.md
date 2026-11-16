@@ -166,8 +166,11 @@ every principal's strongest rights anywhere in the folder before and after. It r
 (`preimage`, for `op: restore`), masks the folder's and every entry's DACL by handle — it **never grants**: SYSTEM,
 Administrators and TrustedInstaller keep theirs, a trusted writer keeps at most Modify of what it had, everyone else at
 most read & execute (review T2) — and restarts the service. Name the ERP's scheduler account in `documents`'
-`trustedWriters` **before** the lock-down, or it too drops to read & execute. Folders above it are never changed —
-`parentWritable` says who could still rename the folder away through one.
+`trustedWriters` **before** the lock-down, or it too drops to read & execute — and since nothing is ever granted, it
+keeps only what **its own** entries give it: write it had only through a group (`Users`, `Authenticated Users`) is
+capped with the group. `folder-acl-check` warns `trusted_writer_no_write:` for such an account; give it its own entry
+first (as an administrator: `icacls "<folder>" /grant "<DOMAINccount>:(OI)(CI)M"`), then lock down. Folders above it
+are never changed — `parentWritable` says who could still rename the folder away through one.
 
 **Lock a folder down by hand** (background, for a box without the link: a stricter, simpler recipe than the command's
 masking — it replaces the folder's DACL instead of lowering it; an elevated prompt; the path is an example):

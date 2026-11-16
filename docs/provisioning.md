@@ -519,7 +519,8 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   account keeps at most Modify; one for anyone else (CREATOR OWNER and OWNER RIGHTS included) keeps at most read &
   execute — generic rights mapped first, an entry left with nothing beyond SYNCHRONIZE dropped. Conditional, callback
   and object entries keep their condition and type; deny entries stay; flags and order are kept. **No entry is ever
-  added**: a trusted writer with no right before keeps none, and an account that could only add files gains no read.
+  added**: a trusted writer with no right before keeps none (write it had only through a group is capped with the
+  group: `trusted_writer_no_write:` warns, on `--check` too), and an account that could only add files gains no read.
   The folder's link to its parent is cut (its DACL protected, its inherited entries kept as explicit and masked the
   same way); every other entry keeps its own protection. An owner that is not SYSTEM, an administrator or
   TrustedInstaller is handed to Administrators.

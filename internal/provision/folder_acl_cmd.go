@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -387,6 +388,24 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 		if len(out.ParentWritable) > 0 {
 			a.warn("parent_writable: %s (%s) can still be renamed away through a folder above it by %s — parents are never changed; let only the administrators delete or rename the folders above",
 				n, paths[n], strings.Join(out.ParentWritable, ", "))
+		}
+		// Review T2: a lock-down never grants, so a trusted writer keeps only
+		// what its own entries give it — write it had through a group (Users)
+		// is capped with the group. Said before anything is written.
+		for _, w := range a.cur.Documents.TrustedWriters {
+			if !slices.Contains(trustedFor[n], w.SID) {
+				continue
+			}
+			after := "none"
+			for _, p := range plan.Principals {
+				if p.SID == w.SID {
+					after = p.After
+				}
+			}
+			if after != "full" && after != "modify" && after != "write" {
+				a.warn("trusted_writer_no_write: %s, a trusted writer, has no write of its own in folder %s (%s) after the lock-down (%s): a lock-down never grants, and write it had through a group is capped with the group — if the ERP's scheduler must write there, give it its own entry first",
+					w.Name, n, paths[n], after)
+			}
 		}
 		a.res.FolderACL.Folders = append(a.res.FolderACL.Folders, out)
 	}
