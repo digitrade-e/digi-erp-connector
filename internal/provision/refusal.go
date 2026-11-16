@@ -66,6 +66,21 @@ const (
 	CodeReceiptStoreExists   = "receipt_store_exists" // receipt-seed: the store exists (a seed is written once)
 	CodeReceiptSeedLow       = "receipt_seed_low"     // receipt-seed: at or below a receipt already written
 	CodeReceiptDirMissing    = "receipt_dir_missing"  // receipts: sendReceiptDir is not a folder here
+
+	// plan 087: the counters and documents commands
+	CodeCounterUnknown   = "counter_unknown"    // counters: no counter of that key
+	CodeCounterExists    = "counter_exists"     // counters create: the key is taken
+	CodeCounterRetired   = "counter_retired"    // counters: the counter is retired
+	CodeCounterMoved     = "counter_moved"      // counters start-from: last is not expectLast (someone issued a number)
+	CodeCounterLower     = "counter_lower"      // counters: a number at or below one issued (a counter never moves back)
+	CodeCounterRange     = "counter_range"      // counters: the range would exclude the last or an issued number
+	CodeCounterInFlight  = "counter_in_flight"  // counters retire: orders or receipts of its range not finished
+	CodeCounterStore     = "counter_store"      // counters: its store cannot be read (or is missing)
+	CodeFolderUnknown    = "folder_unknown"     // documents: no folder of that key to remove
+	CodeFolderMissing    = "folder_missing"     // documents: the path is not a folder on this machine
+	CodeFolderForbidden  = "folder_forbidden"   // documents: a link, inside the data directory, or not a path link mode takes
+	CodeFolderInFlight   = "folder_in_flight"   // documents: orders frozen for that folder are not finished
+	CodeReceiptsInFlight = "receipts_in_flight" // documents: a receipt is reserved, and the receipt folder or counter would change
 	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
 	// program (review M1).
 	CodeUpgradeRunning = "upgrade_running"

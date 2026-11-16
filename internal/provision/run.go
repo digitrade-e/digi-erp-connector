@@ -45,6 +45,8 @@ const Usage = `usage:
   digi-erp-connector-provision receipt-seed <N>         create the receipt number store with N as the next receipt (write-if-absent)
   digi-erp-connector-provision receipts [--check] --spec - set the receipt settings only (sendReceiptDir, model (b) importer, card names)
   digi-erp-connector-provision orders [--check] --spec -   set the order settings only (sendOrderDir, importer, model (a) pickup folder and layout)
+  digi-erp-connector-provision counters [--check] --spec - create a named counter, set its range, move it forward (start-from), or retire it (plan 087)
+  digi-erp-connector-provision documents [--check] --spec - set the typed folders documentRule names, and the receipts' folder and counter (plan 087)
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle]
   digi-erp-connector-provision state [--spec -]         read the box's state: services, order queue, counters, indexes, TLS, link.yaml, disk (read-only; stdin {} or empty)
@@ -271,6 +273,28 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 				return envelope(cmd, nil, r, nil), ExitRefused
 			}
 			result, err = ApplyOrders(ctx, env, in, check)
+		}
+	// plan 087: named counters and typed folders
+	case "counters", "documents":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		if cmd == "counters" {
+			in, r := DecodeCounters(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyCounters(ctx, env, in, check)
+		} else {
+			in, r := DecodeDocuments(io.LimitReader(stdin, MaxInput))
+			if r != nil {
+				return envelope(cmd, nil, r, nil), ExitRefused
+			}
+			result, err = ApplyDocuments(ctx, env, in, check)
 		}
 	case "verify":
 		var in VerifyInput

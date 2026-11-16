@@ -62,7 +62,10 @@ type CheckResult struct {
 	Dependencies bool     `json:"dependencies,omitempty"` // the service's dependencies would change
 	Recovery     bool     `json:"recovery"`               // the service's recovery actions would be set
 	OrderCounter bool     `json:"orderCounter,omitempty"` // the order counter would move with sendOrderDir
-	Restart      bool     `json:"restart"`                // the service would restart
+	// Counter (plan 087, counters --check) is the counter's store as the
+	// command would leave it.
+	Counter *CounterCheck `json:"counter,omitempty"`
+	Restart bool          `json:"restart"` // the service would restart
 }
 
 // Step is one part of the change: whether it changed anything.
@@ -162,6 +165,10 @@ type applier struct {
 	fwBefore   *FirewallRule // the rule of the spec's name before this run (ours, or none)
 	loginPlan  string        // given | keep | create | rotate | none (loginNone)
 	moveOrders bool          // carry lastOrderNumber.json to the new sendOrderDir at the restart
+	// whileStopped run between the stop and the start of restartAndProve,
+	// when no writer holds a counter (plan 087: a counter's store set by the
+	// counters command).
+	whileStopped []func() error
 
 	dbPassword string // what the connector will log in to SQL with
 	rotated    bool   // this run set the least-privilege login's password in SQL Server
@@ -853,6 +860,8 @@ func configDiff(cur, tgt config.Config) string {
 	add("tls", cur.TLS != tgt.TLS)
 	add("options", !slices.Equal(cur.ImageFolders, tgt.ImageFolders) || cur.ERPUser != tgt.ERPUser ||
 		cur.Debug != tgt.Debug || cur.Queries != tgt.Queries)
+	add("counters", !maps.Equal(cur.Documents.Counters, tgt.Documents.Counters))
+	add("documents", !maps.Equal(cur.Documents.Folders, tgt.Documents.Folders) || cur.Documents.Receipts != tgt.Documents.Receipts)
 	if len(out) == 0 {
 		return "rewritten in the connector's format"
 	}
@@ -939,7 +948,7 @@ func sameFold(a, b []string) bool {
 // the port with the new credential. A failure puts the run's pre-image back.
 func (a *applier) restartAndProve(ctx context.Context) error {
 	stale := configStale(a.curMod, a.svc.ProcessStart)
-	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders && !a.stoppedEarly {
+	if !a.restart && !stale && a.svc.State == "running" && !a.moveOrders && !a.stoppedEarly && len(a.whileStopped) == 0 {
 		a.step("restart", false, "nothing the service reads changed")
 		return nil
 	}
@@ -952,6 +961,11 @@ func (a *applier) restartAndProve(ctx context.Context) error {
 	}
 	if a.moveOrders {
 		if err := a.moveOrderCounter(); err != nil {
+			return a.fail(err)
+		}
+	}
+	for _, f := range a.whileStopped {
+		if err := f(); err != nil {
 			return a.fail(err)
 		}
 	}
