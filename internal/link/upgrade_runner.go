@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,11 +61,21 @@ type UpgradeRunner struct {
 	StopService func(name string) error
 	// Version is the installed provision.exe's build ("" when it does not answer).
 	Version func(installDir string) string
+
+	// Plan 088 D5, the health check and the one rollback (upgrade_health.go). Probe runs the installed provision's
+	// state; Session reads the link's session marker; Fetch downloads a release's setup to dest and returns its
+	// SHA-256 once it matches the release's SHA256SUMS; PickupDir is config.yaml's sendOrderPickupDir (DIG-1297).
+	Probe      func(installDir string) (stateProbe, error)
+	Session    func() (SessionMarker, error)
+	Fetch      func(version, dest string) (string, error)
+	PickupDir  func() string
+	HTTPClient *http.Client  // Fetch's (link.yaml's proxy)
+	HealthPoll time.Duration // between health rounds; 0 = 15 s
 }
 
 // NewUpgradeRunner is the runner on this machine.
 func NewUpgradeRunner(dataDir, ticket string, log Logger) UpgradeRunner {
-	return UpgradeRunner{
+	ur := UpgradeRunner{
 		DataDir: dataDir, Ticket: ticket, Log: log, Now: time.Now, Sleep: time.Sleep,
 		Protect: func() error {
 			_, err := dataacl.ProtectTree(dataDir, dataacl.TreeOptions{})
@@ -81,7 +92,13 @@ func NewUpgradeRunner(dataDir, ticket string, log Logger) UpgradeRunner {
 		StartService: autostart.StartWindowsService,
 		StopService:  func(name string) error { return autostart.StopWindowsService(name, autostart.StopTimeout) },
 		Version:      installedVersion,
+		Probe:        probeState,
+		Session:      func() (SessionMarker, error) { return ReadSessionMarker(dataDir) },
+		PickupDir:    func() string { return pickupDirOf(dataDir) },
+		HTTPClient:   runnerHTTPClient(dataDir),
 	}
+	ur.Fetch = ur.fetchRelease
+	return ur
 }
 
 // RunUpgrade is `upgrade-run <ticket>`: the runner, logging to its ticket's runner.log and the Event Log. The exit code
@@ -138,6 +155,7 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		return res, r.write(res)
 	}
 	res.From, res.To = job.From, job.To
+	res.SHA256, res.Auto, res.Policy = job.SHA256, job.Auto, job.Policy
 	r.Log.Info(fmt.Sprintf("link upgrade %s: %s -> %s, the setup starts in %s", r.Ticket, job.From, job.To, answerGrace))
 	r.Sleep(answerGrace)
 
@@ -147,7 +165,9 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		return res, r.write(res)
 	}
 	logPath := filepath.Join(tdir, "setup.log")
+	setupStarted := r.Now()
 	code, err := r.RunSetup(setup, logPath, setupTimeout)
+	setupEnded := err == nil // a setup still running is never followed by a health check, let alone a second setup
 	res.ExitCode = code
 	switch {
 	case err != nil:
@@ -157,10 +177,57 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 	}
 	r.Log.Info(fmt.Sprintf("link upgrade %s: the setup ended with %d", r.Ticket, code))
 
-	// Whatever the setup did, the box ends as it was before (review m3): the link always running, the daemon running if
-	// it ran before — the setup starts both when it succeeds; when it fails after stopping them, nothing else would — and
-	// a daemon a person had stopped (a cutover, maintenance) stopped again, since the setup's [Run] starts it anyway.
-	res.Services = map[string]string{}
+	var notAsBefore []string
+	res.Services, notAsBefore = r.restoreServices(job)
+	res.InstalledVersion = r.Version(job.InstallDir)
+	if res.Error == "" {
+		if v, ok := parseVersion(buildRe, res.InstalledVersion); !ok || v.String() != job.To {
+			res.Error = fmt.Sprintf("the setup ended with 0 but the installed build is %q, not %s", res.InstalledVersion, job.To)
+		}
+	}
+	if len(notAsBefore) > 0 {
+		msg := "after the upgrade " + strings.Join(notAsBefore, "; ") + ": read setup.log, and logs (server, link, events-daemon) once the link answers"
+		if res.Error == "" {
+			res.Error = msg
+		} else {
+			res.Error += "; " + msg
+		}
+	}
+	if res.Error != "" {
+		res.SetupLogTail = tailLines(logPath, 40, 300)
+	}
+	_ = os.Remove(setup) // tens of MB; the log, the job and the result stay
+	// Plan 088 D5: healthy within healthMinutes, or the build it replaced once more (upgrade_health.go).
+	if setupEnded && job.HealthMinutes > 0 {
+		res.Health = r.checkHealth(job, []string{job.To, job.From}, setupStarted)
+		if !res.Health.OK {
+			res.Rollback = r.rollback(job, tdir)
+			msg := fmt.Sprintf("not healthy within %d min after the setup (%s)", job.HealthMinutes, failedChecks(res.Health))
+			if res.Rollback.OK {
+				msg += fmt.Sprintf("; %s, the build it replaced, was installed again and is healthy", res.Rollback.To)
+			} else {
+				msg += fmt.Sprintf("; the rollback to %s failed: %s", res.Rollback.To, res.Rollback.Error)
+			}
+			if res.Error == "" {
+				res.Error = msg
+			} else {
+				res.Error += "; " + msg
+			}
+			if res.SetupLogTail == nil {
+				res.SetupLogTail = tailLines(logPath, 40, 300)
+			}
+		}
+	}
+	res.FinishedAt = r.Now().UTC()
+	return res, r.write(res)
+}
+
+// restoreServices puts the services back as they were before the upgrade, whatever the setup did (review m3): the link
+// always running, the daemon running if it ran before — the setup starts both when it succeeds; when it fails after
+// stopping them, nothing else would — and a daemon a person had stopped (a cutover, maintenance) stopped again, since
+// the setup's [Run] starts it anyway. It returns each service's state and what is not as it was.
+func (r UpgradeRunner) restoreServices(job UpgradeJob) (map[string]string, []string) {
+	services := map[string]string{}
 	var notAsBefore []string
 	for _, s := range []struct {
 		name string
@@ -186,7 +253,7 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		if err != nil {
 			st = "unknown: " + err.Error()
 		}
-		res.Services[s.name] = st
+		services[s.name] = st
 		// Review m4: a setup that exits 0 (its sc.exe start always does) with a service not as it should be is a failure.
 		if (s.want && st != "running") || (!s.want && st != "stopped" && st != "not_installed") {
 			want := "running"
@@ -196,26 +263,7 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 			notAsBefore = append(notAsBefore, fmt.Sprintf("%s is %s, not %s", s.name, st, want))
 		}
 	}
-	res.InstalledVersion = r.Version(job.InstallDir)
-	if res.Error == "" {
-		if v, ok := parseVersion(buildRe, res.InstalledVersion); !ok || v.String() != job.To {
-			res.Error = fmt.Sprintf("the setup ended with 0 but the installed build is %q, not %s", res.InstalledVersion, job.To)
-		}
-	}
-	if len(notAsBefore) > 0 {
-		msg := "after the upgrade " + strings.Join(notAsBefore, "; ") + ": read setup.log, and logs (server, link, events-daemon) once the link answers"
-		if res.Error == "" {
-			res.Error = msg
-		} else {
-			res.Error += "; " + msg
-		}
-	}
-	if res.Error != "" {
-		res.SetupLogTail = tailLines(logPath, 40, 300)
-	}
-	_ = os.Remove(setup) // tens of MB; the log, the job and the result stay
-	res.FinishedAt = r.Now().UTC()
-	return res, r.write(res)
+	return services, notAsBefore
 }
 
 func (r UpgradeRunner) lock() (*filelock.Held, error) {
