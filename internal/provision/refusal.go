@@ -62,4 +62,7 @@ const (
 	CodeReceiptStoreExists = "receipt_store_exists" // receipt-seed: the store exists (a seed is written once)
 	CodeReceiptSeedLow     = "receipt_seed_low"     // receipt-seed: at or below a receipt already written
 	CodeReceiptDirMissing  = "receipt_dir_missing"  // receipts: sendReceiptDir is not a folder here
+	// CodeUpgradeRunning: an upgrade over the link is pending, and its setup stops the services and replaces this
+	// program (review M1).
+	CodeUpgradeRunning = "upgrade_running"
 )

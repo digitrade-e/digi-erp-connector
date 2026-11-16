@@ -130,6 +130,13 @@ proxy, and runs the setup only when its SHA-256 equals **both** the digest in th
 release (`dev`), and a server whose pickup folder (DIG-1297) the target would ignore. Every check runs before it
 answers `accepted`; a refused upgrade leaves nothing behind.
 
+It never runs beside another command or a provisioning run: `busy` while the other command slot is in use or a run
+(over the link or WinRM) holds `DataDir\provision\.lock`. The link takes that lock for its checks and the download, and
+the runner holds it from before the setup until the services run again and the result is written. While a ticket is
+pending every provision command is refused `upgrade_running` — by the link, and by `provision` itself for a WinRM run
+— while the link's own commands (`upgrade-result`, `link-status`, `hashes`) still answer. The lock never holds up the
+link's own stop: it is released when the link process ends.
+
 The setup stops the link itself, so the link hands over to a **runner**: a copy of `digi-erp-connector-link.exe` in
 `%ProgramData%\digi-erp-connector\upgrade\<ticket>\`, started detached (it outlives the link and is outside the
 install folder the setup replaces). It waits 10 s for the answer to leave, checks the setup's digest again, runs it

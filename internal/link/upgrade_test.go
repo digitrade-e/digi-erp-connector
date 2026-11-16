@@ -72,17 +72,21 @@ func sumsFor(name string, b []byte) string {
 
 // stateRunner answers provision state with the given daemon state and queue.
 type stateRunner struct {
-	mu     sync.Mutex
-	state  string // the daemon service
-	queue  string // JSON of daemon.queue, or "" for none
-	fail   bool
-	called int
+	mu      sync.Mutex
+	state   string // the daemon service
+	queue   string // JSON of daemon.queue, or "" for none
+	fail    bool
+	called  int
+	onState func() // called with each state run
 }
 
 func (r *stateRunner) Run(_ context.Context, argv []string, _ []byte, _ int) ([]byte, int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.called++
+	if r.onState != nil {
+		r.onState()
+	}
 	if strings.Join(argv, " ") != "state --spec -" {
 		return nil, -1, fmt.Errorf("unexpected %v", argv)
 	}
@@ -95,6 +99,8 @@ func (r *stateRunner) Run(_ context.Context, argv []string, _ []byte, _ int) ([]
 	}
 	return []byte(`{"command":"state","ok":true,"result":{"services":{"daemon":{"state":"` + r.state + `"}},"daemon":{"asked":true,` + q + `}}}`), 0, nil
 }
+
+func (r *stateRunner) calls() int { r.mu.Lock(); defer r.mu.Unlock(); return r.called }
 
 type spawned struct {
 	mu    sync.Mutex
@@ -279,6 +285,62 @@ func TestUpgradeAssumeIdleAndAStoppedDaemon(t *testing.T) {
 	_ = json.Unmarshal(b, &job)
 	if job.DaemonWasRunning {
 		t.Fatal("a stopped daemon would be started after the upgrade")
+	}
+}
+
+// Review M1: an upgrade never runs beside a provisioning run — the setup would stop the daemon in the middle of a db
+// rotation, or fail on a provision.exe in use.
+func TestUpgradeWaitsForProvisionRuns(t *testing.T) {
+	// a provision run (apply, db, auth, orders…) holds DataDir\provision\.lock
+	g := newUpgradeRig(t, "v1.0.29")
+	_ = os.MkdirAll(filepath.Join(g.dir, "provision"), 0o700)
+	h, err := filelock.Lock(ProvisionLockPath(g.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ans, exit, ticket := g.upgrade(t, g.spec("1.0.30", sha(g.setup)))
+	_ = h.Unlock()
+	if exit != 1 || ans.Refusal == nil || ans.Refusal.Code != "busy" || len(g.spawned.calls) != 0 {
+		t.Fatalf("answer %+v, spawned %v", ans, g.spawned.calls)
+	}
+	if _, err := os.Stat(filepath.Join(g.dir, "upgrade", ticket)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused upgrade left its ticket")
+	}
+	// another command is running in the second slot (a provision.exe the setup could not replace)
+	g.b.link.cmdSlots <- struct{}{}
+	ans, exit, _ = g.upgrade(t, g.spec("1.0.30", sha(g.setup)))
+	<-g.b.link.cmdSlots
+	if exit != 1 || ans.Refusal == nil || ans.Refusal.Code != "busy" {
+		t.Fatalf("with another command running: %+v", ans)
+	}
+	// while the link checks and downloads, the lock is held: no provision run can start
+	var heldDuring atomic.Bool
+	g.runner.mu.Lock()
+	g.runner.onState = func() {
+		h, err := filelock.Lock(ProvisionLockPath(g.dir))
+		if err == nil {
+			_ = h.Unlock()
+		}
+		heldDuring.Store(errors.Is(err, filelock.ErrLocked))
+	}
+	g.runner.mu.Unlock()
+	if ans, _, _ := g.upgrade(t, g.spec("1.0.30", sha(g.setup))); !ans.Accepted {
+		t.Fatalf("%+v", ans)
+	}
+	if !heldDuring.Load() {
+		t.Fatal("the provision lock was not held while the upgrade was accepted")
+	}
+	// accepted, the ticket pending: the link runs no provision command, and provision runs refuse (UpgradePending)
+	if pending, _ := UpgradePending(g.dir, time.Now()); !pending {
+		t.Fatal("no upgrade pending")
+	}
+	before := g.runner.calls()
+	_, a, _ := g.send(t, "version", "")
+	if a.Refusal != CodeUpgradeRunning || g.runner.calls() != before {
+		t.Fatalf("a provision command ran during the upgrade: %+v", a)
+	}
+	if _, a, _ := g.send(t, CommandHashes, ""); a.Refusal != "" {
+		t.Fatalf("the link's own commands still answer: %+v", a)
 	}
 }
 
@@ -470,6 +532,49 @@ func TestOneRunnerAtATime(t *testing.T) {
 	_, _ = g.r.Run()
 	if r := g.result(t); g.ran != 0 || !strings.Contains(r.Error, "another upgrade runner") {
 		t.Fatalf("ran %d result %+v", g.ran, r)
+	}
+}
+
+// Review M1: the runner holds the provision lock from before the setup until the services run again and the result is
+// written; a provision run holding it means no setup.
+func TestTheRunnerHoldsTheProvisionLock(t *testing.T) {
+	g := newRunnerRig(t, true)
+	var heldInSetup, heldAtStart bool
+	setup := g.r.RunSetup
+	g.r.RunSetup = func(s, logPath string, d time.Duration) (int, error) {
+		_, err := filelock.Lock(ProvisionLockPath(g.dir))
+		heldInSetup = errors.Is(err, filelock.ErrLocked)
+		return setup(s, logPath, d)
+	}
+	start := g.r.StartService
+	g.services[DaemonServiceName] = "stopped"
+	g.r.StartService = func(name string) error {
+		_, err := filelock.Lock(ProvisionLockPath(g.dir))
+		heldAtStart = errors.Is(err, filelock.ErrLocked)
+		return start(name)
+	}
+	if _, err := g.r.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !heldInSetup || !heldAtStart {
+		t.Fatalf("the lock was not held: in the setup %v, at the service start %v", heldInSetup, heldAtStart)
+	}
+	h, err := filelock.Lock(ProvisionLockPath(g.dir))
+	if err != nil {
+		t.Fatalf("the lock was kept after the run: %v", err)
+	}
+	_ = h.Unlock()
+
+	g = newRunnerRig(t, true)
+	_ = os.MkdirAll(filepath.Join(g.dir, "provision"), 0o700)
+	h, err = filelock.Lock(ProvisionLockPath(g.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Unlock() }()
+	_, _ = g.r.Run()
+	if r := g.result(t); g.ran != 0 || !strings.Contains(r.Error, "provisioning run") {
+		t.Fatalf("ran %d, result %+v", g.ran, r)
 	}
 }
 

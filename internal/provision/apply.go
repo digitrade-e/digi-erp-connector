@@ -23,6 +23,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/auth"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
+	"github.com/digitrade-e/digi-erp-connector/internal/link"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/filelock"
@@ -122,17 +123,24 @@ func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, erro
 
 // lockRuns holds provision\.lock for one run: two at once — a WinRM retry
 // over a run still restarting the service — would interleave the login's
-// password and the stored secret.
+// password and the stored secret. An upgrade over the link takes the same
+// lock (link.ProvisionLockPath), and while one is pending — its job written,
+// its runner alive or about to start — no run starts (review M1).
 func lockRuns(dataDir string) (func(), error) {
 	if err := os.MkdirAll(provisionDir(dataDir), 0o700); err != nil {
 		return nil, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "create the provision folder: %v", err)
 	}
 	held, err := filelock.Lock(filepath.Join(provisionDir(dataDir), ".lock"))
 	if errors.Is(err, filelock.ErrLocked) {
-		return nil, refuse(CodeBusy, "wait for the other run to finish", "another provisioning run is in progress on this machine")
+		return nil, refuse(CodeBusy, "wait for the other run to finish", "another provisioning run (or an upgrade) is in progress on this machine")
 	}
 	if err != nil {
 		return nil, refuse(CodeWriteFailed, "run it elevated (as an administrator)", "lock the provision folder: %v", err)
+	}
+	if pending, ticket := link.UpgradePending(dataDir, time.Now()); pending {
+		_ = held.Unlock()
+		return nil, refuse(CodeUpgradeRunning, "wait for it to end: upgrade-result with its ticket",
+			"the upgrade of ticket %s is pending: its setup stops the services and replaces this program", ticket)
 	}
 	return func() { _ = held.Unlock() }, nil
 }

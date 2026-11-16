@@ -145,6 +145,9 @@ func (l *Link) command(st net.Conn) {
 		_ = st.SetDeadline(time.Now().Add(CommandDeadline + time.Minute))
 		refusal = l.checkInput(env, stdin)
 		if refusal == "" {
+			refusal = l.checkUpgrade(env)
+		}
+		if refusal == "" {
 			if env.Sealed {
 				plain, err := linkproto.Open(l.cfg.Keys, stdin)
 				if err != nil {
@@ -224,6 +227,19 @@ func (l *Link) checkInput(env linkproto.Envelope, stdin []byte) string {
 	}
 	if MustBeSealed(env.Command) && !env.Sealed {
 		return CodeInputNotSealed // plan 086: a secret never crosses the relay in clear
+	}
+	return ""
+}
+
+// checkUpgrade refuses a provision command while an upgrade is pending (review M1): its setup stops the services and
+// replaces provision.exe, which a running command would hold open. The link's own commands still answer
+// (upgrade-result above all).
+func (l *Link) checkUpgrade(env linkproto.Envelope) string {
+	if _, self := selfCommands[env.Command]; self {
+		return ""
+	}
+	if busy, _ := runningTicket(l.upgradeDataDir(), l.cfg.Now()); busy {
+		return CodeUpgradeRunning
 	}
 	return ""
 }

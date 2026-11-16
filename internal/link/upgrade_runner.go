@@ -112,6 +112,15 @@ func (r UpgradeRunner) Run() (UpgradeResult, error) {
 		return res, r.write(res)
 	}
 	defer func() { _ = held.Unlock() }()
+	// Review M1: provision's run lock, from before the setup until the services run again and the result is written
+	// (the deferred unlock runs after write). The link let it go a moment ago; a provisioning run holding it now means
+	// no setup.
+	prov, err := lockProvision(r.DataDir, lockWait, r.Now, r.Sleep)
+	if err != nil {
+		res.Error = "a provisioning run holds DataDir\\provision\\.lock, so the setup was not run: " + err.Error()
+		return res, r.write(res)
+	}
+	defer func() { _ = prov.Unlock() }()
 
 	var job UpgradeJob
 	b, err := os.ReadFile(filepath.Join(tdir, jobFile))

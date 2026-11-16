@@ -355,7 +355,8 @@ actually changed.
 | `firewall_failed`, `service_failed` | the firewall or the service manager refused |
 | `firewall_foreign` | a rule of the spec's name exists and this tool did not make it |
 | `order_number_conflict` | the old and the new order folder hold different order counters |
-| `busy` | another run holds `provision\.lock` |
+| `busy` | another run (or an upgrade over the link) holds `provision\.lock` |
+| `upgrade_running` | an upgrade over the link is pending (its job written, no result yet): its setup stops the services and replaces this program; ask `upgrade-result` |
 | `port_proof_failed` | the restarted connector did not answer (for `db`: or its database did not); the pre-image was put back (`daemon`: nothing to put back) |
 | `sa_link_mode` | behind the link (below), `allowSa`: the connector never keeps `sa` there |
 | `importer_not_erp` | behind the link, an importer that is not `has.exe` or a `.bat`/`.cmd`, or one in a system folder |

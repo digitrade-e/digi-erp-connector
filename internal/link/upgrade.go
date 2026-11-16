@@ -243,14 +243,30 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	if busy, other := runningTicket(dir, l.cfg.Now()); busy {
 		return UpgradeAnswer{}, upgradeRefuse("upgrade_running", "wait for it: upgrade-result with its ticket", "the upgrade of ticket %s is still running", other)
 	}
-	daemonRunning, err := l.orderQueueIdle(in.AssumeIdle)
-	if err != nil {
-		return UpgradeAnswer{}, err
+	// Review M1: never beside another command — a provision.exe still running would make the setup fail on a file in
+	// use — nor beside a provisioning run (DataDir\provision\.lock, WinRM's included), whose service stop and rollback
+	// would cross the setup's. This command holds one of the two slots.
+	if len(l.cmdSlots) > 1 {
+		return UpgradeAnswer{}, upgradeRefuse(busyCode, "wait for the other command to end and ask again", "another command is running on this box")
 	}
 	if l.cfg.Upgrade.Protect != nil {
 		if err := l.cfg.Upgrade.Protect(); err != nil {
 			return UpgradeAnswer{}, upgradeRefuse("data_dir_unsafe", "fix the data directory's owner or links (docs/troubleshooting.md)", "%v", err)
 		}
+	}
+	// Held from here until the job is written and the runner started: from then on UpgradePending refuses every
+	// provisioning run, and the runner takes this lock for the setup.
+	held, err := lockProvision(dir, 0, l.cfg.Now, time.Sleep)
+	if errors.Is(err, filelock.ErrLocked) {
+		return UpgradeAnswer{}, upgradeRefuse(busyCode, "wait for the provisioning run to end and ask again", "a provisioning run is in progress on this box")
+	}
+	if err != nil {
+		return UpgradeAnswer{}, upgradeRefuse("runner_failed", "check the disk (state: disk)", "the provision lock: %v", err)
+	}
+	defer func() { _ = held.Unlock() }()
+	daemonRunning, err := l.orderQueueIdle(in.AssumeIdle)
+	if err != nil {
+		return UpgradeAnswer{}, err
 	}
 	pruneUpgrades(dir)
 	tdir, err := makeTicketDir(dir, ticket)
@@ -475,6 +491,42 @@ func makeTicketDir(dataDir, ticket string) (string, error) {
 
 func lockPath(dataDir string) string {
 	return filepath.Join(dataDir, upgradeDirs.tickets, "runner.lock")
+}
+
+// ProvisionLockPath is provision's run lock, DataDir\provision\.lock (provision.lockRuns; a test pins that both agree).
+// The upgrade takes it too (review M1): from the link's checks until the runner has started the services again and
+// written the result, no provisioning run — over the link or WinRM — runs beside the setup.
+func ProvisionLockPath(dataDir string) string {
+	return filepath.Join(dataDir, "provision", ".lock")
+}
+
+// CodeUpgradeRunning refuses a provision command while an upgrade is pending: the setup is about to stop the services
+// and replace provision.exe.
+const CodeUpgradeRunning = "upgrade_running"
+
+// busyCode is the upgrade's refusal while another command or a provisioning run is in progress (provision's "busy").
+const busyCode = "busy"
+
+// UpgradePending reports an upgrade whose runner is alive or may not have started yet (its job written, no result),
+// and its ticket. provision refuses to start a run then.
+func UpgradePending(dataDir string, now time.Time) (bool, string) {
+	return runningTicket(dataDir, now)
+}
+
+// lockProvision takes provision's run lock, waiting up to wait for a holder that is about to let it go; a holder past
+// that is ErrLocked.
+func lockProvision(dataDir string, wait time.Duration, now func() time.Time, sleep func(time.Duration)) (*filelock.Held, error) {
+	if err := os.MkdirAll(filepath.Dir(ProvisionLockPath(dataDir)), 0o700); err != nil {
+		return nil, err
+	}
+	deadline := now().Add(wait)
+	for {
+		h, err := filelock.Lock(ProvisionLockPath(dataDir))
+		if err == nil || !errors.Is(err, filelock.ErrLocked) || !now().Before(deadline) {
+			return h, err
+		}
+		sleep(250 * time.Millisecond)
+	}
 }
 
 func resultPath(dataDir, ticket string) string {
