@@ -547,7 +547,7 @@ func TestALinkOnlyFailureIsInconclusiveWhileTheRelayIsDown(t *testing.T) {
 }
 
 // Review N5: D12 asks the relay's /readyz — 200 only while its registry answers — never /healthz, which a relay answers
-// even when it cannot admit a box. Anything but 200 (an older relay's 404 too) is "not ready".
+// even when it cannot admit a box. Anything but 200 is "not ready".
 func TestTheRelaysReadyz(t *testing.T) {
 	for in, want := range map[string]string{
 		"wss://link.digitrade-admin.org/link":        "https://link.digitrade-admin.org/readyz",
@@ -588,7 +588,7 @@ func TestTheRelaysReadyz(t *testing.T) {
 	if err := relayReady(dir, srv.Client()); err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("not ready: %v", err)
 	}
-	ready = http.StatusNotFound // a relay from before /readyz
+	ready = http.StatusNotFound // any other status counts as not ready too
 	if err := relayReady(dir, srv.Client()); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("no /readyz: %v", err)
 	}

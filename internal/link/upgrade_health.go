@@ -238,8 +238,9 @@ func linkOnly(h *linkproto.UpgradeHealth) bool {
 // relayReadyTimeout bounds the runner's question to the relay (D12).
 const relayReadyTimeout = 30 * time.Second
 
-// relayReadyURL is the relay's /readyz for its /link URL: wss → https, ws → http, the same host, no user or query. The
-// relay answers it 200 only when its registry answers (review N5); it is never its liveness probe.
+// relayReadyURL is the relay's /readyz for its /link URL: wss → https, ws → http, the same host, no user or query. Relay
+// 0.3.0 (in production since 2026-11-16) answers it 200 only while its registry answers within 2 s, so it could admit a
+// box (review N5); 0.2.0's /readyz said only whether that instance was draining. It is never the relay's liveness probe.
 func relayReadyURL(relay string) (string, error) {
 	u, err := url.Parse(relay)
 	if err != nil {
@@ -260,8 +261,8 @@ func relayReadyURL(relay string) (string, error) {
 }
 
 // relayReady asks link.yaml's relay for /readyz through client (the link's proxy): nil only when it answers 200.
-// Anything else — another status (a relay before /readyz answers 404), no answer — is "not ready": D12 then keeps the
-// new build.
+// Anything else — 503 (its registry not answering, or the instance draining), any other status, no answer — is "not
+// ready": D12 then keeps the new build.
 func relayReady(dataDir string, client *http.Client) error {
 	st, err := (&Store{Dir: dataDir}).LoadState()
 	if err != nil {

@@ -267,11 +267,12 @@ key. The format below is the one after the security review (plan 088 §2b, D8–
   back below it, nor below its own compiled floor, nor while it cannot read it (`rollback_below_floor`). A build that
   changes a persisted format sets `RollbackFloor` to its own version in the same change.
 - **A link-only failure is not a verdict while the relay is not ready (D12, review N5).** When only the new link failed
-  the health check, the runner asks the relay's **`/readyz`** from the box (link.yaml's relay, through its proxy) — 200
-  only while the relay's registry answers, so the relay could admit the box; `/healthz` says nothing about that. It
-  answers 200 — our side is broken, the rollback runs; anything else (503, no answer, a relay from before `/readyz`
-  answering 404) — the new build stays (`unhealthy_link_inconclusive`). A relay or registry outage during a fleet
-  window no longer rolls the fleet back.
+  the health check, the runner asks the relay's **`/readyz`** from the box (link.yaml's relay, through its proxy). Relay
+  0.3.0, in production since 2026-11-16, answers it 200 only while its registry answers within 2 s, so it could admit
+  the box (0.2.0's `/readyz` said only whether the instance was draining); `/healthz` says nothing about either. It
+  answers 200 — our side is broken, the rollback runs; anything else (503: the registry not answering or the instance
+  draining; any other status; no answer) — the new build stays (`unhealthy_link_inconclusive`). A relay or registry
+  outage during a fleet window no longer rolls the fleet back.
 
 The policy, as signed (`pkg/linkproto` `UpgradePolicy`, shared with the relay and digi-mcp):
 
