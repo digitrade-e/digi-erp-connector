@@ -21,6 +21,9 @@ var ErrReceiptIndexUnreadable = errors.New("receipt index entry unreadable")
 
 // receiptState is how far a receipt got. reserved: the number is owned by the
 // key but the file may not be in place yet. written: the file is in place.
+// failed (receiptFailed, v1.0.32): resolved as failed by the inflight
+// command — never written, its number void; a build older than v1.0.32
+// cannot read such an entry.
 type receiptState string
 
 const (
@@ -152,7 +155,7 @@ func decodeReceiptIndexEntry(b []byte, key string) (*receiptIndexEntry, error) {
 		return nil, fmt.Errorf("number %d is out of range", e.Number)
 	}
 	switch e.State {
-	case receiptReserved, receiptWritten:
+	case receiptReserved, receiptWritten, receiptFailed:
 	default:
 		return nil, fmt.Errorf("unknown state %q", e.State)
 	}

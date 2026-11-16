@@ -30,6 +30,7 @@ same way in an elevated PowerShell. The code is
 | `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
 | `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
 | `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
+| `inflight [--check] --spec -` | `{"version":1,"changeSet","kind":"orders"\|"receipts","historyId"\|"number","expect":"reserved"\|"retryable","resolve":"fail"\|"done"}` (+ `assumeIdle`?; the check needs only `kind` and the key) | Resolves ONE unfinished order or receipt index entry as failed or done (plan 087 review R6, v1.0.32, below) | that entry; `DataDir\format-floor` (a receipt resolved as failed) |
 | `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`?, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
@@ -489,6 +490,52 @@ Config-command flow; `restore` puts
 test ranges, and its GUI save drops the block —
 [troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).
 
+## `inflight`: resolve one unfinished order or receipt (plan 087 review R6)
+
+Connector v1.0.32; digi-mcp's feature `inflight`. An entry that can only finish after a folder change blocked that
+change for good (reviews m5, m9: `documents`, `receipts` and `restore` wait for unfinished entries), and the only way
+out was editing the index on the box (troubleshooting.md § The order index). Signed (`inflight`, `inflight-check` over
+the link; WinRM too), not sealed.
+
+```json
+{"version":1,"changeSet":"cs-bfl-inflight-01","kind":"orders","historyId":"<historyId>","expect":"reserved","resolve":"fail"}
+{"version":1,"changeSet":"cs-bfl-inflight-02","kind":"receipts","number":500123,"expect":"reserved","resolve":"done"}
+```
+
+- **One entry**: an order by its `historyId`, a receipt by its `number` (`entry_missing`: none). `expect` is the
+  entry's state as the check read it — a string, or `{"state", "configSha256"?}` — compare-and-set (`entry_moved`).
+  `resolve` is `fail` or `done`. Only an unfinished entry: `reserved` (an order's outcome unknown after a restart, or
+  a receipt Recover could not finish) or `retryable` (an order); `written` and `failed` are final (`entry_final`).
+- **The candidate files**: an order's frozen name in its typed folder; the pickup folder's `IMOVEIN_<n>.doc` and
+  `TMP_IMOVEIN_<n>.doc`; `sendOrderDir\history\<n>\IMOVEIN_<n>.doc` and `.prm` (model (b)'s importer runs only after
+  them). A receipt's file in the receipt folder (its pattern) and `DataDir\history\receipts\<n>\KUPAIN_<n>.doc`. A
+  place that cannot be looked at (a typed folder no longer configured) counts as written.
+- **`fail`**: only when none exists (`may_be_written` otherwise — check Hashavshevet, Asmahta `n`, then resolve it as
+  done, or move the file aside after checking it). An order becomes `failed`; a receipt `failed`, its number void.
+- **`done`**: only when the written file or its history copy is there (`not_written` otherwise). The entry becomes
+  `written`, naming the files found; for a receipt the connector ran no importer (said in its warnings).
+- **Never a number again**: the entry keeps its number, owned by its key; no counter moves; the number still counts
+  as issued. The entry records the change set and the time (an order's `error`, a receipt's `warnings`).
+- **What the B2B sees** (also in the answer's `b2b`): an order resolved as failed — `GET /api/sendOrder/<n>` 200
+  `status: failed`; a resend with its `historyId` 202 `status: failed`, `replay: true`, never written again (a new
+  order needs a new `historyId`). Resolved as done — `status: done` with the files; a resend 202 `status: done`,
+  `replay: true`. A receipt resolved as failed — a resend with its idempotency key `409 RECEIPT_FAILED` (a new receipt
+  needs a new key); as done — 200, replayed, `import: not_run`, the resolution among its warnings. Receipts have no
+  status route.
+- **Busy**: an order the running connector has queued or is writing is `entry_busy` (asked with
+  `GET /api/sendOrder/<n>`), before anything is stopped; a receipt is `entry_busy` while another process holds
+  `DataDir\receipts\writer.lock`.
+- **The run** asks the queue (`orders_pending` / `pending_unknown`, `assumeIdle`), stops the service, reads the entry
+  again (`entry_moved` if it changed), resolves it — a receipt under `writer.lock` — starts the service and proves it,
+  as `counters start-from`.
+- **A receipt resolved as failed** is the one value a build older than v1.0.32 cannot read (it would refuse every
+  receipt): the box first raises `DataDir\format-floor` to `1.0.32`, so no automatic rollback goes below it. Orders, and
+  receipts resolved as done, are written in fields v1.0.31 reads: no floor.
+- **`--check`** reads and writes nothing: `inflight.entry` = `{kind, key, number, state, counter, folder, rule?,
+  reservedAt, ageSeconds, files?, note?, candidates: [{path, role, exists, error?}]}`; with `resolve` it refuses as the
+  run would.
+- The answer: `inflight: {entry, resolve?, resolved?, b2b?: {statusPoll, resend}}`.
+
 ## `folder-acl`: lock a document folder down (plan 087 review R1c)
 
 digi-mcp locks down a folder the connector writes documents into itself — no human running `icacls` on the box.
@@ -603,6 +650,9 @@ actually changed.
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`, `folder-acl`: no folder of that key / the path is not a folder here / inside the data directory, not a path link mode takes, or one of the [places a document folder may not be](#where-a-document-folder-may-be) (review T3: typed folders behind the link, every `folder-acl` target, and behind the link the `sendOrderDir`, pickup and receipt folders `apply`, `orders` and `receipts` set or move) |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through), or — with `documents` and, behind the link, `apply`/`orders`/`receipts` — a junction, link or mount point on the configured path, or a folder whose handle resolves to another path (review T3) / more than 20 000 entries |
+| `entry_missing`, `entry_moved`, `entry_final` | `inflight` (review R6): no order with that `historyId` / no receipt with that number / the entry's state is not `expect` / it is written or failed already |
+| `entry_busy` | `inflight`: the running connector has the order queued or is writing it; another process holds the receipt data |
+| `may_be_written`, `not_written` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` while neither its file nor its history copy is there |
 | `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |

@@ -297,6 +297,13 @@ a new order — a second Hashavshevet document if the first was written.
 The entry is still `reserved` after a restart. The connector never writes it
 again on its own.
 
+**From afar (v1.0.32): the `inflight` command** ([provisioning.md](provisioning.md#inflight-resolve-one-unfinished-order-or-receipt-plan-087-review-r6))
+resolves one such entry — or a `retryable` one, or a `reserved` receipt — without anyone on the box:
+`inflight-check` shows it (state, number, counter, folder, frozen rule, age, and which of its candidate files exist),
+then `inflight` with `resolve: "fail"` (only when none of its files exists: `may_be_written` otherwise) or
+`resolve: "done"` (only when its written file or its history copy is there: `not_written` otherwise). Check
+Hashavshevet (Asmahta `n`) first when a file exists. The steps below are the same decisions by hand.
+
 - No `history\<n>\IMOVEIN_<n>.doc` → the connector never ran the importer for
   it: check `server.log` for `both hold order <n>` (as in step 3 above), then
   set `"state": "retryable"` in the entry. The next repeat of the `historyId`

@@ -47,6 +47,8 @@ type ApplyResult struct {
 	WritableFolders []StateWritableFolder `json:"writableFolders,omitempty"`
 	// FolderACL (plan 087 review R1c) is the folder-acl command's answer.
 	FolderACL *FolderACLResult `json:"folderAcl,omitempty"`
+	// Inflight (plan 087 review R6, v1.0.32) is the inflight command's answer.
+	Inflight *InflightResult `json:"inflight,omitempty"`
 	// Check is what the run would do, when it was apply --check.
 	Check *CheckResult `json:"check,omitempty"`
 

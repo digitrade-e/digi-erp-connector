@@ -47,6 +47,7 @@ const Usage = `usage:
   digi-erp-connector-provision orders [--check] --spec -   set the order settings only (sendOrderDir, importer, model (a) pickup folder and layout)
   digi-erp-connector-provision counters [--check] --spec - create a named counter, set its range, move it forward (start-from), or retire it (plan 087)
   digi-erp-connector-provision documents [--check] --spec - set the typed folders documentRule names, and the receipts' folder and counter (plan 087)
+  digi-erp-connector-provision inflight [--check] --spec -   resolve one unfinished order or receipt index entry as failed or done (the check shows it)
   digi-erp-connector-provision folder-acl [--check] --spec - lock down a document folder (only administrators, SYSTEM and trusted writers write), or restore what a lock-down recorded
   digi-erp-connector-provision verify [--spec -]        check the running connector (stdin: optional expectations)
   digi-erp-connector-provision restore <changeSet> [--assume-idle] [--accept-unreadable=N]
@@ -276,6 +277,20 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			result, err = ApplyOrders(ctx, env, in, check)
 		}
 	// plan 087: named counters and typed folders
+	// plan 087 review R6 (v1.0.32): one unfinished index entry resolved
+	case "inflight":
+		check := len(rest) > 0 && rest[0] == "--check"
+		if check {
+			rest = rest[1:]
+		}
+		if ok, u := readSpecFlag(rest); !u || !ok {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		in, r := DecodeInflight(io.LimitReader(stdin, MaxInput))
+		if r != nil {
+			return envelope(cmd, nil, r, nil), ExitRefused
+		}
+		result, err = ApplyInflight(ctx, env, in, check)
 	case "counters", "documents", "folder-acl":
 		check := len(rest) > 0 && rest[0] == "--check"
 		if check {

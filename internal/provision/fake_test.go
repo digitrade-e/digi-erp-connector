@@ -39,7 +39,9 @@ type fakeDaemon struct {
 	// queuedFrom: from the queuedFrom-th question about the queue on (1-based), it answers queuedLater orders — an
 	// order that arrives in the middle of a run. 0: never.
 	queuedFrom, queuedLater, queueAsks int
-	srv                                *httptest.Server
+	// jobs are GET /api/sendOrder/{jobId}'s statuses (review R6: entry_busy).
+	jobs map[string]string
+	srv  *httptest.Server
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -74,6 +76,13 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": 1, "version": d.version})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/health":
 		w.WriteHeader(d.health)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sendOrder/"):
+		st, ok := d.jobs[strings.TrimPrefix(r.URL.Path, "/api/sendOrder/")]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": st})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sendOrder" && !d.noQueueRoute:
 		d.queueAsks++
 		queued := d.queued
