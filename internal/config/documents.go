@@ -290,8 +290,28 @@ func (d DocumentsConfig) Clone() DocumentsConfig {
 // reads as a path ("herp/receipts") is exactly what the rule must not carry.
 var documentKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 
-// ValidDocumentKey reports whether k is a counter or folder key.
-func ValidDocumentKey(k string) bool { return documentKeyRe.MatchString(k) }
+// DocumentKeyGrammar is the key grammar as a refusal's fix says it.
+const DocumentKeyGrammar = "use a lower-case letter, then letters, digits or _ (32 at most), and not a Windows device name (con, prn, aux, nul, com0-9, lpt0-9)"
+
+// ValidDocumentKey reports whether k is a counter or folder key: the grammar,
+// and never a Windows device name (review m2) — a counter's own store is
+// DataDir\counters\<key>.json, and on Windows Server 2016-2022 aux.json or
+// com1.json names a device, whose read can block (in Accept, under the
+// queue's lock, every order would stall).
+func ValidDocumentKey(k string) bool { return documentKeyRe.MatchString(k) && !WindowsDeviceName(k) }
+
+// WindowsDeviceName reports whether name, with or without an extension and
+// in any case, is a name Windows reserves for a device: CON, PRN, AUX, NUL,
+// COM0-COM9, LPT0-LPT9.
+func WindowsDeviceName(name string) bool {
+	stem, _, _ := strings.Cut(name, ".")
+	stem = strings.ToUpper(strings.TrimRight(stem, " "))
+	switch stem {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '0' && stem[3] <= '9'
+}
 
 // namePatternRe is the closed grammar of a folder's file name.
 var namePatternRe = regexp.MustCompile(`^(\{prefix\})?([A-Za-z][A-Za-z0-9_]{0,31})\{n\}\.doc$`)
@@ -382,7 +402,7 @@ func (c Config) validateCounters() error {
 	for _, k := range keys {
 		ctr := c.Documents.Counters[k]
 		if !ValidDocumentKey(k) {
-			return fmt.Errorf("counter key %q: use a lower-case letter, then letters, digits or _ (32 at most)", k)
+			return fmt.Errorf("counter key %q: %s", k, DocumentKeyGrammar)
 		}
 		switch ctr.Kind {
 		case DocumentKindOrders, DocumentKindReceipts:
@@ -456,7 +476,7 @@ func (c Config) validateFolders() error {
 	for _, k := range keys {
 		f := c.Documents.Folders[k]
 		if !ValidDocumentKey(k) {
-			return fmt.Errorf("folder key %q: use a lower-case letter, then letters, digits or _ (32 at most)", k)
+			return fmt.Errorf("folder key %q: %s", k, DocumentKeyGrammar)
 		}
 		p := strings.TrimSpace(f.Path)
 		if p != f.Path || p == "" || !filepath.IsAbs(p) || hasControlChar(p) {

@@ -440,3 +440,25 @@ func TestCounters_AdoptingLastOrderNumberNeedsOrders(t *testing.T) {
 		t.Fatalf("a store of its own: %v", err)
 	}
 }
+
+// Review m2: the counters and documents commands refuse a device-name key.
+func TestCountersAndDocuments_RefuseDeviceNameKeys(t *testing.T) {
+	sys, env, _ := countersBox(t)
+	_, err := ApplyCounters(context.Background(), env, countersIn("create", "aux", func(in *CountersInput) {
+		in.Kind, in.Min, in.Max = "orders", i64(5_000_000), i64(5_999_999)
+	}), false)
+	if r := wantRefusal(t, err, CodeSpecInvalid); !strings.Contains(r.Fix, "device name") {
+		t.Errorf("fix %q", r.Fix)
+	}
+	if _, err := os.Stat(hasavshevet.CounterStorePath(sys.dir, "aux")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a store was written")
+	}
+	_, err = ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.Folders = map[string]*FolderInput{"com1": {Kind: "orders", Path: mkdir(t, "herp"), NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
+	}), false)
+	wantRefusal(t, err, CodeSpecInvalid)
+	_, err = ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.Receipts = &DocumentsReceiptsInput{Counter: strp("lpt1")}
+	}), false)
+	wantRefusal(t, err, CodeSpecInvalid)
+}

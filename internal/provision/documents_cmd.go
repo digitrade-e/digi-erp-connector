@@ -80,7 +80,7 @@ func (in DocumentsInput) Validate(linked bool, systemDirs []string) *Refusal {
 	for _, k := range sortedFolderKeys(in.Folders) {
 		f := in.Folders[k]
 		if !config.ValidDocumentKey(k) {
-			return refuse(CodeSpecInvalid, "use a lower-case letter, then letters, digits or _ (32 at most)", "folder key %q is not a key", k)
+			return refuse(CodeSpecInvalid, config.DocumentKeyGrammar, "folder key %q is not a key", k)
 		}
 		if f == nil {
 			continue

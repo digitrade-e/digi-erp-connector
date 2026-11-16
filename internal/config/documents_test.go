@@ -356,3 +356,39 @@ func TestValidateDocuments_OneKindAtATime(t *testing.T) {
 		t.Errorf("a receipts counter named orders: %v", err)
 	}
 }
+
+// Review m2: a key that is a Windows device name is refused — a counter's own
+// store is DataDir\counters\<key>.json, and aux.json names a device on
+// Windows Server 2016-2022 (a read can block).
+func TestValidDocumentKey_RefusesWindowsDeviceNames(t *testing.T) {
+	for _, k := range []string{"con", "prn", "aux", "nul", "com0", "com1", "com9", "lpt0", "lpt1", "lpt9"} {
+		if ValidDocumentKey(k) {
+			t.Errorf("%q accepted", k)
+		}
+	}
+	for _, k := range []string{"aux1", "auxiliary", "console", "nuls", "com10", "comx", "lpt_1", "com_1", "b2b", "orders"} {
+		if !ValidDocumentKey(k) {
+			t.Errorf("%q refused", k)
+		}
+	}
+	for _, name := range []string{"AUX", "aux.json", "Com1.doc", "lpt9.tar.gz", "NUL ", "con .txt", "prn"} {
+		if !WindowsDeviceName(name) {
+			t.Errorf("WindowsDeviceName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"aux1.json", "com.json", "lpt", "x.aux", "kupain_1.doc"} {
+		if WindowsDeviceName(name) {
+			t.Errorf("WindowsDeviceName(%q) = true", name)
+		}
+	}
+	cfg := bflDocuments(t)
+	cfg.Documents.Counters["aux"] = CounterConfig{Kind: DocumentKindOrders, Min: 8_000_000, Max: 8_000_001}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "device name") {
+		t.Errorf("counter aux: %v", err)
+	}
+	cfg = bflDocuments(t)
+	cfg.Documents.Folders["nul"] = FolderConfig{Kind: DocumentKindOrders, Path: t.TempDir(), NamePattern: "X_{n}.doc", Layout: OrderFormatLegacy}
+	if err := cfg.ValidateOrders(); err == nil || !strings.Contains(err.Error(), "device name") {
+		t.Errorf("folder nul: %v", err)
+	}
+}

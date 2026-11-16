@@ -362,8 +362,9 @@ credential, and one bad "start from max" would block every order for good. Not s
 ```
 
 Each op takes exactly its fields (another one is `spec_invalid`): `create` kind, min, max, test?, store?, from?;
-`range` min, max; `start-from` from, expectLast; `retire` nothing. Keys `[a-z][a-z0-9_]{0,31}`; `1 ≤ min ≤ max ≤
-999 999 999`.
+`range` min, max; `start-from` from, expectLast; `retire` nothing. Keys `[a-z][a-z0-9_]{0,31}` and never a Windows
+device name (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`: a store `aux.json` names a device; folder keys
+too); `1 ≤ min ≤ max ≤ 999 999 999`.
 
 - **`create`** adds `documents.counters.<key>` to `config.yaml`. `store` adopts one of today's stores **in place**:
   `lastOrderNumber` (`sendOrderDir\lastOrderNumber.json`, kind orders) or `receiptNumber`

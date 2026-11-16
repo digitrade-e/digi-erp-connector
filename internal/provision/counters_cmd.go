@@ -91,7 +91,7 @@ func (in CountersInput) Validate() *Refusal {
 		return r
 	}
 	if !config.ValidDocumentKey(in.Key) {
-		return refuse(CodeSpecInvalid, "use a lower-case letter, then letters, digits or _ (32 at most)", "key %q is not a counter key", in.Key)
+		return refuse(CodeSpecInvalid, config.DocumentKeyGrammar, "key %q is not a counter key", in.Key)
 	}
 	only := func(allowed ...string) *Refusal {
 		set := map[string]bool{}
