@@ -17,6 +17,7 @@ import (
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
+	"github.com/digitrade-e/digi-erp-connector/internal/formatfloor"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/paths"
@@ -96,6 +97,12 @@ func (a *serverApp) Start() error {
 	early.replayInto(bootstrapLog)
 	if mark && !logger.IsStderr(bootstrapLog) {
 		markServerLog(dataDir, bootstrapLog)
+	}
+
+	// Plan 088 D11: the format floor, before anything is written in this build's formats.
+	if err := raiseFormatFloor(dataDir, bootstrapLog); err != nil {
+		_ = bootstrapLog.Close()
+		return err
 	}
 
 	cfg, err := config.Load()
@@ -381,6 +388,25 @@ func buildReceiptWriter(cfg config.Config, dataDir string, log logger.LoggerServ
 	}
 	log.Info(fmt.Sprintf("receipts configured: sendReceiptDir=%q model %s", strings.TrimSpace(cfg.SendReceiptDir), model))
 	return w, nil
+}
+
+// raiseFormatFloor records this build's RollbackFloor in DataDir\format-floor (plan 088 D11, review M3): the upgrade
+// runner never rolls back below it, so a build that changed a persisted format is never replaced by one that cannot
+// read it. A floor this build must raise and cannot is a refused start — it writes nothing in its formats then, so a
+// rollback is still safe; an unreadable floor is left as it is (it may hold a higher one), and the runner refuses
+// every rollback while it cannot read it.
+func raiseFormatFloor(dataDir string, log logger.LoggerService) error {
+	inForce, err := formatfloor.Raise(dataDir, formatfloor.RollbackFloor)
+	switch {
+	case errors.Is(err, formatfloor.ErrUnreadable):
+		log.Error("DataDir\\format-floor cannot be read; it is left as it is, and no automatic rollback runs until it reads (docs/troubleshooting.md)", err)
+		return nil
+	case err != nil:
+		log.Error("could not record the format floor "+formatfloor.RollbackFloor+" in DataDir\\format-floor; not starting", err)
+		return err
+	}
+	log.Info("format floor " + inForce + " (no automatic rollback below it)")
+	return nil
 }
 
 func (a *serverApp) Errors() <-chan error {

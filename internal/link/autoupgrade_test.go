@@ -456,22 +456,27 @@ func TestTheSchedulerTakesThePolicysRollbackDigest(t *testing.T) {
 	}
 }
 
-// An upgrade that ended unhealthy without a rollback stops that target under that policy, as a rolled-back one does.
+// An upgrade that ended unhealthy and left the new build in place (plan 088 §2b) stops that target under that policy,
+// as a rolled-back one does.
 func TestAnUnhealthyTargetWithoutARollbackStops(t *testing.T) {
-	a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
-	a.deliver(t, "", "", a.policy(1))
-	a.b.link.autoCheck()
-	a.rs.next(t)
-	a.finish(t, UpgradeResult{Ticket: a.lastTicket(), From: "1.0.29", To: "1.0.30", Outcome: linkproto.OutcomeNoRollback,
-		Error:  "not healthy within 20 min after the setup (link: not connected to the relay); no signed digest names the setup of 1.0.29",
-		Health: &linkproto.UpgradeHealth{Minutes: 20}})
-	a.clk.set(boxTime(4, 2, 10))
-	a.b.link.autoCheck()
-	af := a.auto(t)
-	if a.spawns() != 1 || af.Attempts[0].Outcome != linkproto.OutcomeNoRollback || af.View.Effective.Why != linkproto.WhyStopped {
-		t.Fatalf("spawned %d, %+v", a.spawns(), af.View.Effective)
-	}
-	if rep := a.rs.next(t); rep.AutoUpgrade.Outcome != linkproto.OutcomeNoRollback {
-		t.Fatalf("report %+v", rep.AutoUpgrade)
+	for _, outcome := range []string{linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor} {
+		t.Run(outcome, func(t *testing.T) {
+			a := newAutoRig(t, "v1.0.29", boxTime(3, 2, 10))
+			a.deliver(t, "", "", a.policy(1))
+			a.b.link.autoCheck()
+			a.rs.next(t)
+			a.finish(t, UpgradeResult{Ticket: a.lastTicket(), From: "1.0.29", To: "1.0.30", Outcome: outcome,
+				Error:  "not healthy within 20 min after the setup (link: not connected to the relay); the new build stays",
+				Health: &linkproto.UpgradeHealth{Minutes: 20}})
+			a.clk.set(boxTime(4, 2, 10))
+			a.b.link.autoCheck()
+			af := a.auto(t)
+			if a.spawns() != 1 || af.Attempts[0].Outcome != outcome || af.View.Effective.Why != linkproto.WhyStopped {
+				t.Fatalf("spawned %d, %+v", a.spawns(), af.View.Effective)
+			}
+			if rep := a.rs.next(t); rep.AutoUpgrade.Outcome != outcome {
+				t.Fatalf("report %+v", rep.AutoUpgrade)
+			}
+		})
 	}
 }

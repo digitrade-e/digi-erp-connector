@@ -262,7 +262,7 @@ func decideAuto(in autoInputs) autoView {
 		}
 		last = a
 		switch a.Outcome {
-		case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack, linkproto.OutcomeNoRollback:
+		case linkproto.OutcomeUnhealthy, linkproto.OutcomeRolledBack, linkproto.OutcomeNoRollback, linkproto.OutcomeBelowFloor:
 			stopped = true
 		case linkproto.OutcomeFailed, linkproto.OutcomeLost:
 			failed++

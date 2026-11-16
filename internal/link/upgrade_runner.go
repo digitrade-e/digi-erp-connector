@@ -77,6 +77,9 @@ type UpgradeRunner struct {
 	// connector's windows are ended before each setup). Nil ListProcesses: none is looked for.
 	ListProcesses func(name string) ([]RunningProcess, error)
 	KillProcess   func(pid uint32) error
+	// FormatFloor reads DataDir\format-floor (plan 088 D11): "" when none is recorded. Nil = formatfloor.Read. The
+	// runner never rolls back below it, nor below its own compiled formatfloor.RollbackFloor.
+	FormatFloor func() (string, error)
 }
 
 // NewUpgradeRunner is the runner on this machine.

@@ -125,7 +125,7 @@ func TestUnlistableProcessesDoNotStopTheSetup(t *testing.T) {
 // The rollback's setup replaces the same file: a window opened during the health check is ended before it too.
 func TestTheRollbackEndsAWindowOpenedMeanwhile(t *testing.T) {
 	g := newHealthRig(t, true, nil)
-	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.29" }
+	g.linkUp = func(installed string, _ time.Time) bool { return installed == "1.0.31" }
 	f := &fakeProcs{}
 	withProcs(&g.r, f)
 	run := g.r.RunSetup

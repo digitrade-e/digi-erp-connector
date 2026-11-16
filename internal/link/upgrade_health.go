@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/formatfloor"
 	"github.com/digitrade-e/digi-erp-connector/pkg/linkproto"
 )
 
@@ -185,7 +186,30 @@ func (r UpgradeRunner) noRollback(job UpgradeJob) (outcome, why string) {
 		return linkproto.OutcomeNoRollback, fmt.Sprintf("the signed digest of %s's setup (%s) is not the one that installed it here (%s): "+
 			"the new build stays, and a person decides", job.From, pin.SHA256, job.FromSHA256)
 	}
+	// D11: never below the format floor — the build replaced may not read what the new one wrote meanwhile.
+	floor, err := r.formatFloor()
+	switch {
+	case err != nil:
+		return linkproto.OutcomeBelowFloor, fmt.Sprintf("DataDir\\format-floor cannot be read (%v), so no rollback can be judged safe for the data (D11): "+
+			"the new build stays, and a person decides", err)
+	case formatfloor.Below(job.From, floor):
+		return linkproto.OutcomeBelowFloor, fmt.Sprintf("%s, the build it replaced, is below the format floor %s (D11): it may not read what the "+
+			"new build wrote; the new build stays, and a person decides", job.From, floor)
+	}
 	return "", ""
+}
+
+// formatFloor is the floor a rollback may not go below: DataDir\format-floor or this runner's compiled one, the higher.
+func (r UpgradeRunner) formatFloor() (string, error) {
+	read := r.FormatFloor
+	if read == nil {
+		read = func() (string, error) { return formatfloor.Read(r.DataDir) }
+	}
+	recorded, err := read()
+	if err != nil {
+		return "", err
+	}
+	return formatfloor.Max(recorded, formatfloor.RollbackFloor), nil
 }
 
 // rollback installs the build job replaced again, once (see the top of this file), to the signed digest noRollback
