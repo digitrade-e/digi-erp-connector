@@ -551,6 +551,11 @@ the WinRM path is unchanged:
   to (`folder_writable`; never `allowWritable`), and the daemon writes into no typed folder others can write to
   (`503 FOLDER_WRITABLE`) — plan 087 review M1.
 
+Every path a command takes behind the link is a plain path on a local drive with no `.`/`..`/empty part and none of
+cmd.exe's characters, and — since the system-folder rules compare text — none Windows resolves to another folder
+(plan 087 review m6): no `~` (an 8.3 short name, `C:\PROGRA~1`), no `:` after the drive letter (a stream), no part
+ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`).
+
 These bound what a signed command can make a box do (Digitrade plan 083 §8 A16). Also behind the link: `verify`
 takes the loopback `apiListen` (its `listen` check), `discover` suggests `127.0.0.1:<port>`, `db` never keeps a login
 the client gave (`sa_link_mode`), and `firewall-remove` is allowed — it is how the old inbound rules close.

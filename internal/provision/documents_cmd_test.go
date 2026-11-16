@@ -291,3 +291,35 @@ func TestDocuments_LinkModePathRules(t *testing.T) {
 		t.Errorf("a plain local path: %v", r)
 	}
 }
+
+// Review m6: the system-folder rules compare text, so behind the link a path
+// Windows resolves to another folder is refused before they run — a part
+// ending in a dot or a space, an 8.3 short name, a stream after the drive.
+// Each of these named a system folder and passed before.
+func TestDocuments_LinkModeRefusesOtherSpellings(t *testing.T) {
+	system := []string{`C:\Windows`, `C:\Program Files`, `C:\ProgramData`}
+	for _, p := range []string{
+		`C:\Windows.\System32\herp`,
+		`C:\ProgramData.\Microsoft\Windows\Start Menu\Programs\StartUp`,
+		`C:\PROGRA~1\herp`,
+		`C:\Windows::$INDEX_ALLOCATION\System32`,
+		`C:\Windows \herp`,
+		`C:\xampp\herp.`,
+		`C:\xampp\herp:stream`,
+	} {
+		in := docsIn(func(in *DocumentsInput) {
+			in.Folders = map[string]*FolderInput{"herp": {Kind: "orders", Path: p, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}
+		})
+		if r := in.Validate(true, system); r == nil {
+			t.Errorf("%s accepted behind the link", p)
+		}
+		if why := linkPathRefusal(p); why == "" {
+			t.Errorf("linkPathRefusal(%s) = \"\"", p)
+		}
+	}
+	for _, p := range []string{`C:\xampp\htdocs\herp`, `D:\Hash7\herp_test`, `C:\xampp\htdocs\herp.d\x`} {
+		if why := linkPathRefusal(p); why != "" {
+			t.Errorf("linkPathRefusal(%s) = %q", p, why)
+		}
+	}
+}
