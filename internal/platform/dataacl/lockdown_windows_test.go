@@ -108,6 +108,10 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 	if d, _ := daclOf(t, sub); !strings.Contains(d, "0x1200a9;;;WD)") {
 		t.Errorf("the subfolder's Everyone entry is not read & execute: %s", d)
 	}
+	// Inheritance kept: b.txt still inherits, auto-inherited as before.
+	if d, ctl := daclOf(t, filepath.Join(herp, "b.txt")); ctl&windows.SE_DACL_AUTO_INHERITED == 0 || ctl&windows.SE_DACL_PROTECTED != 0 || !strings.Contains(d, ";ID;") {
+		t.Errorf("b.txt after the lock-down: %s (control %#x)", d, ctl)
+	}
 
 	restored, skipped, err := RestoreFolder(herp, plan.Entries)
 	if err != nil || restored != 4 || skipped != 0 {
@@ -274,6 +278,7 @@ func TestLockdown_LongPaths(t *testing.T) {
 	setDACL(t, longPath(deep), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	setDACL(t, longPath(file), "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	before := ownerAndDACL(t, longPath(file))
+	_, ctlBefore := daclOf(t, longPath(file))
 	plan, err := PlanLockdown(herp, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -291,6 +296,10 @@ func TestLockdown_LongPaths(t *testing.T) {
 	after := ownerAndDACL(t, longPath(file))
 	if !strings.Contains(after, "0x1200a9;;;BU)") || strings.Contains(after, "0x1301bf;;;BU") {
 		t.Errorf("the deep file after the lock-down: %s (before: %s)", after, before)
+	}
+	const inheritance = windows.SE_DACL_AUTO_INHERITED | windows.SE_DACL_PROTECTED
+	if _, ctl := daclOf(t, longPath(file)); ctl&inheritance != ctlBefore&inheritance {
+		t.Errorf("the deep file's inheritance changed: control %#x, before %#x", ctl, ctlBefore)
 	}
 	if _, skipped, err := RestoreFolder(herp, plan.Entries); err != nil || skipped != 0 {
 		t.Fatalf("RestoreFolder: %d skipped, %v", skipped, err)

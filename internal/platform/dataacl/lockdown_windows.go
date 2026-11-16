@@ -129,15 +129,21 @@ func daclBytes(sd *windows.SECURITY_DESCRIPTOR) ([]byte, error) {
 	return append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(dacl)), size)...), nil
 }
 
-// writeDACL sets a raw DACL through the handle, protected or not; no
-// propagation.
-func writeDACL(path string, h windows.Handle, acl []byte, protected bool) error {
+// writeDACL sets a raw DACL through the handle, protected or not, its
+// auto-inherited mark as the entry had it (an entry's inheritance is kept:
+// Windows' later propagation reads the mark); no propagation.
+func writeDACL(path string, h windows.Handle, acl []byte, protected, autoInherited bool) error {
 	sd, err := windows.NewSecurityDescriptor()
 	if err != nil {
 		return err
 	}
 	if err := sd.SetDACL((*windows.ACL)(unsafe.Pointer(&acl[0])), true, false); err != nil {
 		return err
+	}
+	if autoInherited {
+		if err := sd.SetControl(windows.SE_DACL_AUTO_INHERITED, windows.SE_DACL_AUTO_INHERITED); err != nil {
+			return err
+		}
 	}
 	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
 	if protected {
@@ -166,6 +172,7 @@ type lockdownEntry struct {
 	owner         string
 	ownerTrusted  bool
 	protected     bool
+	autoInherited bool // SE_DACL_AUTO_INHERITED, kept on the write
 	changed       bool
 }
 
@@ -192,7 +199,8 @@ func planEntry(path string, n node, trusted map[string]bool, t *trust, root bool
 	if err != nil {
 		return lockdownEntry{}, nil, err
 	}
-	e := lockdownEntry{before: before, after: after, owner: owner.String(), protected: control&windows.SE_DACL_PROTECTED != 0}
+	e := lockdownEntry{before: before, after: after, owner: owner.String(), protected: control&windows.SE_DACL_PROTECTED != 0,
+		autoInherited: control&windows.SE_DACL_AUTO_INHERITED != 0}
 	e.ownerTrusted, _ = trustedOwner(e.owner, t.tokenUser, t.admins, t.indirectFn)
 	e.changed = changed || !e.ownerTrusted || (root && !e.protected)
 	return e, sd, nil
@@ -383,7 +391,7 @@ func ApplyLockdown(dir string, trusted []string, plan LockdownPlan) (int, error)
 		if !e.changed {
 			return nil
 		}
-		if err := writeDACL(path, n.h, e.after, isRoot || e.protected); err != nil {
+		if err := writeDACL(path, n.h, e.after, isRoot || e.protected, e.autoInherited); err != nil {
 			return err
 		}
 		if !e.ownerTrusted {
