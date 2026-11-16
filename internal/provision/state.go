@@ -554,7 +554,8 @@ func linkState(dir string) StateLink {
 		out.Error = err.Error()
 		return out
 	}
-	out.Relay, out.Box, out.PairCodeWaiting, out.Admin, out.UnknownKeys = st.RelayURL(), st.Box, st.PairCode != "", st.AdminOn(), st.UnknownKeys()
+	// review m12: a relay URL loses its user and password, as the proxy does
+	out.Relay, out.Box, out.PairCodeWaiting, out.Admin, out.UnknownKeys = link.WithoutCredentials(st.RelayURL()), st.Box, st.PairCode != "", st.AdminOn(), st.UnknownKeys()
 	if p := strings.TrimSpace(st.Proxy); p != "" {
 		out.Proxy = proxyWithoutCredential(p)
 	}

@@ -268,7 +268,7 @@ func (l *Link) acceptUpgrade(env linkproto.Envelope, stdin []byte) (UpgradeAnswe
 	if err != nil {
 		return UpgradeAnswer{}, err
 	}
-	pruneUpgrades(dir)
+	pruneUpgrades(dir, l.cfg.Now())
 	tdir, err := makeTicketDir(dir, ticket)
 	if err != nil {
 		return UpgradeAnswer{}, err
@@ -576,7 +576,7 @@ func runningTicket(dataDir string, now time.Time) (bool, string) {
 
 // pruneUpgrades removes the folders of finished tickets beyond the newest keepTickets (the setup and the runner copy
 // are tens of MB), and results beyond the newest keepTickets*2. Errors are ignored: a file still in use stays.
-func pruneUpgrades(dataDir string) {
+func pruneUpgrades(dataDir string, now time.Time) {
 	type entry struct {
 		path string
 		at   time.Time
@@ -607,12 +607,33 @@ func pruneUpgrades(dataDir string) {
 			_ = os.RemoveAll(t.path)
 		}
 	}
+	// Review m12: a lost ticket (its runner ended without a result) never finishes, so its setup and runner copy stayed
+	// for good; they go, its job and logs stay (upgrade-result answers lost from them).
+	entries, _ := os.ReadDir(filepath.Join(dataDir, upgradeDirs.tickets))
+	for _, e := range entries {
+		if !e.IsDir() || !ticketRe.MatchString(e.Name()) {
+			continue
+		}
+		if _, lost := ticketPending(dataDir, e.Name(), now); lost {
+			dropTicketExes(filepath.Join(dataDir, upgradeDirs.tickets, e.Name()))
+		}
+	}
 	results := newestFirst(filepath.Join(dataDir, upgradeDirs.results), func(e os.DirEntry) bool {
 		return !e.IsDir() && strings.HasPrefix(e.Name(), "upgrade-") && strings.HasSuffix(e.Name(), ".json")
 	})
 	for i, r := range results {
 		if i >= 2*keepTickets {
 			_ = os.Remove(r.path)
+		}
+	}
+}
+
+// dropTicketExes removes a lost ticket's setup and runner copy (a file still in use stays).
+func dropTicketExes(tdir string) {
+	files, _ := os.ReadDir(tdir)
+	for _, f := range files {
+		if !f.IsDir() && strings.EqualFold(filepath.Ext(f.Name()), ".exe") {
+			_ = os.Remove(filepath.Join(tdir, f.Name()))
 		}
 	}
 }
@@ -661,6 +682,7 @@ func (l *Link) upgradeResult(_ linkproto.Envelope, stdin []byte) ([]byte, int) {
 	case pending:
 		return answer(map[string]any{"ticket": in.Ticket, "pending": true}, 0)
 	case lost:
+		dropTicketExes(filepath.Join(dir, upgradeDirs.tickets, in.Ticket)) // review m12: its setup is never run now
 		return answer(map[string]any{"ticket": in.Ticket, "pending": false, "lost": true,
 			"error": "the upgrade runner ended without writing a result: read upgrade\\" + in.Ticket + "\\runner.log and setup.log on the box, and state for what is installed"}, 0)
 	}

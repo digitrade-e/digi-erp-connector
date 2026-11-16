@@ -373,6 +373,31 @@ func TestAnUnreadableConfigKeepsTheLastAddress(t *testing.T) {
 	}
 }
 
+// Review m12: a relay URL with a user and password in link.yaml loses them in link-status, and a proxy URL with an
+// unescaped @ in its password loses the whole userinfo in an error.
+func TestLinkStatusNamesNoURLCredential(t *testing.T) {
+	m := testMachine(t)
+	if err := m.Store().SaveState(State{Relay: "wss://svc:p@ss-relay1@relay.example.org/link", Box: "bfl-read"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := m.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := New(cfg)
+	l.status.failed(errors.New("proxyconnect tcp: dial http://svc:p@ss-proxy1@proxy.b4l.local:3128: refused"), time.Now())
+	s := l.Status()
+	b, _ := json.Marshal(s)
+	for _, secret := range []string{"p@ss", "ss-relay1", "ss-proxy1", "svc:"} {
+		if strings.Contains(string(b), secret) {
+			t.Fatalf("%q left the box: %s", secret, b)
+		}
+	}
+	if s.Relay != "wss://relay.example.org/link" || !strings.Contains(s.LastConnectError.Message, "dial http://proxy.b4l.local:3128: refused") {
+		t.Fatalf("relay %q, error %q", s.Relay, s.LastConnectError.Message)
+	}
+}
+
 func TestLinkStatusIsAnsweredByTheLink(t *testing.T) {
 	fc := newFakeConfig(t, "0.0.0.0:8083")
 	watch := &DaemonWatch{Load: fc.load, ConfigPath: fc.path}

@@ -156,7 +156,10 @@ it was makes the result an error, whatever the setup's exit code. It then reads 
 `{ticket, from, to, exitCode, startedAt, finishedAt, error?, installedVersion, services, setupLogTail?}`. The ticket is
 the first 32 hex digits of the SHA-256 of the envelope's nonce. The ticket's folder keeps `job.json`, `runner.log`
 and the setup's `setup.log`; the setup itself is deleted after, and the oldest finished tickets are removed (ten
-kept). Each step is also in the Event Log (Application, source `digi-erp-connector-link`).
+kept). A lost ticket (its runner ended without a result) loses its setup and runner copy at the next upgrade or
+`upgrade-result`, and keeps its job and logs. Each step is also in the Event Log (Application, source
+`digi-erp-connector-link`). `link-status` and `state` show the relay URL without a user or password, and an error's
+URL loses its whole userinfo, an unescaped `@` in a password included.
 
 A release from v1.0.29 on lists its setup in `SHA256SUMS` (release-windows.yml); v1.0.29 is the last version that must
 be installed by hand on a v1.0.28 box.

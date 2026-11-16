@@ -654,7 +654,7 @@ func TestPruneUpgradesKeepsTheNewestFinished(t *testing.T) {
 		finished = append(finished, mk(true))
 	}
 	running := mk(false)
-	pruneUpgrades(dir)
+	pruneUpgrades(dir, time.Now())
 	for i, ticket := range finished {
 		_, err := os.Stat(filepath.Join(dir, "upgrade", ticket))
 		if (i < 2) != errors.Is(err, os.ErrNotExist) {
@@ -663,6 +663,39 @@ func TestPruneUpgradesKeepsTheNewestFinished(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "upgrade", running)); err != nil {
 		t.Fatal("an unfinished ticket was removed")
+	}
+}
+
+// Review m12: a ticket whose runner ended without a result (lost) kept its setup (tens of MB) forever; the setup and
+// the runner copy go, the job and the logs stay (upgrade-result still answers lost). A pending ticket keeps both.
+func TestPruneUpgradesDropsALostTicketsSetup(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	mk := func(ticket string, age time.Duration) string {
+		tdir := filepath.Join(dir, "upgrade", ticket)
+		_ = os.MkdirAll(tdir, 0o700)
+		for _, f := range []string{jobFile, "runner.log", setupFile("1.0.30"), runnerExe} {
+			_ = os.WriteFile(filepath.Join(tdir, f), []byte("x"), 0o600)
+		}
+		at := now.Add(-age)
+		_ = os.Chtimes(filepath.Join(tdir, jobFile), at, at)
+		return tdir
+	}
+	lost := mk(strings.Repeat("1", 32), time.Hour)
+	pending := mk(strings.Repeat("2", 32), time.Second)
+	pruneUpgrades(dir, now)
+	for _, f := range []string{setupFile("1.0.30"), runnerExe} {
+		if _, err := os.Stat(filepath.Join(lost, f)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the lost ticket kept %s", f)
+		}
+		if _, err := os.Stat(filepath.Join(pending, f)); err != nil {
+			t.Errorf("the pending ticket lost %s", f)
+		}
+	}
+	for _, f := range []string{jobFile, "runner.log"} {
+		if _, err := os.Stat(filepath.Join(lost, f)); err != nil {
+			t.Errorf("the lost ticket's %s went: %v", f, err)
+		}
 	}
 }
 

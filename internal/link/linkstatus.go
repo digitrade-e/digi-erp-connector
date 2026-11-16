@@ -90,7 +90,7 @@ func (l *Link) Status() LinkStatus {
 	now := l.cfg.Now()
 	st, _ := l.cfg.Store.LoadState()
 	s := LinkStatus{
-		Build: l.cfg.Build, Fingerprint: l.cfg.Keys.Public().Fingerprint(), Box: st.Box, Relay: st.RelayURL(),
+		Build: l.cfg.Build, Fingerprint: l.cfg.Keys.Public().Fingerprint(), Box: st.Box, Relay: withoutCredentials(st.RelayURL()),
 		Admin: st.AdminOn(), UnknownKeys: st.UnknownKeys(),
 		Streams: StreamCount{Commands: len(l.cmdSlots), Data: len(l.dataSlots)},
 	}
@@ -149,7 +149,9 @@ func (l *Link) proxyStatus(relay string) ProxyStatus {
 	return ps
 }
 
-var urlCredentials = regexp.MustCompile(`(://)[^/\s@]+@`)
+// urlCredentials is a URL's userinfo up to the last @ of its authority: an unescaped @ inside a password leaves nothing
+// behind (review m12).
+var urlCredentials = regexp.MustCompile(`(://)[^/\s]*@`)
 
 // withoutCredentials drops a URL's user and password from a message (a proxy URL in an error, say).
 func withoutCredentials(s string) string {
@@ -158,3 +160,6 @@ func withoutCredentials(s string) string {
 	}
 	return urlCredentials.ReplaceAllString(s, "${1}")
 }
+
+// WithoutCredentials is withoutCredentials for provision's state (link.yaml's relay URL).
+func WithoutCredentials(s string) string { return withoutCredentials(s) }

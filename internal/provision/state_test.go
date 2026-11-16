@@ -172,6 +172,16 @@ func TestState_AsksTheRunningDaemon(t *testing.T) {
 	}
 }
 
+// Review m12: link.yaml's relay URL loses a user and password, as its proxy does.
+func TestState_TheRelayURLWithoutCredentials(t *testing.T) {
+	sys, _, _ := handInstallBox(t)
+	_ = os.WriteFile(filepath.Join(sys.dir, "link.yaml"), []byte("relay: wss://svc:p@ss-relay2@relay.example.org/link\nbox: bfl-read\n"), 0o600)
+	_, res, out := runState(t, stateSys{fakeSys: sys}, testEnv(sys, &fakeDB{}), `{}`)
+	if bytes.Contains(out, []byte("ss-relay2")) || bytes.Contains(out, []byte("svc:")) || res.Link.Relay != "wss://relay.example.org/link" {
+		t.Fatalf("link %+v", res.Link)
+	}
+}
+
 // Review m7: config.yaml written after the daemon's start names a port the daemon does not listen on, and a local user
 // holds it. state — and the upgrade's queue check, which runs it — must not send config.yaml's credential there.
 func TestState_NeverSendsTheCredentialToAPortTheDaemonDoesNotHold(t *testing.T) {
