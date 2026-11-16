@@ -190,6 +190,11 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 		if !ok || f.Kind != config.DocumentKindOrders {
 			return nil, notWritten(fmt.Errorf("order %d goes to folder %q, which is no longer an orders folder on this connector (documents.folders)", orderNum, dest.Folder))
 		}
+		// Review R2: never a test order into a folder that is production now,
+		// nor the reverse; retryable until the flag is back.
+		if why := testFlagChanged(f, dest.CounterTest, dest.FolderTest); why != "" {
+			return nil, notWritten(fmt.Errorf("%w: order %d into folder %s: %s", ErrFolderTestChanged, orderNum, dest.Folder, why))
+		}
 		folder = &f
 	}
 

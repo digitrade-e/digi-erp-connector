@@ -420,6 +420,10 @@ func writeSendOrderError(w http.ResponseWriter, err error) {
 	case errors.Is(err, hasavshevet.ErrCounterRetired):
 		respond.Error(w, http.StatusBadRequest, "documentRule/counter: the counter is retired and issues no new number",
 			"VALIDATION_ERROR", map[string]any{"field": "documentRule/counter"})
+	case errors.Is(err, hasavshevet.ErrFolderTestChanged):
+		respond.Error(w, http.StatusServiceUnavailable,
+			"The test flag of the folder this order was reserved for has changed since; it is not written there — nothing was written, the order stays retryable; see the connector log",
+			"FOLDER_TEST_CHANGED", nil)
 	case errors.Is(err, hasavshevet.ErrFolderWritable):
 		respond.Error(w, http.StatusServiceUnavailable,
 			"The folder this order goes to can be written by accounts besides the administrators, and this connector is behind the link: it writes nothing there until the folder is locked down and the service restarted — nothing was reserved; see the connector log",

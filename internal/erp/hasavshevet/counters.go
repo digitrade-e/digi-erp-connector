@@ -547,6 +547,24 @@ func ScanOrdersInFlight(dataDir string) (OrdersInFlight, error) {
 	return out, err
 }
 
+// FolderTestChanged lists the unfinished orders (reserved or retryable)
+// whose rule froze another test flag than their folder has now in cfg
+// (review R2): a resend writes nothing until the flag is back. Entries the
+// scan cannot read are left out (state reports the index's problems).
+func FolderTestChanged(dataDir string, cfg config.Config) ([]int64, error) {
+	var out []int64
+	err := eachIndexEntry(OrderIndexDir(dataDir), func(e scannedEntry) {
+		if e.Rule == nil || (e.State != string(orderReserved) && e.State != string(orderRetryable)) {
+			return
+		}
+		if f, ok := cfg.Documents.Folders[e.Rule.Folder]; ok && testFlagChanged(f, e.Rule.CounterTest, e.Rule.FolderTest) != "" {
+			out = append(out, e.Number)
+		}
+	}, func() {})
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, err
+}
+
 // ScanReceiptsInFlight counts the receipt index entries still reserved —
 // Recover or a repeat finishes them into the receipt folder in use — and the
 // entries it could not read.
@@ -563,7 +581,9 @@ type scannedEntry struct {
 	Number int64  `json:"number"`
 	State  string `json:"state"`
 	Rule   *struct {
-		Folder string `json:"folder"`
+		Folder      string `json:"folder"`
+		CounterTest bool   `json:"counterTest"`
+		FolderTest  bool   `json:"folderTest"`
 	} `json:"rule"`
 }
 

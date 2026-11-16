@@ -2,9 +2,14 @@ package provision
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 )
 
 // Plan 087 review M1: who can write to a folder the connector writes
@@ -118,5 +123,27 @@ func TestReceiptsAndOrders_FolderWriters(t *testing.T) {
 	if err != nil || len(st.WritableFolders) != 1 || st.WritableFolders[0].Name != "sendOrderPickupDir" ||
 		!slices.Equal(st.WritableFolders[0].Writers, []string{usersWrite}) {
 		t.Fatalf("state writableFolders %+v %v", st.WritableFolders, err)
+	}
+}
+
+// Review R2: state lists the unfinished orders whose frozen test flag no
+// longer matches their folder.
+func TestState_FolderTestChanged(t *testing.T) {
+	sys, env, _ := countersBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.Documents.Folders = map[string]config.FolderConfig{
+		"herp_test": {Kind: "orders", Path: mkdir(t, "herp_test"), NamePattern: "ORD_{n}.doc", Layout: "official"}, // test: false now
+	}
+	writeConfig(t, sys.dir, cfg)
+	ix := hasavshevet.OrderIndexDir(sys.dir)
+	if err := os.MkdirAll(ix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ix, "t.json"), []byte(`{"key":"t","number":9000000,"state":"retryable","reservedAt":"x","rule":{"counter":"b2b_test","folder":"herp_test","temporary":false,"fileName":"ORD_9000000.doc","counterTest":true,"folderTest":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := State(context.Background(), env, StateInput{})
+	if err != nil || len(st.Orders.FolderTestChanged) != 1 || st.Orders.FolderTestChanged[0] != 9_000_000 {
+		t.Fatalf("state orders.folderTestChanged = %v, %v", st.Orders.FolderTestChanged, err)
 	}
 }

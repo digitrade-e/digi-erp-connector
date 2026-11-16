@@ -499,3 +499,14 @@ func TestOrderQueueGeneration(t *testing.T) {
 		t.Error("a replay changed the generation")
 	}
 }
+
+// Review R2: a resend refused because the folder's test flag changed is 503
+// FOLDER_TEST_CHANGED (box state: nothing written, the order stays
+// retryable), never a 400.
+func TestSendOrderError_FolderTestChanged(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeSendOrderError(w, fmt.Errorf("%w: order 9000000 into folder herp_test", hasavshevet.ErrFolderTestChanged))
+	if w.Code != http.StatusServiceUnavailable || decodeBody(t, w)["code"] != "FOLDER_TEST_CHANGED" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}

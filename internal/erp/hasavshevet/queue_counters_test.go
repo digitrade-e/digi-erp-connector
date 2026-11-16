@@ -1,6 +1,7 @@
 package hasavshevet
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -435,5 +436,59 @@ func TestQueue_RetryableRepeatAfterItsFolderIsGone(t *testing.T) {
 	}
 	if n, err := NewCounterFile(CounterStorePath(h.dataDir, "shopify"), config.DocumentKindOrders).Peek(); err != nil || n != 5_000_001 {
 		t.Errorf("shopify's store: next %d, %v — the repeat took a number", n, err)
+	}
+}
+
+// Review R2: a retryable test order whose folder was made production by hand
+// (past the guards of documents and restore) is not re-queued into it — nor
+// written by the worker if the flag flips after the re-queue. It stays
+// retryable (503 FOLDER_TEST_CHANGED) until the flag is back.
+func TestQueue_FrozenTestFlags(t *testing.T) {
+	h := newCountersHarness(t)
+	folder := h.cfg.Documents.Folders["herp_test"].Path
+	if err := os.RemoveAll(folder); err != nil { // nothing written: retryable
+		t.Fatal(err)
+	}
+	q := h.queue(true)
+	acc, err := q.Accept(ruled("t1", "b2b_test", "herp_test", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, q, acc.JobID, JobStatusFailed)
+	h.stop(q)
+	if e := h.entry("t1"); e.State != orderRetryable || !e.Rule.CounterTest || !e.Rule.FolderTest {
+		t.Fatalf("entry %+v (rule %+v): want retryable with the test flags frozen", e, e.Rule)
+	}
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// herp_test is made production by hand; the service restarts.
+	cfg := h.cfg
+	cfg.Documents = h.cfg.Documents.Clone()
+	f := cfg.Documents.Folders["herp_test"]
+	f.Test = false
+	cfg.Documents.Folders["herp_test"] = f
+	h.cfg = cfg
+	q = h.queue(true)
+	if _, err := q.Accept(ruled("t1", "b2b_test", "herp_test", false)); !errors.Is(err, ErrFolderTestChanged) {
+		t.Fatalf("resend into a folder now production: %v, want ErrFolderTestChanged", err)
+	}
+	if h.entry("t1").State != orderRetryable {
+		t.Errorf("the refused resend changed the entry: %s", h.entry("t1").State)
+	}
+	if des, _ := os.ReadDir(folder); len(des) != 0 {
+		t.Fatalf("written into the folder: %v", des)
+	}
+	if got, err := FolderTestChanged(h.dataDir, h.cfg); err != nil || len(got) != 1 || got[0] != 9_000_000 {
+		t.Errorf("FolderTestChanged = %v %v", got, err)
+	}
+
+	// The worker checks too (the flag flipped between the re-queue and the write).
+	s := NewSender(nil, h.cfg, nil, h.log)
+	_, err = s.processOrder(context.Background(), keyedOrder("t1"), 9_000_000,
+		&orderDestination{Folder: "herp_test", FileName: "ORD_9000000.doc", CounterTest: true, FolderTest: true})
+	if !errors.Is(err, ErrFolderTestChanged) || !errors.Is(err, ErrOrderNotWritten) {
+		t.Fatalf("worker: %v, want FOLDER_TEST_CHANGED and not written (retryable)", err)
 	}
 }

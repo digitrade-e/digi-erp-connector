@@ -32,6 +32,13 @@ type storedRule struct {
 	Temporary bool   `json:"temporary"`
 	// FileName is the name resolved from the folder's pattern at reservation.
 	FileName string `json:"fileName"`
+	// CounterTest and FolderTest are the counter's and the folder's test
+	// flags at reservation (review R2): a re-queue or a write finds the
+	// folder's flag changed since — a test order would land in what is now a
+	// production folder, or the reverse — and writes nothing
+	// (ErrFolderTestChanged; the order stays retryable).
+	CounterTest bool `json:"counterTest"`
+	FolderTest  bool `json:"folderTest"`
 }
 
 // AppliedRule is what the 202 echoes for an order with a rule.
@@ -44,10 +51,27 @@ type AppliedRule struct {
 
 // orderDestination is where the worker writes an order with a rule: the
 // folder by key (its path and layout read from the config when it writes),
-// under the frozen file name.
+// under the frozen file name, with the test flags frozen beside it.
 type orderDestination struct {
-	Folder   string
-	FileName string
+	Folder                  string
+	FileName                string
+	CounterTest, FolderTest bool
+}
+
+// ErrFolderTestChanged means the folder's test flag is not the one frozen in
+// the order's rule at reservation (review R2: only a hand edit or an
+// unreadable in-flight entry gets past the documents command's and restore's
+// guards). Nothing is written; the order stays retryable, and a resend writes
+// it once the flag is back. The routes answer 503 FOLDER_TEST_CHANGED.
+var ErrFolderTestChanged = errors.New("FOLDER_TEST_CHANGED")
+
+// testFlagChanged is why folder f (now) no longer matches the flags frozen
+// in the rule, or "".
+func testFlagChanged(f config.FolderConfig, counterTest, folderTest bool) string {
+	if f.Test == folderTest && f.Test == counterTest {
+		return ""
+	}
+	return fmt.Sprintf("the folder's test flag is %v, and the order was reserved with folder test %v, counter test %v", f.Test, folderTest, counterTest)
 }
 
 // same reports whether a repeat's rule is the one frozen in the entry (a nil
@@ -84,7 +108,7 @@ func (r *storedRule) destination() *orderDestination {
 	if r == nil {
 		return nil
 	}
-	return &orderDestination{Folder: r.Folder, FileName: r.FileName}
+	return &orderDestination{Folder: r.Folder, FileName: r.FileName, CounterTest: r.CounterTest, FolderTest: r.FolderTest}
 }
 
 // validate checks a stored rule read from the index: keys in the key grammar

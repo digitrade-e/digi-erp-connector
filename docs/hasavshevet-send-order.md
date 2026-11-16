@@ -365,7 +365,10 @@ the worker and stays retryable until the folder is back.
 
 **Frozen at reservation.** Under the queue's lock the counter's next number is taken (`503 COUNTER_EXHAUSTED` outside
 its range, nothing reserved), and the index entry stores the rule with the resolved file name:
-`"rule":{"counter":"b2b","folder":"herp","temporary":true,"fileName":"TMP_IMOVEIN_1000123.doc"}`. Every re-queue and
+`"rule":{"counter":"b2b","folder":"herp","temporary":true,"fileName":"TMP_IMOVEIN_1000123.doc","counterTest":false,"folderTest":false}`
+— the counter's and the folder's test flags frozen too (review R2): a re-queue or a write that finds the folder's
+flag changed since writes nothing and leaves the order retryable (`503 FOLDER_TEST_CHANGED`; `state`'s
+`orders.folderTestChanged` lists them) until the flag is back. Every re-queue and
 recovery uses the stored rule, never the repeat's (before plan 087 a retry re-queued with the repeat's body); a repeat
 of the `historyId` with another rule — or none, through `/api/sendOrder` — answers `409 DOCUMENT_RULE_CONFLICT`. The
 `202` echoes `{"counter","number","fileName","folder"}` (the frozen ones on a replay): the reference DIG-1300 lacks,

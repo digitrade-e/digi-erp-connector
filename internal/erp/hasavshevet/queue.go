@@ -594,6 +594,13 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 				if err := q.folderRefused(e.Rule.Folder); err != nil {
 					return Acceptance{JobID: strconv.FormatInt(e.Number, 10)}, err
 				}
+				// Review R2: the frozen test flags still match the folder.
+				if f, ok := q.sender.cfg.Documents.Folders[e.Rule.Folder]; ok {
+					if why := testFlagChanged(f, e.Rule.CounterTest, e.Rule.FolderTest); why != "" {
+						q.log.Warn(fmt.Sprintf("sendOrder historyId=%q repeated: order %d is retryable but NOT queued again: %s (FOLDER_TEST_CHANGED); it stays retryable", key, e.Number, why))
+						return Acceptance{JobID: strconv.FormatInt(e.Number, 10)}, fmt.Errorf("%w: order %d into folder %s: %s", ErrFolderTestChanged, e.Number, e.Rule.Folder, why)
+					}
+				}
 			}
 			return q.requeueLocked(e, req)
 		}
@@ -651,7 +658,7 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 			return Acceptance{}, fmt.Errorf("%w: folder %q is not configured", ErrDocumentRuleInvalid, req.Rule.Folder)
 		}
 		e.Rule = &storedRule{Counter: c.Key, Folder: req.Rule.Folder, Temporary: req.Rule.Temporary,
-			FileName: config.DocumentFileName(f.NamePattern, f.TempPrefix, req.Rule.Temporary, n)}
+			FileName: config.DocumentFileName(f.NamePattern, f.TempPrefix, req.Rule.Temporary, n), CounterTest: c.Test, FolderTest: f.Test}
 		dest = e.Rule.destination()
 	}
 	if err := q.index.save(e); err != nil {

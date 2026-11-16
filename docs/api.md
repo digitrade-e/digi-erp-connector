@@ -101,6 +101,8 @@ Today's body plus an optional `documentRule` — which counter numbers the order
 - The counter's next number outside its range → `503 COUNTER_EXHAUSTED`; its store missing → `503 COUNTER_MISSING`.
 - Behind the link, a folder accounts besides the administrators can write to → `503 FOLDER_WRITABLE`, nothing
   reserved (the daemon checks at its start; a re-queue into it waits the same way).
+- A resend of a retryable order whose folder's test flag changed since its reservation → `503 FOLDER_TEST_CHANGED`,
+  nothing written; it stays retryable until the flag is back (review R2).
 - A connector older than v1.0.30 answers the route `404 NOT_FOUND` (nothing written). `/api/sendOrder` ignores
   `documentRule`, as every older connector did.
 
@@ -188,6 +190,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `DOCUMENT_RULE_CONFLICT` | 409 | Plan 087: this `historyId` was accepted with another `documentRule` (or none). Nothing written; the rule is fixed at reservation. |
 | `COUNTER_EXHAUSTED` | 503 | Plan 087: the counter's next number is outside its range (orders and receipts; also the order counter past 999 999 999). Nothing reserved; resend with the same key once the range is widened (`counters range`). |
 | `COUNTER_MISSING` | 503 | Plan 087: the counter's store does not exist where it fails closed (a counter of its own, or `lastOrderNumber.json` once counters are configured). Never 1 again; restore it or set it (`counters start-from` with `expectLast: -1`). |
+| `FOLDER_TEST_CHANGED` | 503 | Plan 087 review R2: the resend of a retryable order whose folder's test flag is no longer the one frozen at its reservation. Nothing written; the order stays retryable; resend once the flag is back (`state`'s `orders.folderTestChanged`). |
 | `FOLDER_WRITABLE` | 503 | Plan 087 review M1: behind the link, the order's typed folder (or the bound receipt folder) can be written by accounts besides the administrators, so the connector writes nothing there. Nothing reserved; resend with the same key once the folder is locked down and the service restarted ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |

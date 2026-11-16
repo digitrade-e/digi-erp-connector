@@ -141,6 +141,10 @@ type StateOrders struct {
 	HighestHistory int64       `json:"highestHistory"`
 	HistoryError   string      `json:"historyError,omitempty"`
 	Index          *StateIndex `json:"index"`
+	// FolderTestChanged (plan 087 review R2) are the unfinished orders whose
+	// rule froze another test flag than their folder has now: a resend writes
+	// nothing (503 FOLDER_TEST_CHANGED) until the flag is back.
+	FolderTestChanged []int64 `json:"folderTestChanged,omitempty"`
 }
 
 // StateReceipts are the receipt numbers (Hasavshevet KUPAIN).
@@ -401,6 +405,7 @@ func orderState(dir string, cfg *config.Config) StateOrders {
 		out.LastOrderNumber = next - 1
 	}
 	out.HighestHistory, out.HistoryError = highestNumbered(filepath.Join(cfg.SendOrderDir, "history"))
+	out.FolderTestChanged, _ = hasavshevet.FolderTestChanged(dir, *cfg)
 	return out
 }
 
