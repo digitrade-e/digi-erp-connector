@@ -63,6 +63,12 @@ type OrderRequest struct {
 	// mapped by the tenant's erp-manager config. nil = none, today's bytes;
 	// omitempty keeps a request without it hashing as before.
 	Header *OrderHeader `json:",omitempty"`
+
+	// Rule (plan 087, POST /api/v2/sendOrder): the documentRule — which
+	// counter numbers the order and which typed folder it goes to. nil =
+	// today's counter and destination; omitempty keeps a request without it
+	// hashing as before.
+	Rule *DocumentRule `json:",omitempty"`
 }
 
 // AccountDetails is the caller-supplied form of the account record: the columns
@@ -167,16 +173,32 @@ func (s *Sender) nextOrderNumber() (int64, error) {
 // Every error until the first order file is opened for writing is marked
 // ErrOrderNotWritten (see there); from then on a file may exist.
 func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, orderNum int64) (*OrderResult, error) {
+	return s.processOrder(ctx, req, orderNum, nil)
+}
+
+// processOrder is processOrderWithNumber with the destination of an order
+// with a documentRule (plan 087): its typed folder by key — path and layout
+// as configured now — and the file name frozen at reservation. nil is
+// today's destination.
+func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum int64, dest *orderDestination) (*OrderResult, error) {
 	if strings.TrimSpace(s.cfg.SendOrderDir) == "" {
 		return nil, notWritten(errors.New("sendOrderDir is not configured"))
 	}
+	var folder *config.FolderConfig
+	if dest != nil {
+		f, ok := s.cfg.Documents.Folders[dest.Folder]
+		if !ok || f.Kind != config.DocumentKindOrders {
+			return nil, notWritten(fmt.Errorf("order %d goes to folder %q, which is no longer an orders folder on this connector (documents.folders)", orderNum, dest.Folder))
+		}
+		folder = &f
+	}
 
 	// 1. Pre-flight validation (business rules + Hasavshevet mandatory field
-	// spec + what the configured layout can hold)
+	// spec + what the destination's layout can hold)
 	if err := validateOrderRequest(req); err != nil {
 		return nil, notWritten(err)
 	}
-	if err := s.ValidateLayout(req); err != nil {
+	if err := validateLayout(s.layoutFor(folder), req); err != nil {
 		return nil, notWritten(err)
 	}
 
@@ -209,11 +231,22 @@ func (s *Sender) processOrderWithNumber(ctx context.Context, req OrderRequest, o
 		}
 	}
 
-	// 5. Build DOC and PRM content, in the configured layout
+	// 5. Build DOC and PRM content, in the destination's layout
 	hdr, moves := buildIMOVEIN(orderNum, account, req, rate)
-	docBytes, prmBytes, err := s.render(hdr, moves)
+	docBytes, prmBytes, err := render(s.layoutFor(folder), hdr, moves)
 	if err != nil {
 		return nil, notWritten(fmt.Errorf("generate DOC: %w", err))
+	}
+
+	// A typed folder (plan 087): one file under the frozen name, for the
+	// ERP's importer reading that folder; no .prm there, no importer run.
+	if folder != nil {
+		writtenFiles, err := s.writeToFolder(folder, dest.FileName, orderNum, docBytes, prmBytes)
+		if err != nil {
+			return nil, err
+		}
+		s.log.Success(fmt.Sprintf("order complete orderNumber=%d folder=%s files=%v (left for the folder's importer; no importer run)", orderNum, dest.Folder, writtenFiles))
+		return orderResult(orderNum, writtenFiles, account), nil
 	}
 
 	// Model (a): one file for the ERP's scheduler, no importer.
@@ -317,10 +350,18 @@ func (s *Sender) hasExeRunner() func(context.Context, string, string, string) (i
 	return runImporter
 }
 
-// render builds the order's DOC and the PRM that describes it, in the
-// configured layout (sendOrderFormat).
-func (s *Sender) render(hdr stockHeader, moves []stockMove) (doc, prm []byte, err error) {
-	if s.cfg.OrderFormat() == config.OrderFormatLegacy {
+// layoutFor is the IMOVEIN layout of a destination: a typed folder's own, or
+// the configured sendOrderFormat.
+func (s *Sender) layoutFor(folder *config.FolderConfig) string {
+	if folder != nil {
+		return folder.Layout
+	}
+	return s.cfg.OrderFormat()
+}
+
+// render builds the order's DOC and the PRM that describes it, in layout.
+func render(layout string, hdr stockHeader, moves []stockMove) (doc, prm []byte, err error) {
+	if layout == config.OrderFormatLegacy {
 		return generateLegacyDOC(hdr, moves), generateLegacyPRM(), nil
 	}
 	doc, err = generateDOC(hdr, moves)
@@ -334,8 +375,21 @@ func (s *Sender) render(hdr stockHeader, moves []stockMove) (doc, prm []byte, er
 // written (ValidateLegacyFit); the official layout adds no check here. The
 // route calls it before a number is reserved, the writer again for every
 // other caller. It returns a *FieldError or nil.
+//
+// An order with a documentRule is checked against its folder's layout (plan
+// 087); a folder the config does not have is the route's to refuse.
 func (s *Sender) ValidateLayout(req OrderRequest) error {
-	if s.cfg.OrderFormat() == config.OrderFormatLegacy {
+	var folder *config.FolderConfig
+	if req.Rule != nil {
+		if f, ok := s.cfg.Documents.Folders[req.Rule.Folder]; ok {
+			folder = &f
+		}
+	}
+	return validateLayout(s.layoutFor(folder), req)
+}
+
+func validateLayout(layout string, req OrderRequest) error {
+	if layout == config.OrderFormatLegacy {
 		return ValidateLegacyFit(req)
 	}
 	return nil

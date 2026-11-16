@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/logger"
 )
 
@@ -57,6 +59,10 @@ type orderJob struct {
 	// entry is the key index entry that owns orderNumber; nil without a key
 	// index. Only the worker touches it once the job is queued.
 	entry *orderIndexEntry
+	// dest is where an order with a documentRule goes (plan 087): the rule
+	// frozen in its entry at reservation, never the repeat's. nil = today's
+	// destination.
+	dest *orderDestination
 }
 
 // OrderQueue is a single-worker async queue for Hasavshevet send-order jobs.
@@ -88,17 +94,23 @@ type OrderQueue struct {
 	// index is the historyId → order number index (UseKeyIndex); nil without
 	// one, and then every Submit is a new order.
 	index *orderIndex
-	// recovered is guarded by closeMu. False until Recover succeeds, and set
-	// back to false when the counter could not be moved past a number the
-	// index owns, so no new number is issued until recovery has repaired it.
-	recovered bool
+	// counters are the order counters (plan 087, UseCounters); nil = the
+	// sender's order counter under the implicit key, today's behaviour.
+	counters *CounterSet
+	// recovered is guarded by closeMu, per counter key. False until a
+	// recovery moved that counter past every number issued in its range, and
+	// set back to false when it could not, so no new number is issued from it
+	// until recovery has repaired it. Each counter recovers on its own: one
+	// that cannot be read never stops another.
+	recovered map[string]bool
 	// scanned is guarded by closeMu: a recovery has read the index into
-	// byNumber, even if it then failed on the counter.
+	// byNumber, even if it then failed on a counter.
 	scanned bool
-	// highest is the highest order number known to be issued (guarded by
-	// closeMu): readable index entries and sendOrderDir/history/<n> at
-	// recovery, then every number reserved since. The counter must offer more.
-	highest int64
+	// highest is, per counter key, the highest number known to be issued in
+	// its range (guarded by closeMu): readable index entries and
+	// sendOrderDir/history/<n> at recovery, then every number reserved since.
+	// The counter must offer more.
+	highest map[string]int64
 
 	crashPoint func(point string) // test seam
 }
@@ -117,7 +129,19 @@ type Acceptance struct {
 	JobID  string
 	Status JobStatus
 	Replay bool
+	// Rule is the documentRule the order's number was reserved under (plan
+	// 087): the counter, the number, the file name and the folder — the
+	// frozen one on a replay; nil for an order without a rule.
+	Rule *AppliedRule
 }
+
+// ErrDocumentRuleConflict is a repeat of a historyId whose documentRule is not
+// the one frozen at reservation: 409, nothing written.
+var ErrDocumentRuleConflict = errors.New("documentRule differs from the one this historyId was accepted with")
+
+// ErrDocumentRuleInvalid is a documentRule that names what this box does not
+// have (the route checks first; this is the queue's own guard): 400.
+var ErrDocumentRuleInvalid = errors.New("documentRule is not valid on this box")
 
 // NewOrderQueue creates a new queue. Call Start to begin processing.
 func NewOrderQueue(sender *Sender, log logger.LoggerService) *OrderQueue {
@@ -128,8 +152,39 @@ func NewOrderQueue(sender *Sender, log logger.LoggerService) *OrderQueue {
 		jobs:          make(map[string]*JobResult),
 		byNumber:      make(map[int64]string),
 		sharedNumbers: make(map[int64]bool),
+		recovered:     make(map[string]bool),
+		highest:       make(map[string]int64),
 		done:          make(chan struct{}),
 	}
+}
+
+// UseCounters gives the queue the box's counters (plan 087): an order with a
+// documentRule is numbered by the counter it names, one without by the
+// default order counter. Call it before UseKeyIndex, Recover, Start and the
+// first Submit. Without it the queue has one counter, the sender's.
+func (q *OrderQueue) UseCounters(set *CounterSet) {
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	q.counters = set
+	clear(q.recovered)
+}
+
+// orderCounters is the queue's counter set.
+func (q *OrderQueue) orderCounters() *CounterSet {
+	if q.counters != nil {
+		return q.counters
+	}
+	return implicitOrderCounters(q.numberStore())
+}
+
+// Counters is the queue's counter set, for the read routes.
+func (q *OrderQueue) Counters() *CounterSet {
+	if q == nil {
+		return nil
+	}
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
+	return q.orderCounters()
 }
 
 // UseKeyIndex makes historyId the order's idempotency key: one order number
@@ -141,18 +196,20 @@ func (q *OrderQueue) UseKeyIndex(dataDir string) {
 	q.closeMu.Lock()
 	defer q.closeMu.Unlock()
 	q.index = &orderIndex{dir: OrderIndexDir(dataDir)}
-	q.recovered = false
+	clear(q.recovered)
 }
 
-// Recover reads the key index and moves the order counter past the highest
-// number issued — the highest readable entry, or the highest
+// Recover reads the key index and moves each order counter past the highest
+// number issued in its range — the highest readable entry, or the highest
 // sendOrderDir/history/<n> if higher (orders written before the index, or
 // whose entry is damaged) — since a crash between saving an entry and moving
 // the counter leaves the counter behind. It logs every entry it cannot read
 // (and skips it: only that key is refused) and every order whose outcome is
-// unknown. It writes no order and never changes an entry. Accept runs it
-// before issuing a new number when it has not succeeded yet; a repeat of a
-// known key needs no recovery.
+// unknown. It writes no order and never changes an entry. Accept runs it for
+// a counter before issuing a new number from it when that counter has not
+// recovered yet; a repeat of a known key needs no recovery. A counter that
+// cannot be recovered is in the error and refuses its own orders; the others
+// recover and serve (plan 087).
 func (q *OrderQueue) Recover() error {
 	q.closeMu.Lock()
 	defer q.closeMu.Unlock()
@@ -163,10 +220,16 @@ func (q *OrderQueue) Recover() error {
 }
 
 func (q *OrderQueue) recoverLocked() error {
-	store := q.numberStore()
-	if store == nil {
+	cs := q.orderCounters().OfKind(config.DocumentKindOrders)
+	if len(cs) == 0 {
 		return errors.New("order index: the queue has no order number store")
 	}
+	return q.recoverCountersLocked(cs)
+}
+
+// recoverCountersLocked reads the index into byNumber, then recovers each of
+// cs over the numbers in its range. Caller holds closeMu.
+func (q *OrderQueue) recoverCountersLocked(cs []*Counter) error {
 	if err := privateDirs(filepath.Dir(q.index.dir), q.index.dir); err != nil {
 		return fmt.Errorf("prepare the order index: %w", err)
 	}
@@ -179,18 +242,16 @@ func (q *OrderQueue) recoverLocked() error {
 	}
 	byNumber := make(map[int64]string, len(entries))
 	shared := make(map[int64]bool)
-	var highestEntry *orderIndexEntry
 	for _, e := range entries {
 		if stem, dup := byNumber[e.Number]; dup && stem != orderIndexStem(e.Key) {
 			shared[e.Number] = true
 		}
 		byNumber[e.Number] = orderIndexStem(e.Key)
-		highestEntry = e // sorted by number
 	}
 	sendDir := q.sender.cfg.SendOrderDir
 
 	// The map first: a re-queue needs it and no counter, so it is in place
-	// even when the counter step below fails.
+	// even when a counter step below fails.
 	q.mu.Lock()
 	q.byNumber = byNumber
 	q.sharedNumbers = shared
@@ -211,42 +272,111 @@ func (q *OrderQueue) recoverLocked() error {
 			q.index.pathFor(orderIndexStem(e.Key)), e.Number, e.Number))
 	}
 
-	highestHistory, err := highestHistoryNumber(sendDir)
+	history, err := historyNumbers(filepath.Join(sendDir, "history"))
+	if strings.TrimSpace(sendDir) == "" {
+		history, err = nil, nil
+	}
 	if err != nil {
 		return fmt.Errorf("recover the order index: %w", err)
+	}
+	if all := q.orderCounters().OfKind(config.DocumentKindOrders); len(all) > 1 || (len(all) == 1 && !all[0].Implicit) {
+		q.logOutOfRange(all, entries, history)
+	}
+	var errs []error
+	for _, c := range cs {
+		if err := q.recoverCounterLocked(c, entries, history); err != nil {
+			q.recovered[c.Key] = false
+			errs = append(errs, fmt.Errorf("recover the order counter %s: %w", c.Key, err))
+			continue
+		}
+		q.recovered[c.Key] = true
+	}
+	return errors.Join(errs...)
+}
+
+// recoverCounterLocked moves counter c past the highest number issued in its
+// range. Caller holds closeMu.
+func (q *OrderQueue) recoverCounterLocked(c *Counter, entries []*orderIndexEntry, history []int64) error {
+	var highestEntry *orderIndexEntry
+	for _, e := range entries { // sorted by number
+		if c.InRange(e.Number) {
+			highestEntry = e
+		}
+	}
+	var highestHistory int64
+	for _, n := range history {
+		if c.InRange(n) && n > highestHistory {
+			highestHistory = n
+		}
 	}
 	highest := highestHistory
 	if highestEntry != nil && highestEntry.Number > highest {
 		highest = highestEntry.Number
 	}
-
+	store := q.counterName(c)
 	if highest > 0 {
-		next, err := store.Peek()
+		next, err := c.Peek()
 		if err != nil {
-			return fmt.Errorf("recover the order index: %w", err)
+			return err
 		}
 		if next <= highest {
 			switch {
 			case highestEntry != nil && highestEntry.Number == highest && highestEntry.State == orderReserved && next == highest:
-				q.log.Warn(fmt.Sprintf("order %d was reserved for historyId=%q but lastOrderNumber.json was not moved past it (the connector stopped, or the counter could not be written, in between); moving it past %d",
-					highest, highestEntry.Key, highest))
+				q.log.Warn(fmt.Sprintf("order %d was reserved for historyId=%q but %s was not moved past it (the connector stopped, or the counter could not be written, in between); moving it past %d",
+					highest, highestEntry.Key, store, highest))
 			case highest == highestHistory:
 				// Not a crash: the counter was moved back (restored, hand-edited),
 				// or orders were written before the index existed.
-				q.log.Warn(fmt.Sprintf("lastOrderNumber.json offered %d but %s already holds order %d; moving the counter past %d",
-					next, filepath.Join(sendDir, "history"), highest, highest))
+				q.log.Warn(fmt.Sprintf("%s offered %d but %s already holds order %d; moving the counter past %d",
+					store, next, filepath.Join(q.sender.cfg.SendOrderDir, "history"), highest, highest))
 			default:
-				q.log.Warn(fmt.Sprintf("lastOrderNumber.json offered %d but the order index already holds orders up to %d; moving the counter past %d",
-					next, highest, highest))
+				q.log.Warn(fmt.Sprintf("%s offered %d but the order index already holds orders up to %d; moving the counter past %d",
+					store, next, highest, highest))
 			}
-			if err := store.advancePast(highest); err != nil {
-				return fmt.Errorf("recover the order index: %w", err)
+			if err := c.advancePast(highest); err != nil {
+				return err
 			}
 		}
 	}
-	q.highest = highest
-	q.recovered = true
+	q.highest[c.Key] = highest
 	return nil
+}
+
+// counterName is how the log names a counter: lastOrderNumber.json for the
+// implicit one (today's text), "counter <key> (<file>)" otherwise.
+func (q *OrderQueue) counterName(c *Counter) string {
+	if c.Implicit {
+		return "lastOrderNumber.json"
+	}
+	return fmt.Sprintf("counter %s (%s)", c.Key, filepath.Base(c.Path))
+}
+
+// logOutOfRange warns about issued order numbers no counter's range holds:
+// they fence nothing, and a counter created over them later recovers past
+// them from the index and the history.
+func (q *OrderQueue) logOutOfRange(cs []*Counter, entries []*orderIndexEntry, history []int64) {
+	seen := map[int64]bool{}
+	var out []int64
+	for _, e := range entries {
+		if counterFor(cs, e.Number) == nil && !seen[e.Number] {
+			seen[e.Number] = true
+			out = append(out, e.Number)
+		}
+	}
+	for _, n := range history {
+		if counterFor(cs, n) == nil && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		return
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	if len(out) > 20 {
+		out = out[len(out)-20:]
+	}
+	q.log.Warn(fmt.Sprintf("orders issued outside every counter's range (the highest, at most 20): %v — they fence no counter; no range on this box may be widened over them without the counters command checking the index", out))
 }
 
 // Start launches the single background worker goroutine.
@@ -272,7 +402,7 @@ func (q *OrderQueue) run(ctx context.Context) {
 				return
 			}
 			q.setStatus(job.id, JobStatusRunning, job.orderNumber, nil, nil)
-			result, err := q.sender.processOrderWithNumber(ctx, job.req, job.orderNumber)
+			result, err := q.sender.processOrder(ctx, job.req, job.orderNumber, job.dest)
 			unlockImport()
 			// The index first, the in-memory status second: a poll that reads
 			// done/failed is already backed by disk. Crash window: a process
@@ -380,6 +510,9 @@ func (q *OrderQueue) Accept(req OrderRequest) (Acceptance, error) {
 }
 
 func (q *OrderQueue) acceptUnkeyedLocked(req OrderRequest) (Acceptance, error) {
+	if req.Rule != nil {
+		return Acceptance{}, errors.New("an order with a documentRule needs the order index (historyId is its key)")
+	}
 	if len(q.ch) >= cap(q.ch) {
 		return Acceptance{}, fmt.Errorf("%w (capacity %d)", ErrQueueFull, defaultQueueSize)
 	}
@@ -391,13 +524,13 @@ func (q *OrderQueue) acceptUnkeyedLocked(req OrderRequest) (Acceptance, error) {
 }
 
 func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
-	store := q.numberStore()
-	if store == nil {
-		return Acceptance{}, errors.New("order index: the queue has no order number store")
-	}
 	key := req.HistoryID
 	if key == "" {
 		return Acceptance{}, errors.New("historyId is required: it is the order's idempotency key")
+	}
+	c, err := q.counterForRequest(req)
+	if err != nil {
+		return Acceptance{}, err
 	}
 
 	e, found, err := q.index.load(key)
@@ -405,32 +538,43 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 		return Acceptance{}, err
 	}
 	if found {
+		// The rule was frozen at reservation (plan 087): a repeat that names
+		// another one is refused, never written under the first number into
+		// another folder or from another counter.
+		if !e.Rule.same(req.Rule) {
+			return Acceptance{JobID: strconv.FormatInt(e.Number, 10)}, fmt.Errorf("%w: historyId %q holds order %d with %s; the repeat sends %s",
+				ErrDocumentRuleConflict, key, e.Number, e.Rule.describe(), describeRule(req.Rule))
+		}
 		if e.State == orderRetryable && !q.jobActive(e.Number) {
 			return q.requeueLocked(e, req)
 		}
 		return q.replay(e, req), nil
 	}
 
-	if !q.recovered {
-		if err := q.recoverLocked(); err != nil {
+	if c.Retired {
+		return Acceptance{}, fmt.Errorf("%w: counter %s issues no new number", ErrCounterRetired, c.Key)
+	}
+	if !q.recovered[c.Key] {
+		if err := q.recoverCountersLocked([]*Counter{c}); err != nil {
 			return Acceptance{}, err
 		}
 	}
 	if len(q.ch) >= cap(q.ch) {
 		return Acceptance{}, fmt.Errorf("%w (capacity %d)", ErrQueueFull, defaultQueueSize)
 	}
-	n, err := store.Peek()
+	n, err := c.next()
 	if err != nil {
 		return Acceptance{}, fmt.Errorf("reserve order number: %w", err)
 	}
-	if n <= q.highest {
+	if n <= q.highest[c.Key] {
 		// Recovery put the counter past every number known to be issued, so
 		// the file was moved back while the connector ran. Refuse, and have
 		// the next Accept recover (move it forward) before issuing anything.
-		q.recovered = false
-		return Acceptance{}, fmt.Errorf("lastOrderNumber.json offers order %d, but orders up to %d were already issued; nothing reserved", n, q.highest)
+		q.recovered[c.Key] = false
+		return Acceptance{}, fmt.Errorf("%s offers order %d, but orders up to %d were already issued; nothing reserved", q.counterName(c), n, q.highest[c.Key])
 	}
 
+	var dest *orderDestination
 	e = &orderIndexEntry{
 		Key:         key,
 		Number:      n,
@@ -438,31 +582,64 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 		RequestHash: orderRequestHash(req),
 		ReservedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
+	if req.Rule != nil {
+		f, ok := q.sender.cfg.Documents.Folders[req.Rule.Folder]
+		if !ok { // the handler resolved it against the same config
+			return Acceptance{}, fmt.Errorf("%w: folder %q is not configured", ErrDocumentRuleInvalid, req.Rule.Folder)
+		}
+		e.Rule = &storedRule{Counter: c.Key, Folder: req.Rule.Folder, Temporary: req.Rule.Temporary,
+			FileName: config.DocumentFileName(f.NamePattern, f.TempPrefix, req.Rule.Temporary, n)}
+		dest = e.Rule.destination()
+	}
 	if err := q.index.save(e); err != nil {
 		return Acceptance{}, err // nothing reserved: the counter has not moved
 	}
-	q.highest = n
+	q.highest[c.Key] = n
 	q.mu.Lock()
 	q.byNumber[n] = orderIndexStem(key)
 	q.mu.Unlock()
 	q.crash(crashOrderAfterIndexReserved)
-	if err := store.advancePast(n); err != nil {
+	if err := c.advancePast(n); err != nil {
 		// The index owns n, so this order goes ahead under it — refusing would
 		// leave the key reserved and its order never written. But the counter
 		// still offers n: issue nothing more until recovery has moved it on.
-		q.recovered = false
-		q.log.Error(fmt.Sprintf("order %d reserved for historyId=%q, but lastOrderNumber.json could not be moved past it; no new order is accepted until it can", n, key), err)
+		q.recovered[c.Key] = false
+		q.log.Error(fmt.Sprintf("order %d reserved for historyId=%q, but %s could not be moved past it; no new order is accepted from it until it can", n, key, q.counterName(c)), err)
 	}
 	q.crash(crashOrderAfterCounterAdvanced)
 
-	acc, err := q.enqueueLocked(orderJob{id: strconv.FormatInt(n, 10), orderNumber: n, req: req, entry: e})
+	acc, err := q.enqueueLocked(orderJob{id: strconv.FormatInt(n, 10), orderNumber: n, req: req, entry: e, dest: dest})
 	if err != nil { // unreachable: see enqueueLocked
 		q.recordOutcome(orderJob{entry: e}, nil, notWritten(fmt.Errorf("never queued: %w", err)))
 		return acc, err
 	}
 	// The log is where a person maps a historyId to its number and file.
-	q.log.Info(fmt.Sprintf("sendOrder historyId=%q: order %d reserved and queued (index %s)", key, n, q.index.pathFor(orderIndexStem(key))))
+	if e.Rule != nil {
+		q.log.Info(fmt.Sprintf("sendOrder historyId=%q: order %d reserved from counter %s for folder %s as %s, and queued (index %s)",
+			key, n, e.Rule.Counter, e.Rule.Folder, e.Rule.FileName, q.index.pathFor(orderIndexStem(key))))
+	} else {
+		q.log.Info(fmt.Sprintf("sendOrder historyId=%q: order %d reserved and queued (index %s)", key, n, q.index.pathFor(orderIndexStem(key))))
+	}
+	acc.Rule = e.Rule.applied(n)
 	return acc, nil
+}
+
+// counterForRequest is the counter that numbers req: the one its rule names,
+// or the default order counter.
+func (q *OrderQueue) counterForRequest(req OrderRequest) (*Counter, error) {
+	set := q.orderCounters()
+	if req.Rule == nil {
+		c := set.DefaultOrder()
+		if c == nil {
+			return nil, errors.New("order index: the queue has no order number store")
+		}
+		return c, nil
+	}
+	c, ok := set.Get(req.Rule.Counter)
+	if !ok || c.Kind != config.DocumentKindOrders {
+		return nil, fmt.Errorf("%w: counter %q is not an order counter on this box", ErrDocumentRuleInvalid, req.Rule.Counter)
+	}
+	return c, nil
 }
 
 // requeueLocked queues a retryable order again under its own number: nothing
@@ -472,7 +649,7 @@ func (q *OrderQueue) acceptKeyedLocked(req OrderRequest) (Acceptance, error) {
 func (q *OrderQueue) requeueLocked(e *orderIndexEntry, req OrderRequest) (Acceptance, error) {
 	// The guard below needs the index map. Recovery fills it before its
 	// counter step, so a counter it cannot read does not stop a re-queue.
-	if !q.recovered {
+	if !q.scanned {
 		if err := q.recoverLocked(); err != nil && !q.scanned {
 			return Acceptance{}, err
 		}
@@ -481,7 +658,7 @@ func (q *OrderQueue) requeueLocked(e *orderIndexEntry, req OrderRequest) (Accept
 		q.log.Error(fmt.Sprintf("ORDER NOT QUEUED AGAIN: order %d (historyId=%q) is retryable, but %s. Writing it would make a second document with Asmahta %d; answering it as failed. "+
 			"A person must check the entry %s (docs/troubleshooting.md § The order index).",
 			e.Number, e.Key, reason, e.Number, q.index.pathFor(orderIndexStem(e.Key))), nil)
-		return Acceptance{JobID: strconv.FormatInt(e.Number, 10), Status: JobStatusFailed, Replay: true}, nil
+		return Acceptance{JobID: strconv.FormatInt(e.Number, 10), Status: JobStatusFailed, Replay: true, Rule: e.Rule.applied(e.Number)}, nil
 	}
 	if len(q.ch) >= cap(q.ch) {
 		return Acceptance{}, fmt.Errorf("%w (capacity %d)", ErrQueueFull, defaultQueueSize)
@@ -498,7 +675,7 @@ func (q *OrderQueue) requeueLocked(e *orderIndexEntry, req OrderRequest) (Accept
 	q.mu.Lock()
 	q.byNumber[e.Number] = orderIndexStem(e.Key)
 	q.mu.Unlock()
-	acc, err := q.enqueueLocked(orderJob{id: strconv.FormatInt(e.Number, 10), orderNumber: e.Number, req: req, entry: e})
+	acc, err := q.enqueueLocked(orderJob{id: strconv.FormatInt(e.Number, 10), orderNumber: e.Number, req: req, entry: e, dest: e.Rule.destination()})
 	if err != nil { // unreachable: see enqueueLocked
 		q.recordOutcome(orderJob{entry: e}, nil, notWritten(fmt.Errorf("never queued: %w", err)))
 		return acc, err
@@ -506,6 +683,7 @@ func (q *OrderQueue) requeueLocked(e *orderIndexEntry, req OrderRequest) (Accept
 	q.log.Info(fmt.Sprintf("sendOrder historyId=%q repeated: order %d failed before anything was written (%s); queued again under the same number (retry %d)",
 		e.Key, e.Number, lastErr, e.Retries))
 	acc.Replay = true
+	acc.Rule = e.Rule.applied(e.Number)
 	return acc, nil
 }
 
@@ -577,7 +755,7 @@ func (q *OrderQueue) replay(e *orderIndexEntry, req OrderRequest) Acceptance {
 	} else {
 		q.log.Info(fmt.Sprintf("sendOrder historyId=%q repeated: answering order %d (%s); nothing written", e.Key, e.Number, status))
 	}
-	return Acceptance{JobID: jobID, Status: status, Replay: true}
+	return Acceptance{JobID: jobID, Status: status, Replay: true, Rule: e.Rule.applied(e.Number)}
 }
 
 // entryStatus is the job status an entry stands for when no job in memory
@@ -624,34 +802,6 @@ func (q *OrderQueue) recordOutcome(job orderJob, result *OrderResult, procErr er
 		q.log.Error(fmt.Sprintf("order %d (historyId=%q) %s, but the order index could not record it; after a restart a repeat of the key answers unknown",
 			e.Number, e.Key, outcome), err)
 	}
-}
-
-// highestHistoryNumber is the highest order number with a folder under
-// sendOrderDir/history (0 when there is none): orders the connector began to
-// write, whatever the index says.
-func highestHistoryNumber(sendOrderDir string) (int64, error) {
-	if strings.TrimSpace(sendOrderDir) == "" {
-		return 0, nil
-	}
-	dir := filepath.Join(sendOrderDir, "history")
-	des, err := os.ReadDir(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("list %s: %w", dir, err)
-	}
-	var highest int64
-	for _, de := range des {
-		n, err := strconv.ParseInt(de.Name(), 10, 64)
-		if err != nil || !de.IsDir() || strconv.FormatInt(n, 10) != de.Name() {
-			continue
-		}
-		if n > highest {
-			highest = n
-		}
-	}
-	return highest, nil
 }
 
 func (q *OrderQueue) numberStore() *OrderNumberStore {

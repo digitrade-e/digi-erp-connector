@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 )
 
@@ -42,22 +43,47 @@ func PickupFileName(documentType string, orderNum int64) string {
 // pickup folder is final: nothing is written, and writing under it would put
 // a second document under the same reference into the books.
 func (s *Sender) writePickup(req OrderRequest, orderNum int64, doc, prm []byte) ([]string, error) {
-	pickupDir := strings.TrimSpace(s.cfg.SendOrderPickupDir)
+	return s.publishOrder(strings.TrimSpace(s.cfg.SendOrderPickupDir), "the pickup folder", PickupFileName(req.DocumentType, orderNum),
+		[]string{"imovein_", "tmp_imovein_"}, orderNum, doc, prm)
+}
+
+// writeToFolder publishes an order with a documentRule into its typed folder
+// (plan 087) as model (a) does into the pickup folder: the number must be
+// free there under the folder's pattern — with and without the temporary
+// prefix, any case — the folder must take a file, the history copies keep
+// their fixed names, and the file appears whole and never over another.
+func (s *Sender) writeToFolder(f *config.FolderConfig, fileName string, orderNum int64, doc, prm []byte) ([]string, error) {
+	hasPrefix, stem, err := config.ParseNamePattern(f.NamePattern, f.TempPrefix)
+	if err != nil {
+		return nil, notWritten(err)
+	}
+	stems := []string{strings.ToLower(stem)}
+	if hasPrefix {
+		stems = append(stems, strings.ToLower(f.TempPrefix+stem))
+	}
+	return s.publishOrder(f.Path, "the folder", fileName, stems, orderNum, doc, prm)
+}
+
+// publishOrder writes the history copies, then publishes doc into dir as
+// name. stems are the lower-case name stems whose "<stem><n>." marks number n
+// as taken in dir.
+func (s *Sender) publishOrder(dir, what, name string, stems []string, orderNum int64, doc, prm []byte) ([]string, error) {
+	pickupDir := dir
 	n := strconv.FormatInt(orderNum, 10)
 
-	taken, err := pickupNumberTaken(pickupDir, orderNum)
+	taken, err := numberTaken(pickupDir, stems, orderNum)
 	if err != nil {
-		return nil, notWritten(fmt.Errorf("read the pickup folder %s: %w", pickupDir, err))
+		return nil, notWritten(fmt.Errorf("read %s %s: %w", what, pickupDir, err))
 	}
 	if taken != "" {
-		return nil, fmt.Errorf("order number %d is already used in the pickup folder %s (%s): the order counter overlaps numbers written there by someone else — seed it past them; nothing was written", orderNum, pickupDir, taken)
+		return nil, fmt.Errorf("order number %d is already used in %s %s (%s): the order counter overlaps numbers written there by someone else — seed it past them; nothing was written", orderNum, what, pickupDir, taken)
 	}
 
 	// The folder must take a file before anything is written: a read-only
 	// folder or a write the ACL denies, found after the history copies, would
 	// make the number final for an order that never reached the scheduler.
-	if err := probeWritable(pickupDir, n); err != nil {
-		return nil, notWritten(fmt.Errorf("the pickup folder %s does not take a file: %w", pickupDir, err))
+	if err := probeWritable(pickupDir, name); err != nil {
+		return nil, notWritten(fmt.Errorf("%s %s does not take a file: %w", what, pickupDir, err))
 	}
 
 	// The history copies live in the connector's own folder, never in the
@@ -88,9 +114,9 @@ func (s *Sender) writePickup(req OrderRequest, orderNum int64, doc, prm []byte) 
 	}
 
 	// Last, the file the scheduler reads: whole or not at all, and never over
-	// another file. Its temp name (.IMOVEIN_<n>.doc.tmp-*) does not match the
-	// scheduler's imovein*.doc.
-	dst := filepath.Join(pickupDir, PickupFileName(req.DocumentType, orderNum))
+	// another file. Its temp name (.<name>.tmp-*) does not match the
+	// scheduler's wildcard (imovein*.doc).
+	dst := filepath.Join(pickupDir, name)
 	if err := atomicfile.WriteNew(dst, doc, 0o644); err != nil {
 		return nil, fmt.Errorf("publish %s: %w", dst, err)
 	}
@@ -98,18 +124,18 @@ func (s *Sender) writePickup(req OrderRequest, orderNum int64, doc, prm []byte) 
 }
 
 // probeWritable creates and removes an empty file in dir under a name the
-// scheduler's imovein*.doc does not match (the same form as WriteNew's temp).
-func probeWritable(dir, n string) error {
-	f, err := os.CreateTemp(dir, ".IMOVEIN_"+n+".doc.tmp-*")
+// scheduler's wildcard does not match (the same form as WriteNew's temp).
+func probeWritable(dir, name string) error {
+	f, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
 		return err
 	}
-	name := f.Name()
+	tmp := f.Name()
 	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Remove(name)
+	return os.Remove(tmp)
 }
 
 // pickupNumberTaken returns the name of a file in dir that already carries
@@ -120,6 +146,12 @@ func probeWritable(dir, n string) error {
 // every other writer's numbers is what keeps them apart (plan 075 cutover);
 // this check only stops the mistake it can see.
 func pickupNumberTaken(dir string, orderNum int64) (string, error) {
+	return numberTaken(dir, []string{"imovein_", "tmp_imovein_"}, orderNum)
+}
+
+// numberTaken is pickupNumberTaken for any name stems (lower case): the name
+// of a file in dir starting "<stem><n>." for one of stems, any case, or "".
+func numberTaken(dir string, stems []string, orderNum int64) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", err
@@ -127,8 +159,10 @@ func pickupNumberTaken(dir string, orderNum int64) (string, error) {
 	n := strconv.FormatInt(orderNum, 10)
 	for _, e := range entries {
 		lower := strings.ToLower(e.Name())
-		if strings.HasPrefix(lower, "imovein_"+n+".") || strings.HasPrefix(lower, "tmp_imovein_"+n+".") {
-			return e.Name(), nil
+		for _, stem := range stems {
+			if strings.HasPrefix(lower, stem+n+".") {
+				return e.Name(), nil
+			}
 		}
 	}
 	return "", nil

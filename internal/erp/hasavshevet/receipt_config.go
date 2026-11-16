@@ -27,10 +27,18 @@ func ValidateReceiptConfig(cfg config.Config) error {
 
 // ReceiptWriterConfigFrom is the writer's view of the connector config;
 // dataDir is paths.DataDir(). Paths are trimmed: the validator compared the
-// trimmed folder, so that is the one the writer must use.
+// trimmed folder, so that is the one the writer must use. The folder is
+// cfg.ReceiptDir() — the bound typed folder (plan 087), else sendReceiptDir —
+// with its name pattern, and the counter is cfg's receipt counter.
 func ReceiptWriterConfigFrom(cfg config.Config, dataDir string) ReceiptWriterConfig {
+	var pattern string
+	if strings.TrimSpace(cfg.Documents.Receipts.Folder) != "" {
+		pattern = cfg.ReceiptNamePattern()
+	}
 	return ReceiptWriterConfig{
-		SendReceiptDir:      strings.TrimSpace(cfg.SendReceiptDir),
+		Counter:             NewCounterSet(cfg, dataDir).Receipts(),
+		NamePattern:         pattern,
+		SendReceiptDir:      cfg.ReceiptDir(),
 		DataDir:             dataDir,
 		HasReceiptBatFile:   strings.TrimSpace(cfg.HasReceiptBatFile),
 		HasExePath:          strings.TrimSpace(cfg.HasExePath),

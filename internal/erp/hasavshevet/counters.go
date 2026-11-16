@@ -1,0 +1,549 @@
+package hasavshevet
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/digitrade-e/digi-erp-connector/internal/config"
+	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
+)
+
+// Plan 087 (DIG-1563): named counters.
+//
+// A counter is a key (config.yaml's documents.counters), a kind (orders or
+// receipts), a range, a test flag, and a store file holding the last number it
+// issued. Today's two stores become the first two counters in place — the
+// order counter in sendOrderDir (legacy Node format, "last"), the receipt store
+// in the data directory ("next") — and every other counter has a store of its
+// own in DataDir\counters\<key>.json ("last"). Whatever the store holds, a
+// Counter speaks one meaning: Last is the last number issued.
+//
+// Taking a number stays two steps, as before: Peek, persist the index entry
+// that owns the number, then advancePast. Recovery and the "never at or below
+// the highest issued" guard are per counter, over the numbers in its range:
+// ranges on one box are disjoint (config.ValidateDocuments), so every issued
+// number belongs to exactly one counter, and a second counter in another range
+// can never push the first into its range.
+
+// ErrCounterExhausted means the counter's next number is outside its range:
+// the box's state, not a fault in the request. Nothing is reserved; a resend
+// with the same key is safe once the range is widened (the counters command).
+// The routes answer it 503 COUNTER_EXHAUSTED.
+var ErrCounterExhausted = errors.New("counter exhausted")
+
+// ErrCounterMissing means a counter's store file does not exist where the
+// counter fails closed: a counter of its own, or — with counters configured —
+// the order counter in sendOrderDir, which before plan 087 started again at 1.
+// The routes answer it 503 COUNTER_MISSING.
+var ErrCounterMissing = errors.New("counter store missing")
+
+// ErrCounterRetired means a new number was asked of a retired counter.
+var ErrCounterRetired = errors.New("counter retired")
+
+// ErrCounterLower is RaiseTo asked to move a counter back.
+var ErrCounterLower = errors.New("a counter never moves back")
+
+// numberSource is a counter's store: the next number, and moving past one.
+type numberSource interface {
+	Peek() (int64, error)
+	advancePast(n int64) error
+}
+
+// Counter is one named counter.
+type Counter struct {
+	Key      string
+	Kind     string // config.DocumentKindOrders | config.DocumentKindReceipts
+	Min, Max int64
+	Test     bool
+	Retired  bool
+	// Store is the adopted pre-087 store (config.CounterStore*), or "".
+	Store string
+	// Implicit: no counter is configured and this is one of today's two
+	// stores under its implicit key.
+	Implicit bool
+	// Path is the store file.
+	Path string
+
+	src numberSource
+}
+
+// InRange reports whether n is one of the counter's numbers.
+func (c *Counter) InRange(n int64) bool { return n >= c.Min && n <= c.Max }
+
+// Peek is the store's next number, range or not.
+func (c *Counter) Peek() (int64, error) { return c.src.Peek() }
+
+// Last is the last number issued (the store's next minus one).
+func (c *Counter) Last() (int64, error) {
+	n, err := c.src.Peek()
+	return n - 1, err
+}
+
+// next is the number the next document gets: ErrCounterExhausted when it is
+// outside the range.
+func (c *Counter) next() (int64, error) {
+	n, err := c.src.Peek()
+	if err != nil {
+		return 0, err
+	}
+	if !c.InRange(n) {
+		return 0, fmt.Errorf("%w: counter %s would issue %d, outside its range %d-%d", ErrCounterExhausted, c.Key, n, c.Min, c.Max)
+	}
+	return n, nil
+}
+
+func (c *Counter) advancePast(n int64) error { return c.src.advancePast(n) }
+
+// RaiseTo makes last the counter's last issued number, creating the store when
+// it does not exist. It never lowers one: a store already at last writes
+// nothing, one above it is ErrCounterLower. Only the provision commands call
+// it, with the service stopped (no writer racing it).
+func (c *Counter) RaiseTo(last int64) error {
+	if last < 0 || last > config.MaxDocumentNumber {
+		return fmt.Errorf("counter %s: %d is outside 0-%d", c.Key, last, config.MaxDocumentNumber)
+	}
+	switch s := c.src.(type) {
+	case *OrderNumberStore:
+		return s.raiseTo(last)
+	case *ReceiptNumberStore:
+		return s.raiseTo(last)
+	case *CounterFile:
+		return s.raiseTo(last)
+	}
+	return fmt.Errorf("counter %s: its store cannot be set", c.Key)
+}
+
+// StorePresent reports whether the counter's store file exists.
+func (c *Counter) StorePresent() bool {
+	_, err := os.Lstat(c.Path)
+	return err == nil
+}
+
+// CounterSet is the box's counters, built from config.yaml.
+type CounterSet struct {
+	byKey      map[string]*Counter
+	keys       []string
+	defaultKey string // orders without a documentRule
+	receiptKey string // receipts
+	orderStore *OrderNumberStore
+}
+
+// CounterStorePath is a counter's own store, DataDir\counters\<key>.json.
+func CounterStorePath(dataDir, key string) string {
+	return filepath.Join(dataDir, "counters", key+".json")
+}
+
+// NewCounterSet builds the counters of cfg. With none configured it holds
+// today's two stores under their implicit keys — the order counter when orders
+// are configured, the receipt store when receipts are — with the range
+// 1-999 999 999 and today's behaviour (a missing order counter starts at 1).
+// With counters configured it holds exactly those, and the order counter in
+// sendOrderDir fails closed when missing. cfg is assumed valid
+// (config.ValidateDocuments).
+func NewCounterSet(cfg config.Config, dataDir string) *CounterSet {
+	s := &CounterSet{byKey: map[string]*Counter{}}
+	orderPath := filepath.Join(strings.TrimSpace(cfg.SendOrderDir), "lastOrderNumber.json")
+	if !cfg.CountersConfigured() {
+		if cfg.OrdersConfigured() {
+			s.orderStore = NewOrderNumberStore(orderPath)
+			s.add(&Counter{Key: config.ImplicitOrderCounterKey, Kind: config.DocumentKindOrders, Min: 1, Max: config.MaxDocumentNumber,
+				Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: orderPath, src: s.orderStore})
+			s.defaultKey = config.ImplicitOrderCounterKey
+		}
+		if cfg.ReceiptsConfigured() {
+			p := ReceiptNumberStorePath(dataDir)
+			s.add(&Counter{Key: config.ImplicitReceiptCounterKey, Kind: config.DocumentKindReceipts, Min: 1, Max: config.MaxDocumentNumber,
+				Store: config.CounterStoreReceiptNumber, Implicit: true, Path: p, src: NewReceiptNumberStore(p)})
+			s.receiptKey = config.ImplicitReceiptCounterKey
+		}
+		return s
+	}
+	for _, k := range cfg.CounterKeys() {
+		cc := cfg.Documents.Counters[k]
+		c := &Counter{Key: k, Kind: cc.Kind, Min: cc.Min, Max: cc.Max, Test: cc.Test, Retired: cc.Retired, Store: cc.Store}
+		switch cc.Store {
+		case config.CounterStoreLastOrderNumber:
+			s.orderStore = NewOrderNumberStore(orderPath)
+			s.orderStore.refuseMissing = true
+			c.Path, c.src = orderPath, s.orderStore
+		case config.CounterStoreReceiptNumber:
+			c.Path = ReceiptNumberStorePath(dataDir)
+			c.src = NewReceiptNumberStore(c.Path)
+		default:
+			c.Path = CounterStorePath(dataDir, k)
+			c.src = NewCounterFile(c.Path, cc.Kind)
+		}
+		s.add(c)
+	}
+	if cfg.OrdersConfigured() {
+		s.defaultKey = cfg.DefaultOrderCounterKey()
+	}
+	if cfg.ReceiptsConfigured() {
+		s.receiptKey = cfg.ReceiptCounterKey()
+	}
+	return s
+}
+
+// implicitOrderCounters is the set of a queue built without one (tests, and
+// callers older than plan 087): the sender's order counter under the implicit
+// key, today's behaviour.
+func implicitOrderCounters(store *OrderNumberStore) *CounterSet {
+	s := &CounterSet{byKey: map[string]*Counter{}, orderStore: store}
+	if store != nil {
+		s.add(&Counter{Key: config.ImplicitOrderCounterKey, Kind: config.DocumentKindOrders, Min: 1, Max: config.MaxDocumentNumber,
+			Store: config.CounterStoreLastOrderNumber, Implicit: true, Path: store.path, src: store})
+		s.defaultKey = config.ImplicitOrderCounterKey
+	}
+	return s
+}
+
+func (s *CounterSet) add(c *Counter) {
+	s.byKey[c.Key] = c
+	s.keys = append(s.keys, c.Key)
+	sort.Strings(s.keys)
+}
+
+// Get is the counter of key.
+func (s *CounterSet) Get(key string) (*Counter, bool) {
+	if s == nil {
+		return nil, false
+	}
+	c, ok := s.byKey[key]
+	return c, ok
+}
+
+// All is every counter, by key.
+func (s *CounterSet) All() []*Counter {
+	if s == nil {
+		return nil
+	}
+	out := make([]*Counter, 0, len(s.keys))
+	for _, k := range s.keys {
+		out = append(out, s.byKey[k])
+	}
+	return out
+}
+
+// OfKind is every counter of one kind, by key.
+func (s *CounterSet) OfKind(kind string) []*Counter {
+	var out []*Counter
+	for _, c := range s.All() {
+		if c.Kind == kind {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// DefaultOrder numbers the orders sent without a documentRule; nil when the
+// box writes no orders.
+func (s *CounterSet) DefaultOrder() *Counter {
+	c, _ := s.Get(s.defaultKeyOrEmpty())
+	return c
+}
+
+func (s *CounterSet) defaultKeyOrEmpty() string {
+	if s == nil {
+		return ""
+	}
+	return s.defaultKey
+}
+
+// Receipts numbers the receipts; nil when the box writes none.
+func (s *CounterSet) Receipts() *Counter {
+	if s == nil {
+		return nil
+	}
+	c, _ := s.Get(s.receiptKey)
+	return c
+}
+
+// OrderNumberStore is the order counter in sendOrderDir (lastOrderNumber.json)
+// the set uses, for a Sender built beside it; nil when no counter adopts it.
+func (s *CounterSet) OrderNumberStore() *OrderNumberStore {
+	if s == nil {
+		return nil
+	}
+	return s.orderStore
+}
+
+// counterFor is the counter whose range holds n, or nil.
+func counterFor(cs []*Counter, n int64) *Counter {
+	for _, c := range cs {
+		if c.InRange(n) {
+			return c
+		}
+	}
+	return nil
+}
+
+// CounterFile is a counter's own store, {"last": N}: the last number issued.
+// It fails closed: a missing file is ErrCounterMissing (only the counters
+// command creates one), and anything but a bare whole number 0-999 999 999 is
+// refused and left as found — as ErrOrderCounterUnreadable for an order
+// counter, ErrStoreUnavailable for a receipt counter (the codes the routes
+// already answer for today's two stores).
+type CounterFile struct {
+	mu         sync.Mutex
+	path       string
+	unreadable error
+}
+
+type counterFileBody struct {
+	Last json.RawMessage `json:"last"`
+}
+
+// NewCounterFile is the store at path of a counter of kind; nothing is read
+// until it is used.
+func NewCounterFile(path, kind string) *CounterFile {
+	f := &CounterFile{path: path, unreadable: ErrOrderCounterUnreadable}
+	if kind == config.DocumentKindReceipts {
+		f.unreadable = ErrStoreUnavailable
+	}
+	return f
+}
+
+// Peek is the next number.
+func (f *CounterFile) Peek() (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last, err := f.read()
+	return last + 1, err
+}
+
+func (f *CounterFile) advancePast(n int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last, err := f.read()
+	if err != nil {
+		return err
+	}
+	if n <= last {
+		return nil
+	}
+	return f.write(n)
+}
+
+func (f *CounterFile) raiseTo(last int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, err := f.read()
+	switch {
+	case errors.Is(err, ErrCounterMissing):
+		return f.write(last)
+	case err != nil:
+		return err
+	case cur == last:
+		return nil
+	case cur > last:
+		return fmt.Errorf("%w: %s holds %d, asked %d", ErrCounterLower, f.path, cur, last)
+	}
+	return f.write(last)
+}
+
+func (f *CounterFile) read() (int64, error) {
+	b, err := os.ReadFile(f.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, fmt.Errorf("%w: %s does not exist (the counters command creates it)", ErrCounterMissing, f.path)
+		}
+		return 0, fmt.Errorf("%w: read %s: %v", f.unreadable, f.path, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var body counterFileBody
+	if err := dec.Decode(&body); err != nil {
+		return 0, fmt.Errorf("%w: %s is not a counter: %v", f.unreadable, f.path, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return 0, fmt.Errorf("%w: %s has data after the counter", f.unreadable, f.path)
+	}
+	raw := string(body.Last)
+	last, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || last < 0 || last > config.MaxDocumentNumber {
+		return 0, fmt.Errorf("%w: %s last %q is not a whole number 0-%d", f.unreadable, f.path, raw, config.MaxDocumentNumber)
+	}
+	return last, nil
+}
+
+func (f *CounterFile) write(last int64) error {
+	if last < 0 || last > config.MaxDocumentNumber {
+		return fmt.Errorf("%w: refusing to store %d in %s (outside 0-%d)", ErrCounterExhausted, last, f.path, config.MaxDocumentNumber)
+	}
+	if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
+		return fmt.Errorf("persist counter %s: %w", f.path, err)
+	}
+	b, _ := json.Marshal(counterFileBody{Last: json.RawMessage(strconv.FormatInt(last, 10))})
+	if err := atomicfile.Write(f.path, append(b, '\n'), 0o600); err != nil {
+		return fmt.Errorf("persist counter %s: %w", f.path, err)
+	}
+	return nil
+}
+
+// IssuedScan is what a scan of a kind's index and history says about a
+// counter's range: read out of process (provision) or for a route.
+type IssuedScan struct {
+	// Highest is the highest number issued in the range: an index entry or a
+	// history folder.
+	Highest int64
+	// InFlight counts the range's index entries that are not finished: orders
+	// reserved or retryable (a resend writes them), receipts reserved.
+	InFlight int
+	// Unreadable counts index entries the scan could not read.
+	Unreadable int
+}
+
+// ScanIssued reads a kind's index and history for the range min-max. For
+// orders the index is DataDir\orders\index and the history
+// sendOrderDir\history; for receipts DataDir\receipts\index and
+// DataDir\history\receipts. Entries are read leniently (number and state
+// only); a directory that does not exist holds nothing.
+func ScanIssued(kind, dataDir, sendOrderDir string, min, max int64) (IssuedScan, error) {
+	var out IssuedScan
+	indexDir, historyDir := OrderIndexDir(dataDir), ""
+	inFlight := map[string]bool{string(orderReserved): true, string(orderRetryable): true}
+	if strings.TrimSpace(sendOrderDir) != "" {
+		historyDir = filepath.Join(sendOrderDir, "history")
+	}
+	if kind == config.DocumentKindReceipts {
+		indexDir, historyDir = filepath.Join(dataDir, "receipts", "index"), filepath.Join(dataDir, "history", "receipts")
+		inFlight = map[string]bool{string(receiptReserved): true}
+	}
+	err := eachIndexEntry(indexDir, func(e scannedEntry) {
+		if e.Number < min || e.Number > max {
+			return
+		}
+		if e.Number > out.Highest {
+			out.Highest = e.Number
+		}
+		if inFlight[e.State] {
+			out.InFlight++
+		}
+	}, func() { out.Unreadable++ })
+	if err != nil {
+		return out, err
+	}
+	if historyDir != "" {
+		h, err := highestHistoryInRange(historyDir, min, max)
+		if err != nil {
+			return out, err
+		}
+		if h > out.Highest {
+			out.Highest = h
+		}
+	}
+	return out, nil
+}
+
+// OrdersInFlightForFolder counts the order index entries whose frozen rule
+// names folder and that are not finished (reserved or retryable): a resend
+// writes them into that folder.
+func OrdersInFlightForFolder(dataDir, folder string) (int, error) {
+	n := 0
+	err := eachIndexEntry(OrderIndexDir(dataDir), func(e scannedEntry) {
+		if e.Rule != nil && e.Rule.Folder == folder && (e.State == string(orderReserved) || e.State == string(orderRetryable)) {
+			n++
+		}
+	}, func() {})
+	return n, err
+}
+
+// ReceiptsInFlight counts the receipt index entries still reserved: Recover
+// or a repeat finishes them into the receipt folder in use.
+func ReceiptsInFlight(dataDir string) (int, error) {
+	n := 0
+	err := eachIndexEntry(filepath.Join(dataDir, "receipts", "index"), func(e scannedEntry) {
+		if e.State == string(receiptReserved) {
+			n++
+		}
+	}, func() {})
+	return n, err
+}
+
+type scannedEntry struct {
+	Number int64  `json:"number"`
+	State  string `json:"state"`
+	Rule   *struct {
+		Folder string `json:"folder"`
+	} `json:"rule"`
+}
+
+// maxScanEntryBytes bounds one index entry a scan reads (a receipt entry
+// holds its request; an order entry is small).
+const maxScanEntryBytes = 1 << 20
+
+func eachIndexEntry(dir string, f func(scannedEntry), unreadable func()) error {
+	des, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list %s: %w", dir, err)
+	}
+	for _, de := range des {
+		name := de.Name()
+		if de.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		fi, err := de.Info()
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxScanEntryBytes {
+			unreadable()
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		var e scannedEntry
+		if err != nil || json.Unmarshal(b, &e) != nil || e.Number < 1 {
+			unreadable()
+			continue
+		}
+		f(e)
+	}
+	return nil
+}
+
+// highestHistoryInRange is the highest number in min-max with a folder under
+// dir (history/<n>); 0 when there is none.
+func highestHistoryInRange(dir string, min, max int64) (int64, error) {
+	ns, err := historyNumbers(dir)
+	if err != nil {
+		return 0, err
+	}
+	var top int64
+	for _, n := range ns {
+		if n >= min && n <= max && n > top {
+			top = n
+		}
+	}
+	return top, nil
+}
+
+// historyNumbers lists the numbers with a folder under dir: names that are a
+// plain decimal (no sign, no leading zero). A dir that does not exist holds
+// none.
+func historyNumbers(dir string) ([]int64, error) {
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list %s: %w", dir, err)
+	}
+	var out []int64
+	for _, de := range des {
+		n, err := strconv.ParseInt(de.Name(), 10, 64)
+		if err != nil || !de.IsDir() || strconv.FormatInt(n, 10) != de.Name() {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
