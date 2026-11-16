@@ -42,6 +42,12 @@ type ServerDeps struct {
 	// has receipts (erp: hasavshevet + sendReceiptDir); leave it nil (not a
 	// typed nil) otherwise, and the route answers 503.
 	ReceiptWriter handlers.ReceiptWriter
+	// Counters (plan 087) are the box's counters, the set the order queue and
+	// the receipt writer use; nil = built from cfg and DataDir here.
+	Counters *hasavshevet.CounterSet
+	// DataDir is the connector's data directory: where GET /api/counters
+	// scans the indexes a live writer does not hold.
+	DataDir string
 }
 
 // CheckConfig makes every startup check the daemon makes on the config alone:
@@ -134,6 +140,18 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	folderFilesHandler := handlers.NewListFolderFilesHandler(cfg.ImageFolders)
 	fileHandler := handlers.NewFileHandler(cfg.ImageFolders)
 	sendOrderHandler := handlers.NewSendOrderHandler(deps.SendOrderQueue, cfg.OrdersConfigured())
+	// Plan 087: the documentRule route and the read routes of counters and
+	// folders.
+	sendOrderV2Handler := handlers.NewSendOrderV2Handler(deps.SendOrderQueue, cfg)
+	counters := deps.Counters
+	if counters == nil {
+		counters = hasavshevet.NewCounterSet(cfg, deps.DataDir)
+	}
+	receiptWriter, _ := deps.ReceiptWriter.(*hasavshevet.ReceiptWriter)
+	countersHandler := handlers.NewCountersHandler(func() []hasavshevet.CounterStatus {
+		return hasavshevet.ReportCounters(counters, deps.SendOrderQueue, receiptWriter, deps.DataDir, strings.TrimSpace(cfg.SendOrderDir))
+	})
+	capabilitiesHandler := handlers.NewDocumentCapabilitiesHandler(cfg, counters)
 	sendOrderStatusHandler := handlers.NewSendOrderStatusHandler(deps.SendOrderQueue)
 	sendReceiptHandler := handlers.NewSendReceiptHandler(deps.ReceiptWriter, receiptsConfigured, deps.Logger)
 	createQueryHandler := handlers.NewCreateCustomSQLHandler(deps.QueryStore)
@@ -167,6 +185,9 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	mux.Handle("GET /api/folders/list", wrap(folderFilesHandler))
 	mux.Handle("POST /api/file", wrap(fileHandler))
 	mux.Handle("POST /api/sendOrder", wrap(sendOrderHandler))
+	mux.Handle("POST /api/v2/sendOrder", wrap(sendOrderV2Handler))
+	mux.Handle("GET /api/counters", wrap(countersHandler))
+	mux.Handle("GET /api/documents/capabilities", wrap(capabilitiesHandler))
 	// How many accepted orders are not written yet: asked before a restart,
 	// which would drop them (the queue is in memory).
 	mux.Handle("GET /api/sendOrder", wrap(handlers.NewSendOrderQueueHandler(deps.SendOrderQueue)))

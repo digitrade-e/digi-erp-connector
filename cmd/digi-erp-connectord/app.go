@@ -192,13 +192,22 @@ func (a *serverApp) Start() error {
 			"customer details to be supplied in the request.")
 	}
 
-	queue := buildOrderQueue(cfg, dbConn, paths.DataDir(), logSvc)
+	// The order keys and the documents block (plan 087) before anything is
+	// built from them: recovery moves counters, and must only ever do so over
+	// ranges the box has accepted. NewServer checks them again.
+	if err := cfg.ValidateOrders(); err != nil {
+		logSvc.Error("config validation error", err)
+		a.Stop(context.Background())
+		return err
+	}
+	counters := hasavshevet.NewCounterSet(cfg, paths.DataDir())
+	queue := buildOrderQueue(cfg, dbConn, paths.DataDir(), counters, logSvc)
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	queue.Start(queueCtx)
 	a.orderQueue = queue
 	a.queueCancel = queueCancel
 
-	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), logSvc)
+	receiptWriter, err := buildReceiptWriter(cfg, paths.DataDir(), counters, logSvc)
 	if err != nil {
 		logSvc.Error("receipt configuration", err)
 		a.Stop(context.Background())
@@ -221,6 +230,8 @@ func (a *serverApp) Start() error {
 		Logger:         logSvc,
 		SendOrderQueue: queue,
 		QueryStore:     queryStore,
+		Counters:       counters,
+		DataDir:        paths.DataDir(),
 	}
 	if receiptWriter != nil {
 		deps.ReceiptWriter = receiptWriter // never a typed nil in the interface
@@ -326,11 +337,29 @@ func (a *serverApp) Stop(ctx context.Context) {
 // fatal: queries and receipts keep working, and sendOrder answers an error
 // (Accept retries recovery) until it succeeds. Without orders configured the
 // route answers 501 before the queue is reached, so no index is created.
-func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, log logger.LoggerService) *hasavshevet.OrderQueue {
-	numStore := hasavshevet.NewOrderNumberStore(filepath.Join(cfg.SendOrderDir, "lastOrderNumber.json"))
+//
+// Plan 087: the queue numbers orders from the box's counters (counters): a
+// documentRule's, or the default order counter (lastOrderNumber.json).
+func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, counters *hasavshevet.CounterSet, log logger.LoggerService) *hasavshevet.OrderQueue {
+	numStore := counters.OrderNumberStore()
+	if numStore == nil {
+		numStore = hasavshevet.NewOrderNumberStore(filepath.Join(cfg.SendOrderDir, "lastOrderNumber.json"))
+	}
 	queue := hasavshevet.NewOrderQueue(hasavshevet.NewSender(dbConn, cfg, numStore, log), log)
+	queue.UseCounters(counters)
 	if !cfg.OrdersConfigured() {
 		return queue
+	}
+	if cfg.CountersConfigured() || len(cfg.Documents.Folders) > 0 {
+		var cs, fs []string
+		for _, c := range counters.All() {
+			cs = append(cs, fmt.Sprintf("%s (%s %d-%d%s%s)", c.Key, c.Kind, c.Min, c.Max, map[bool]string{true: ", test"}[c.Test], map[bool]string{true: ", retired"}[c.Retired]))
+		}
+		for _, k := range cfg.FolderKeys() {
+			f := cfg.Documents.Folders[k]
+			fs = append(fs, fmt.Sprintf("%s (%s %s %s%s)", k, f.Kind, f.Path, f.NamePattern, map[bool]string{true: ", test"}[f.Test]))
+		}
+		log.Info(fmt.Sprintf("documents (plan 087): counters %v; folders %v; orders without a documentRule use counter %q", cs, fs, cfg.DefaultOrderCounterKey()))
 	}
 	if cfg.OrdersPickup() {
 		log.Info(fmt.Sprintf("orders: model a — one IMOVEIN_<n>.doc per order left in %s for the ERP's scheduler, no importer run; layout %s",
@@ -358,14 +387,18 @@ func buildOrderQueue(cfg config.Config, dbConn *sql.DB, dataDir string, log logg
 // serves. If it fails the writer is still returned: the route retries
 // recovery on each request and answers an error until it succeeds, and orders
 // and queries are not held hostage to it.
-func buildReceiptWriter(cfg config.Config, dataDir string, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
+func buildReceiptWriter(cfg config.Config, dataDir string, counters *hasavshevet.CounterSet, log logger.LoggerService) (*hasavshevet.ReceiptWriter, error) {
 	if !cfg.ReceiptsConfigured() {
 		return nil, nil
 	}
 	if err := hasavshevet.ValidateReceiptConfig(cfg); err != nil {
 		return nil, err
 	}
-	w, err := hasavshevet.NewReceiptWriter(hasavshevet.ReceiptWriterConfigFrom(cfg, dataDir), log)
+	wc := hasavshevet.ReceiptWriterConfigFrom(cfg, dataDir)
+	if c := counters.Receipts(); c != nil {
+		wc.Counter = c // the set the read routes report
+	}
+	w, err := hasavshevet.NewReceiptWriter(wc, log)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +412,7 @@ func buildReceiptWriter(cfg config.Config, dataDir string, log logger.LoggerServ
 	case strings.TrimSpace(cfg.HasReceiptParamFile) != "":
 		model = "b (runs hasExePath with hasReceiptParamFile)"
 	}
-	log.Info(fmt.Sprintf("receipts configured: sendReceiptDir=%q model %s", strings.TrimSpace(cfg.SendReceiptDir), model))
+	log.Info(fmt.Sprintf("receipts configured: folder=%q counter=%s model %s", cfg.ReceiptDir(), w.Counter().Key, model))
 	return w, nil
 }
 

@@ -950,3 +950,31 @@ func newJobID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// highestIssued is the highest order number issued in c's range that this
+// queue knows: the index's numbers read at recovery and every reservation
+// since, and sendOrderDir/history/<n>. known is false before a recovery read
+// the index (the caller scans it then).
+func (q *OrderQueue) highestIssued(c *Counter) (highest int64, known bool, err error) {
+	q.closeMu.Lock()
+	known = q.scanned
+	q.closeMu.Unlock()
+	if !known {
+		return 0, false, nil
+	}
+	q.mu.RLock()
+	for n := range q.byNumber {
+		if c.InRange(n) && n > highest {
+			highest = n
+		}
+	}
+	q.mu.RUnlock()
+	if dir := strings.TrimSpace(q.sender.cfg.SendOrderDir); dir != "" {
+		h, err := highestHistoryInRange(filepath.Join(dir, "history"), c.Min, c.Max)
+		if err != nil {
+			return highest, true, err
+		}
+		highest = max(highest, h)
+	}
+	return highest, true, nil
+}

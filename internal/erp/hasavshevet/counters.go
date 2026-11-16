@@ -547,3 +547,72 @@ func historyNumbers(dir string) ([]int64, error) {
 	}
 	return out, nil
 }
+
+// CounterStatus is one counter as the read routes and provision's state
+// report it.
+type CounterStatus struct {
+	Key           string `json:"key"`
+	Kind          string `json:"kind"`
+	Min           int64  `json:"min"`
+	Max           int64  `json:"max"`
+	Last          int64  `json:"last"`
+	HighestIssued int64  `json:"highestIssued"`
+	Remaining     int64  `json:"remaining"`
+	Test          bool   `json:"test"`
+	Retired       bool   `json:"retired,omitempty"`
+	// Store is the adopted pre-087 store, or "" for a store of its own;
+	// Implicit: no counter is configured and this is today's store.
+	Store        string `json:"store,omitempty"`
+	Implicit     bool   `json:"implicit,omitempty"`
+	Path         string `json:"path"`
+	StorePresent bool   `json:"storePresent"`
+	// InFlight counts the range's unfinished index entries (orders reserved
+	// or retryable, receipts reserved); -1 when not counted (the API route
+	// answers from memory).
+	InFlight int    `json:"inFlight"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ReportCounters reads every counter of set: its last number, the highest
+// issued in its range, what remains. In the daemon q and w answer from
+// memory what they hold (the order index's numbers, the receipt index's);
+// otherwise — provision's state, or a counter no live writer serves — the
+// index and history are scanned. Nothing is written.
+func ReportCounters(set *CounterSet, q *OrderQueue, w *ReceiptWriter, dataDir, sendOrderDir string) []CounterStatus {
+	var out []CounterStatus
+	for _, c := range set.All() {
+		st := CounterStatus{Key: c.Key, Kind: c.Kind, Min: c.Min, Max: c.Max, Test: c.Test, Retired: c.Retired,
+			Store: c.Store, Implicit: c.Implicit, Path: c.Path, StorePresent: c.StorePresent(), InFlight: -1}
+		var errs []string
+		if last, err := c.Last(); err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			st.Last = last
+		}
+		var highest int64
+		var err error
+		known := false
+		switch {
+		case c.Kind == config.DocumentKindOrders && q != nil:
+			highest, known, err = q.highestIssued(c)
+		case c.Kind == config.DocumentKindReceipts && w != nil && w.counter != nil && w.counter.Key == c.Key:
+			highest, known, err = w.HighestIssued(c.Min, c.Max)
+		}
+		if err == nil && !known {
+			var scan IssuedScan
+			scan, err = ScanIssued(c.Kind, dataDir, sendOrderDir, c.Min, c.Max)
+			highest, st.InFlight = scan.Highest, scan.InFlight
+		}
+		if err != nil {
+			errs = append(errs, err.Error())
+		}
+		st.HighestIssued = highest
+		top := max(st.Last, st.HighestIssued, c.Min-1)
+		if st.Remaining = c.Max - top; st.Remaining < 0 {
+			st.Remaining = 0
+		}
+		st.Error = strings.Join(errs, "; ")
+		out = append(out, st)
+	}
+	return out
+}

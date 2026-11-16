@@ -239,7 +239,7 @@ func TestBuildReceiptWriter_RecoversAtStartup(t *testing.T) {
 	plantReserved(t, dataDir, "00000000-0000-4000-8000-000000000001", 1000)
 
 	log := &quietLogger{}
-	w, err := buildReceiptWriter(cfg, dataDir, log)
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), log)
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
@@ -269,7 +269,7 @@ func TestBuildReceiptWriter_FailedRecoveryIsNotFatal(t *testing.T) {
 	}
 
 	log := &quietLogger{}
-	w, err := buildReceiptWriter(cfg, dataDir, log)
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), log)
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v; want a writer and no error", w, err)
 	}
@@ -280,12 +280,12 @@ func TestBuildReceiptWriter_FailedRecoveryIsNotFatal(t *testing.T) {
 }
 
 func TestBuildReceiptWriter_NotConfiguredAndInvalid(t *testing.T) {
-	if w, err := buildReceiptWriter(config.Config{ERP: config.ERPHasavshevet}, t.TempDir(), &quietLogger{}); w != nil || err != nil {
+	if w, err := buildReceiptWriter(config.Config{ERP: config.ERPHasavshevet}, t.TempDir(), nil, &quietLogger{}); w != nil || err != nil {
 		t.Errorf("unconfigured = %v, %v; want nil, nil", w, err)
 	}
 	cfg, _, dataDir := receiptCfg(t)
 	cfg.SendReceiptDir = "herp" // relative
-	if _, err := buildReceiptWriter(cfg, dataDir, &quietLogger{}); err == nil {
+	if _, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), &quietLogger{}); err == nil {
 		t.Error("a relative sendReceiptDir was accepted")
 	}
 }
@@ -297,7 +297,7 @@ func TestStop_ReleasesTheReceiptDataLock(t *testing.T) {
 	if err := hasavshevet.NewReceiptNumberStore(hasavshevet.ReceiptNumberStorePath(dataDir)).Seed(1000); err != nil {
 		t.Fatal(err)
 	}
-	w, err := buildReceiptWriter(cfg, dataDir, &quietLogger{})
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), &quietLogger{})
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
@@ -318,7 +318,7 @@ func TestStop_ReleasesTheReceiptDataLock(t *testing.T) {
 // stop budget leaves the lock to the OS at exit.
 func TestStop_DoesNotHangOnAHeldImportLock(t *testing.T) {
 	cfg, _, dataDir := receiptCfg(t)
-	w, err := buildReceiptWriter(cfg, dataDir, &quietLogger{})
+	w, err := buildReceiptWriter(cfg, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), &quietLogger{})
 	if err != nil || w == nil {
 		t.Fatalf("buildReceiptWriter = %v, %v", w, err)
 	}
@@ -359,7 +359,7 @@ func orderCfg(t *testing.T) (config.Config, string, string) {
 // order whose entry was saved just before a crash moves the counter past it.
 func TestBuildOrderQueue_IndexOnAndRecoveredAtStartup(t *testing.T) {
 	cfg, sendDir, dataDir := orderCfg(t)
-	first := buildOrderQueue(cfg, nil, dataDir, &quietLogger{})
+	first := buildOrderQueue(cfg, nil, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), &quietLogger{})
 	order := hasavshevet.OrderRequest{
 		DocumentType: "ORDER", UserExtID: "1234", DueDate: "2026-11-05", CreatedDate: "2026-11-05",
 		HistoryID: "4711-3f2c9a1e-7b4d-4c8e-9a51-2d6f0b8e4c17", Currency: "ILS", Total: 50,
@@ -375,7 +375,7 @@ func TestBuildOrderQueue_IndexOnAndRecoveredAtStartup(t *testing.T) {
 	}
 
 	log := &quietLogger{}
-	restarted := buildOrderQueue(cfg, nil, dataDir, log)
+	restarted := buildOrderQueue(cfg, nil, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), log)
 	if len(log.errors) != 0 {
 		t.Fatalf("errors logged: %v", log.errors)
 	}
@@ -394,7 +394,7 @@ func TestBuildOrderQueue_IndexOnAndRecoveredAtStartup(t *testing.T) {
 // until it succeeds, while a known historyId is still answered.
 func TestBuildOrderQueue_FailedRecoveryIsNotFatal(t *testing.T) {
 	cfg, sendDir, dataDir := orderCfg(t)
-	first := buildOrderQueue(cfg, nil, dataDir, &quietLogger{})
+	first := buildOrderQueue(cfg, nil, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), &quietLogger{})
 	if _, err := first.Accept(testOrder("rel-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestBuildOrderQueue_FailedRecoveryIsNotFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := &quietLogger{}
-	q := buildOrderQueue(cfg, nil, dataDir, log)
+	q := buildOrderQueue(cfg, nil, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), log)
 	if q == nil || len(log.errors) != 1 || !strings.Contains(log.errors[0], "recovery") {
 		t.Fatalf("queue %v, errors %v; want a queue and the recovery failure logged", q, log.errors)
 	}
@@ -426,7 +426,7 @@ func TestBuildOrderQueue_DamagedEntryIsSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := &quietLogger{}
-	q := buildOrderQueue(cfg, nil, dataDir, log)
+	q := buildOrderQueue(cfg, nil, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), log)
 	if len(log.errors) != 0 {
 		t.Fatalf("errors logged: %v", log.errors)
 	}
@@ -440,7 +440,7 @@ func TestBuildOrderQueue_DamagedEntryIsSkipped(t *testing.T) {
 // their resend writes them under the same numbers instead of "unknown".
 func TestStop_LeavesUnstartedOrdersRetryable(t *testing.T) {
 	cfg, _, dataDir := orderCfg(t)
-	queue := buildOrderQueue(cfg, nil, dataDir, &quietLogger{})
+	queue := buildOrderQueue(cfg, nil, dataDir, hasavshevet.NewCounterSet(cfg, dataDir), &quietLogger{})
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	t.Cleanup(queueCancel)
 	queue.Start(queueCtx)
@@ -481,7 +481,7 @@ func testOrder(historyID string) hasavshevet.OrderRequest {
 // before the queue is reached) and nothing is created in its data directory.
 func TestBuildOrderQueue_NotConfiguredCreatesNothing(t *testing.T) {
 	dataDir := t.TempDir()
-	q := buildOrderQueue(config.Config{ERP: config.ERPHasavshevet}, nil, dataDir, &quietLogger{})
+	q := buildOrderQueue(config.Config{ERP: config.ERPHasavshevet}, nil, dataDir, hasavshevet.NewCounterSet(config.Config{ERP: config.ERPHasavshevet}, dataDir), &quietLogger{})
 	if q == nil {
 		t.Fatal("no queue")
 	}
