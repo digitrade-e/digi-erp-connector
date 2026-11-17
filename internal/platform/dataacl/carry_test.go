@@ -24,7 +24,8 @@ func carryAsPlanned(t *testing.T, acl []byte, tok map[string]bool, root, folder 
 		maskedACEs, _ := ParseACL(masked)
 		want := accessFor(before, tok, true, "") & MaskModify
 		if (want&^accessFor(maskedACEs, tok, true, ""))&^maskSynchronize != 0 {
-			ace, err := CarryACE(sidTrusted, want, CarryFlags(before, tok, tok, want, folder))
+			rights, flags := CarryRights(before, tok, tok, accessFor(before, tok, true, ""), folder)
+			ace, err := CarryACE(sidTrusted, rights, flags)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,5 +178,41 @@ func TestCarry_DeniesUnaccounted(t *testing.T) {
 	aces, _ := ParseACL(testACL(testACE(t, aceTypeAllowed, 0x3, MaskModify, sidUsers, 0, nil)))
 	if DeniesUnaccounted(aces, deny, isUser) {
 		t.Error("no deny at all: unaccounted")
+	}
+}
+
+// Review item 5 (the scheduler's case): a carried entry on a folder is
+// inheritable to files whenever the old DACL handed the account its write
+// down — narrowed to what was handed down when the folder alone gave a
+// little more — so the scheduler can rename and delete the files written
+// there after the lock-down; it is not, and says so, only when the write was
+// the folder's alone.
+func TestCarry_InheritableToFiles(t *testing.T) {
+	tok := map[string]bool{sidTrusted: true, sidUsers: true, sidEveryone: true}
+	cases := []struct {
+		name   string
+		acl    []byte
+		rights uint32
+		flags  byte
+	}{
+		{"Users' Modify handed down", testACL(testACE(t, aceTypeAllowed, 0x3, MaskModify, sidUsers, 0, nil)), MaskModify, 0x3},
+		{"a little more for the folder alone", testACL(
+			testACE(t, aceTypeAllowed, 0x3, MaskModify&^0x8, sidUsers, 0, nil),
+			testACE(t, aceTypeAllowed, 0x0, 0x8, sidEveryone, 0, nil)), MaskModify &^ 0x8, 0x3},
+		{"write for the folder alone", testACL(
+			testACE(t, aceTypeAllowed, 0x0, MaskModify, sidUsers, 0, nil),
+			testACE(t, aceTypeAllowed, 0x3, MaskReadExecute, sidUsers, 0, nil)), MaskModify, 0},
+	}
+	for _, c := range cases {
+		aces, _ := ParseACL(c.acl)
+		r, f := CarryRights(aces, tok, tok, accessFor(aces, tok, true, ""), true)
+		if r != c.rights || f != c.flags {
+			t.Errorf("%s: rights %#x flags %#x, want %#x %#x", c.name, r, f, c.rights, c.flags)
+		}
+	}
+	// A file: never inheritable, every right it had within Modify.
+	aces, _ := ParseACL(testACL(testACE(t, aceTypeAllowed, 0x0, MaskModify, sidUsers, 0, nil)))
+	if r, f := CarryRights(aces, tok, tok, accessFor(aces, tok, true, ""), false); r != MaskModify || f != 0 {
+		t.Errorf("a file: %#x %#x", r, f)
 	}
 }

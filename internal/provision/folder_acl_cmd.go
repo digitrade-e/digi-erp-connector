@@ -412,6 +412,12 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 		// v1.0.32: carry-over — the writers given back their write, and the
 		// ones whose groups could not be resolved (no carry-over for them).
 		out.CarriedOver = plan.Carried
+		for _, c := range plan.Carried {
+			if c.NotInheritable > 0 {
+				a.warn("carried_not_inheritable: %s in folder %s (%s): on %d folder(s) its carried entry is not handed down to new files (the old DACL did not hand its write down) — it may not rename or delete what is written there after the lock-down",
+					c.Name, n, paths[n], c.NotInheritable)
+			}
+		}
 		for _, f := range plan.CarryFailed {
 			a.warn("carry_over_failed: %s in folder %s (%s): %s — nothing is carried over for it, and the lock-down takes the write it had through a group",
 				f.Name, n, paths[n], f.Error)

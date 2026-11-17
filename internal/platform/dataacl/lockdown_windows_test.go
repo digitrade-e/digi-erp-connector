@@ -464,7 +464,7 @@ func TestLockdown_CarryOver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.CarryFailed) != 0 || len(plan.Carried) != 1 || plan.Carried[0].Entries != 4 || plan.Carried[0].Rights != "modify" {
+	if len(plan.CarryFailed) != 0 || len(plan.Carried) != 1 || plan.Carried[0].Entries != 4 || plan.Carried[0].Rights != "modify" || plan.Carried[0].NotInheritable != 0 {
 		t.Fatalf("carried %+v, failed %+v", plan.Carried, plan.CarryFailed)
 	}
 	if p, ok := principal(plan, acct.SID); !ok || p.Before != "modify" || p.After != "modify" || p.Entries != 0 {

@@ -318,6 +318,13 @@ func TestFolderACL_CarryOver(t *testing.T) {
 	if !strings.Contains(string(b), `"carriedOver":[{"sid":"S-1-5-21-1-2-3-1105"`) {
 		t.Errorf("the wire shape: %s", b)
 	}
+	// Review item 5: a carried entry not handed down to new files is said.
+	sys.carryNotInheritable = map[string]int{"S-1-5-21-1-2-3-1105": 1}
+	res, err = ApplyFolderACL(context.Background(), env, lock, true)
+	if err != nil || !warned(res, "carried_not_inheritable: S-1-5-21-1-2-3-1105") || res.FolderACL.Folders[0].CarriedOver[0].NotInheritable != 1 {
+		t.Errorf("not inheritable: %v %v", res.Warnings, err)
+	}
+	sys.carryNotInheritable = nil
 	// Without it: today's lock-down.
 	if _, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true); err != nil || sys.lastCarry {
 		t.Errorf("without carryOver: %v (carry %v)", err, sys.lastCarry)

@@ -147,6 +147,34 @@ func CarryFlags(aces []ACE, allow, deny map[string]bool, rights uint32, folder b
 	return flags
 }
 
+// writeBits are the rights that let an account change what is in a file or
+// folder (write data / add file, append / add folder, its attributes and
+// extended attributes, DELETE).
+const writeBits = 0x2 | 0x4 | 0x10 | 0x100 | 0x10000
+
+// CarryRights is the carried entry for an account that effectively had had
+// on an entry whose old DACL is aces (review item 5, the scheduler's case):
+// had ∩ Modify, inheritable as CarryFlags allows. On a folder whose old DACL
+// handed the account its write down to files — the group's entry was
+// inheritable — but where had holds a little more that was not handed down
+// (an entry for the folder alone), the rights are narrowed to what was
+// handed down, so the entry stays inheritable to files: otherwise the
+// scheduler could not rename or delete the files written there after the
+// lock-down (Modify holds no delete-child). The folder keeps every write bit
+// it had. Never more than had, nor than what was handed down.
+func CarryRights(aces []ACE, allow, deny map[string]bool, had uint32, folder bool) (uint32, byte) {
+	r := had & MaskModify
+	flags := CarryFlags(aces, allow, deny, r, folder)
+	if !folder || flags&0x1 != 0 {
+		return r, flags
+	}
+	files := inheritedCover(aces, allow, deny, true)
+	if narrowed := r & files; r&writeBits&^files == 0 && narrowed&writeBits != 0 {
+		return narrowed, CarryFlags(aces, allow, deny, narrowed, true)
+	}
+	return r, flags
+}
+
 // sidBinary is a SID string's binary form.
 func sidBinary(s string) ([]byte, error) {
 	parts := strings.Split(s, "-")
@@ -245,6 +273,10 @@ type CarriedRights struct {
 	Rights  string `json:"rights"`
 	Entries int    `json:"entries"`
 	Skipped int    `json:"skipped,omitempty"`
+	// NotInheritable: folders whose carried entry is not handed down to new
+	// files (the old DACL did not hand the account its write down): it may
+	// not rename or delete what is written there after the lock-down.
+	NotInheritable int `json:"notInheritable,omitempty"`
 }
 
 // CarryFailure is an account for which no carry-over was possible: its

@@ -125,9 +125,11 @@ type fakeSys struct {
 	lastTrusted   []string            // and whom it trusted
 	lastCarry     bool                // and whether it carried over (v1.0.32)
 	carryFails    map[string]string   // trusted SIDs whose carry-over fails, with why
-	folderRules   FolderRules         // FolderRules (review T3); none by default
-	reparse       map[string]string   // ReparsePointOn by path; otherwise only the path itself is looked at
-	daemon        *fakeDaemon
+	// carryNotInheritable: trusted SIDs whose carried entry is not handed down to files, on how many folders
+	carryNotInheritable map[string]int
+	folderRules         FolderRules       // FolderRules (review T3); none by default
+	reparse             map[string]string // ReparsePointOn by path; otherwise only the path itself is looked at
+	daemon              *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
 	calls   []string
@@ -323,7 +325,7 @@ func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[
 				continue
 			}
 			plan.CarrySIDs = append(plan.CarrySIDs, t)
-			plan.Carried = append(plan.Carried, dataacl.CarriedRights{SID: t, Name: t, Rights: "modify", Entries: 2})
+			plan.Carried = append(plan.Carried, dataacl.CarriedRights{SID: t, Name: t, Rights: "modify", Entries: 2, NotInheritable: s.carryNotInheritable[t]})
 			plan.Principals = append(plan.Principals, dataacl.PrincipalRights{SID: t, Name: t, Before: "none", After: "modify", Entries: 2})
 		}
 	}

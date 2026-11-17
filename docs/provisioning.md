@@ -587,7 +587,11 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   entry with exactly what it effectively had there before (AuthZ on the entry's old descriptor:
   `AuthzInitializeContextFromSid` + `AuthzAccessCheck`, its groups resolved) intersected with Modify: its effective
   rights never grow. On a folder the entry is inheritable to files (OI) and folders (CI) only as far as the old DACL
-  handed the account at least those rights there (a lower bound: an allow that may not apply counts for nothing, a
+  handed the account at least those rights there; where it handed the account its write down to files but the folder
+  alone gave a little more, the rights are narrowed to what was handed down so the entry stays inheritable to files —
+  the scheduler must be able to rename or delete what the connector writes there after the lock-down (Modify holds no
+  delete-child; review item 5). Where the write was the folder's alone, `carriedOver[].notInheritable` counts the
+  folders and `carried_not_inheritable:` warns (a lower bound: an allow that may not apply counts for nothing, a
   deny that may counts); on a file never. It sits after the entry's explicit denies. An entry with a conditional
   entry for the account gets none (`skipped`), and so does one with a deny AuthZ's view cannot account for (review
   C-1: the context comes from an S4U logon — `AUTHZ_REQUIRE_S4U_LOGON`, failing closed to `carry_over_failed` — and
@@ -596,7 +600,7 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   nothing is carried there). An account whose groups cannot be resolved (the domain controller does
   not answer, an error) gets nothing carried over — `carry_over_failed:` warns and `trusted_writer_no_write:` stays —
   and if one resolved for the check no longer does when the run writes, nothing is written (`carry_over_failed`). The
-  answer's `carriedOver: [{sid, name, rights, entries, skipped?}]` per folder; the pre-image and `restore` are
+  answer's `carriedOver: [{sid, name, rights, entries, skipped?, notInheritable?}]` per folder; the pre-image and `restore` are
   unchanged (a restore takes the carried entries away with the rest). Without it (the default): today's lock-down.
   The folder's link to its parent is cut (its DACL protected, its inherited entries kept as explicit and masked the
   same way); every other entry keeps its own protection. An owner that is not SYSTEM, an administrator or

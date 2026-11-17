@@ -223,8 +223,9 @@ type lockdownEntry struct {
 	// carried (v1.0.32) are the rights carried over to each trusted writer
 	// on this entry; skipped the writers given none (a conditional entry
 	// applies to them).
-	carried map[string]uint32
-	skipped []string
+	carried        map[string]uint32
+	skipped        []string
+	notInheritable []string // carriers whose entry on this folder is not handed down to files
 }
 
 // carryEntry adds to after one explicit allow entry per carrier that the
@@ -256,10 +257,15 @@ func carryEntry(e *lockdownEntry, carriers []*authzCtx, owner, group *windows.SI
 		if (want&^now)&^maskSynchronize == 0 {
 			continue // the masking took nothing it had
 		}
-		ace, err := CarryACE(c.sid, want, CarryFlags(aces, c.allow, c.deny, want, folder))
+		rights, flags := CarryRights(aces, c.allow, c.deny, had, folder)
+		ace, err := CarryACE(c.sid, rights, flags)
 		if err != nil {
 			return err
 		}
+		if folder && flags&0x1 == 0 {
+			e.notInheritable = append(e.notInheritable, c.sid)
+		}
+		want = rights
 		add = append(add, ace)
 		if e.carried == nil {
 			e.carried = map[string]uint32{}
@@ -364,11 +370,12 @@ type summary struct {
 	carried        map[string]uint32
 	carriedEntries map[string]int
 	carrySkipped   map[string]int
+	notInheritable map[string]int
 }
 
 func newSummary() *summary {
 	return &summary{before: map[string]uint32{}, after: map[string]uint32{}, entries: map[string]int{}, owners: map[string]int{},
-		carried: map[string]uint32{}, carriedEntries: map[string]int{}, carrySkipped: map[string]int{}}
+		carried: map[string]uint32{}, carriedEntries: map[string]int{}, carrySkipped: map[string]int{}, notInheritable: map[string]int{}}
 }
 
 // carriedRights is the summary's carried rights, one per carrier SID.
@@ -378,7 +385,8 @@ func (s *summary) carriedRights(sids []string) []CarriedRights {
 		if s.carriedEntries[sid] == 0 && s.carrySkipped[sid] == 0 {
 			continue
 		}
-		out = append(out, CarriedRights{SID: sid, Name: sidName(sid), Rights: RightsWord(s.carried[sid]), Entries: s.carriedEntries[sid], Skipped: s.carrySkipped[sid]})
+		out = append(out, CarriedRights{SID: sid, Name: sidName(sid), Rights: RightsWord(s.carried[sid]), Entries: s.carriedEntries[sid], Skipped: s.carrySkipped[sid],
+			NotInheritable: s.notInheritable[sid]})
 	}
 	return out
 }
@@ -393,6 +401,9 @@ func (s *summary) add(e lockdownEntry) {
 	}
 	for _, sid := range e.skipped {
 		s.carrySkipped[sid]++
+	}
+	for _, sid := range e.notInheritable {
+		s.notInheritable[sid]++
 	}
 	if !e.ownerTrusted {
 		if _, ok := s.owners[e.owner]; !ok {
