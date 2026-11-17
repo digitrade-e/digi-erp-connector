@@ -427,3 +427,11 @@ Branch `feat/v1.0.32-followups` from v1.0.31 (775d937); a security review comes 
   shared `herp` — and `done` answers `history_missing` (a new code rather than reusing `not_written`: the file IS there,
   and the fix is a check by hand, not a resend). The comparison streams both files (64 KiB blocks, sizes first), so the
   old 8 MiB read cap is gone and a large history copy compares instead of counting as absent.
+- **MINOR 2, `acceptHistoryOnly` for model (b) only** (`hasavshevet/inflight.go` `historyOnlyOK`,
+  `ErrDeliveryLeavesFile`): a typed-folder order (a frozen rule) or a model (a) order refuses the flag
+  (`history_only`). Their delivery leaves the file, or the importer's `*.MASOFON2.BAK` rename of it, so history alone
+  says the document never got there. Decision: the model is today's config, because the entry does not record it. A
+  configured `sendOrderPickupDir` counts as model (a), the same test the view uses to decide whether to look for pickup
+  files. Those two orders now have no remote way out on history alone (`fail` still answers `may_be_written` while the
+  history copy exists). That is accepted: the fix is by hand, putting the history copy where the importer reads it,
+  whose rename then proves `done`.

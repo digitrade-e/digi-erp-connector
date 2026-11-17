@@ -523,9 +523,14 @@ the link; WinRM too), not sealed.
   shows the file is the connector's — it may be planted, or the legacy app's under the same number in a shared folder;
   check Hashavshevet and the folder by hand. The history copy
   alone is `history_only`: every path writes it BEFORE the document reaches Hashavshevet (model (a) and typed folders
-  publish after it; model (b) runs has.exe after it; a receipt's `.prm` and `.doc` come after it). An order may be
-  resolved on it only with `acceptHistoryOnly: true` — model (b) truly leaves nothing else after a real import, so a
-  person confirms Hashavshevet has document `n`; the check answer names it (`acceptHistoryOnly`, `entry.proof:
+  publish after it; model (b) runs has.exe after it; a receipt's `.prm` and `.doc` come after it). A **model (b)**
+  order (no rule, no pickup folder configured) may be resolved on it only with `acceptHistoryOnly: true` — model (b)
+  truly leaves nothing else after a real import (the next order overwrites `IMOVEIN.doc`), so a person confirms
+  Hashavshevet has document `n`. **Model (a) and typed-folder orders refuse the flag** (`history_only`, re-review
+  MINOR 2): their delivery leaves the file or the importer's rename of it, so the history copy alone says it was never
+  delivered — check Hashavshevet and the folder by hand; if the document is missing, put the history copy where the
+  importer reads it, and its rename then proves `done`. The model is judged by today's config (the entry does not
+  record it): a pickup folder configured means model (a). The check answer names the flag (`acceptHistoryOnly`, `entry.proof:
   "history-only"`) for the approval form. A receipt with only its history copy is never marked written: `history_only`,
   and Recover delivers it (its folder allowed, its counter's range holding it: the next start or a repeat of its key).
   Nothing at all: `not_written`. The entry becomes `written`, naming its files; for a receipt the connector ran no
@@ -691,7 +696,7 @@ actually changed.
 | `carry_over_failed` | `folder-acl` with `carryOver` (v1.0.32): a trusted writer the check carried over could not be resolved again before the lock-down wrote anything — nothing written |
 | `entry_missing`, `entry_moved`, `entry_final` | `inflight` (review R6): no order with that `historyId` / no receipt with that number / the entry's state is not `expect` / it is written or failed already |
 | `entry_busy` | `inflight`: the running connector has the order queued or is writing it; another process holds the receipt data |
-| `may_be_written`, `not_written`, `history_only`, `history_missing` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` with no delivered file (nor its rename) with the history copy's bytes and no history copy / `done` on the history copy alone — an order: `acceptHistoryOnly` after confirming Hashavshevet has it; a receipt: never (Recover delivers it) / `done` on a delivered file (or rename) with no readable history copy to show it is the connector's |
+| `may_be_written`, `not_written`, `history_only`, `history_missing` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` with no delivered file (nor its rename) with the history copy's bytes and no history copy / `done` on the history copy alone — a model (b) order: `acceptHistoryOnly` after confirming Hashavshevet has it; model (a), typed folders: by hand; a receipt: never (Recover delivers it) / `done` on a delivered file (or rename) with no readable history copy to show it is the connector's |
 | `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |

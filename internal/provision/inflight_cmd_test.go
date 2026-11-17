@@ -202,3 +202,12 @@ func TestInflight_HistoryMissingCode(t *testing.T) {
 		t.Errorf("fix %q", r.Fix)
 	}
 }
+
+// Re-review MINOR 2: acceptHistoryOnly outside model (b) is history_only,
+// its fix the importer's way (not acceptHistoryOnly again).
+func TestInflight_DeliveryLeavesFileCode(t *testing.T) {
+	err := inflightRefusal(fmt.Errorf("%w (%w): order 7", hasavshevet.ErrInflightHistoryOnly, hasavshevet.ErrDeliveryLeavesFile))
+	if r := wantRefusal(t, err, CodeHistoryOnly); !strings.Contains(r.Fix, "model (b) orders only") {
+		t.Errorf("fix %q", r.Fix)
+	}
+}

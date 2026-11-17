@@ -105,8 +105,8 @@ func writeFile(t *testing.T, p, content string) string {
 // Review R6-1: done stands only on proof of DELIVERY — the delivered file,
 // or the importer's *.MASOFON2.BAK rename of it, with the history copy's
 // bytes. The history copy alone (written before the document is delivered,
-// in every path) is history_only; an order may be resolved on it only with
-// acceptHistoryOnly. A planted file with other bytes proves nothing (m-a).
+// in every path) is history_only; a model (b) order may be resolved on it
+// only with acceptHistoryOnly. A planted file with other bytes proves nothing (m-a).
 // fail is refused while any file of the order exists.
 func TestInflight_OrderDoneNeedsDelivery(t *testing.T) {
 	h := newOrderHarness(t)
@@ -119,19 +119,33 @@ func TestInflight_OrderDoneNeedsDelivery(t *testing.T) {
 	cfg := config.Config{SendOrderDir: h.sendDir, SendOrderPickupDir: pickup,
 		Documents: config.DocumentsConfig{Folders: map[string]config.FolderConfig{"herp": {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}}}
 
-	// A model (b) order with its history copy only.
+	// A model (b) order (no pickup folder) with its history copy only.
+	cfgB := cfg
+	cfgB.SendOrderPickupDir = ""
 	h.reservedOrder("H-b", 7, nil)
 	h.history(7)
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
+	if _, err := ResolveOrder(h.dataDir, cfgB, "H-b", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
 		t.Fatalf("fail with the history copy there: %v", err)
 	}
-	if v, _ := InspectOrder(h.dataDir, cfg, "H-b", inflightNow); v.Proof != ProofHistoryOnly {
+	if v, _ := InspectOrder(h.dataDir, cfgB, "H-b", inflightNow); v.Proof != ProofHistoryOnly {
 		t.Errorf("proof %q", v.Proof)
 	}
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightHistoryOnly) {
+	if _, err := ResolveOrder(h.dataDir, cfgB, "H-b", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightHistoryOnly) {
 		t.Fatalf("done on the history copy alone: %v, want history_only", err)
 	}
-	r, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveDone, "cs-inflight-1", true, inflightNow)
+	// Re-review MINOR 2: acceptHistoryOnly is model (b)'s only. The same
+	// order under model (a) (a pickup folder), and a typed-folder order:
+	// their delivery leaves a file or its rename, so history alone is
+	// refused even with the flag.
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveDone, "cs-inflight-1", true, inflightNow); !errors.Is(err, ErrDeliveryLeavesFile) || !errors.Is(err, ErrInflightHistoryOnly) {
+		t.Fatalf("acceptHistoryOnly under model (a): %v, want history_only (delivery leaves file)", err)
+	}
+	h.reservedOrder("H-t", 11, &storedRule{Counter: "b2b", Folder: "herp", FileName: "IMOVEIN_11.doc"})
+	h.history(11)
+	if _, err := ResolveOrder(h.dataDir, cfgB, "H-t", "reserved", ResolveDone, "cs-inflight-1", true, inflightNow); !errors.Is(err, ErrDeliveryLeavesFile) {
+		t.Fatalf("acceptHistoryOnly for a typed folder: %v, want history_only (delivery leaves file)", err)
+	}
+	r, err := ResolveOrder(h.dataDir, cfgB, "H-b", "reserved", ResolveDone, "cs-inflight-1", true, inflightNow)
 	if err != nil || r.State != "written" || !strings.Contains(r.Note, "acceptHistoryOnly") {
 		t.Fatalf("done with acceptHistoryOnly: %+v %v", r, err)
 	}

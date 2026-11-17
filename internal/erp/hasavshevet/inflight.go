@@ -87,6 +87,11 @@ var (
 	// rename) is there but no readable history copy to show it is the
 	// connector's (history_missing; re-review MINOR 1).
 	ErrInflightHistoryMissing = errors.New("INFLIGHT_HISTORY_MISSING")
+	// ErrDeliveryLeavesFile rides with ErrInflightHistoryOnly for an order
+	// of model (a) or a typed folder: their delivery leaves a file (or its
+	// rename), so the history copy alone says it was not delivered, and
+	// acceptHistoryOnly is refused (re-review MINOR 2).
+	ErrDeliveryLeavesFile = errors.New("DELIVERY_LEAVES_FILE")
 	// ErrRecoverDelivers rides with ErrInflightHistoryOnly for a receipt:
 	// Recover (or a repeat of its key) delivers it from its stored request.
 	ErrRecoverDelivers = errors.New("RECOVER_DELIVERS")
@@ -170,6 +175,12 @@ type InflightEntry struct {
 	// Proof is what done would stand on: delivered, imported (a file with a
 	// readable history copy's bytes), history-only, none.
 	Proof string `json:"proof"`
+	// historyOnlyOK: the history copy alone may carry done with
+	// acceptHistoryOnly — a rule-less model (b) order only (re-review
+	// MINOR 2). Model (a) and typed folders deliver a file the importer
+	// leaves (or renames *.MASOFON2.BAK), so neither there says it was never
+	// delivered; model (b)'s IMOVEIN.doc is overwritten by the next order.
+	historyOnlyOK bool
 }
 
 // proofFiles are the delivered or imported files that prove delivery: they
@@ -247,6 +258,9 @@ func CheckResolution(e *InflightEntry, resolve string, acceptHistoryOnly bool) e
 		case e.hasHistory() && e.Kind == InflightReceipts:
 			return fmt.Errorf("%w (%w): receipt %d has only its history copy, written before the receipt reaches the folder: it was not delivered (%s)",
 				ErrInflightHistoryOnly, ErrRecoverDelivers, e.Number, describeFiles(e.Candidates))
+		case e.hasHistory() && acceptHistoryOnly && !e.historyOnlyOK:
+			return fmt.Errorf("%w (%w): order %d goes to %s, whose delivery leaves its file or the importer's rename of it — neither is here, so the history copy alone says it was never delivered; acceptHistoryOnly is for model (b) orders only (%s)",
+				ErrInflightHistoryOnly, ErrDeliveryLeavesFile, e.Number, e.Folder, describeFiles(e.Candidates))
 		case e.hasHistory() && !acceptHistoryOnly:
 			return fmt.Errorf("%w: order %d has only its history copy, written before the document is delivered: nothing proves Hashavshevet got it (%s)",
 				ErrInflightHistoryOnly, e.Number, describeFiles(e.Candidates))
@@ -446,6 +460,9 @@ func orderView(cfg config.Config, dataDir string, e *orderIndexEntry, now time.T
 	} else {
 		v.Counter = counterHolding(cfg, dataDir, config.DocumentKindOrders, e.Number)
 		v.Folder = "sendOrderDir"
+		// The model is today's config (the entry does not record it): with a
+		// pickup folder configured the order is taken as model (a).
+		v.historyOnlyOK = strings.TrimSpace(cfg.SendOrderPickupDir) == ""
 		// Model (a) delivers the scheduler's file into the pickup folder; the
 		// model may have changed since the reservation, so it is looked for
 		// whenever a pickup folder is configured. Model (b) delivers

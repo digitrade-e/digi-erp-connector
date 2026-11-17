@@ -254,6 +254,9 @@ func inflightRefusal(err error) error {
 		return refuse(CodeNotWritten, "resolve it as failed, or let it be written (a repeat of its key)", "%v", err)
 	case errors.Is(err, hasavshevet.ErrInflightHistoryMissing):
 		return refuse(CodeHistoryMissing, "check Hashavshevet (the document's number) and the folder by hand: without its history copy nothing shows the file is the connector's — never resolve on it from afar", "%v", err)
+	case errors.Is(err, hasavshevet.ErrDeliveryLeavesFile):
+		return refuse(CodeHistoryOnly, "acceptHistoryOnly is for model (b) orders only: check Hashavshevet (Asmahta n) and the folder by hand — if it lacks the document, "+
+			"put the history copy where the importer reads it; once imported, its rename proves done", "%v", err)
 	case errors.Is(err, hasavshevet.ErrRecoverDelivers):
 		return refuse(CodeHistoryOnly, "let Recover deliver it: once its folder is allowed and its counter's range holds it, the next start (or a repeat of its key) "+
 			"writes the receipt from its stored request — a receipt is never marked written on its history copy", "%v", err)
