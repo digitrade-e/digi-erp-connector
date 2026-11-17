@@ -193,3 +193,12 @@ func TestInflight_CommandReceipt(t *testing.T) {
 		t.Fatalf("fail: %+v %v", res, err)
 	}
 }
+
+// Re-review MINOR 1: a delivered file with no readable history copy is
+// history_missing, its fix a check by hand.
+func TestInflight_HistoryMissingCode(t *testing.T) {
+	err := inflightRefusal(fmt.Errorf("%w: order 7", hasavshevet.ErrInflightHistoryMissing))
+	if r := wantRefusal(t, err, CodeHistoryMissing); !strings.Contains(r.Fix, "by hand") {
+		t.Errorf("fix %q", r.Fix)
+	}
+}

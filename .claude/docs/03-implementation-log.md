@@ -418,3 +418,12 @@ Branch `feat/v1.0.32-followups` from v1.0.31 (775d937); a security review comes 
 - **ProtectTree / ProtectFile** keep the auto-inherited mark (templates carry P|AI|REQ); entries written before are
   not rewritten for it (the comparison ignores the mark — a one-time rewrite of the whole data directory was not worth
   it: its root is truly protected, so no propagation reaches it).
+
+## 2026-11-17 — v1.0.32: the re-review's minors (at dfa8a31)
+
+- **MINOR 1, `history_missing`** (`hasavshevet/inflight.go`): a delivered or imported file proves `done` only when its
+  bytes equal a READABLE history copy's. Without one (missing, a link, unreadable) the connector cannot show the file
+  is its own — it writes history first, so the file may be planted, or the legacy app's under the same number in a
+  shared `herp` — and `done` answers `history_missing` (a new code rather than reusing `not_written`: the file IS there,
+  and the fix is a check by hand, not a resend). The comparison streams both files (64 KiB blocks, sizes first), so the
+  old 8 MiB read cap is gone and a large history copy compares instead of counting as absent.

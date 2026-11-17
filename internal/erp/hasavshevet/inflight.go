@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -82,6 +83,10 @@ var (
 	// which every path writes before the document is delivered
 	// (history_only; an order: acceptHistoryOnly).
 	ErrInflightHistoryOnly = errors.New("INFLIGHT_HISTORY_ONLY")
+	// ErrInflightHistoryMissing: done refused — a delivered file (or its
+	// rename) is there but no readable history copy to show it is the
+	// connector's (history_missing; re-review MINOR 1).
+	ErrInflightHistoryMissing = errors.New("INFLIGHT_HISTORY_MISSING")
 	// ErrRecoverDelivers rides with ErrInflightHistoryOnly for a receipt:
 	// Recover (or a repeat of its key) delivers it from its stored request.
 	ErrRecoverDelivers = errors.New("RECOVER_DELIVERS")
@@ -162,21 +167,32 @@ type InflightEntry struct {
 	// (a resolution's change set and time among them).
 	Note       string         `json:"note,omitempty"`
 	Candidates []InflightFile `json:"candidates"`
-	// Proof is what done would stand on: delivered, imported (a file with the
-	// history copy's bytes, or with none to compare), history-only, none.
+	// Proof is what done would stand on: delivered, imported (a file with a
+	// readable history copy's bytes), history-only, none.
 	Proof string `json:"proof"`
 }
 
 // proofFiles are the delivered or imported files that prove delivery: they
-// exist and have the history copy's bytes (or there is no history copy).
+// exist and have a readable history copy's bytes.
 func (e *InflightEntry) proofFiles() []InflightFile {
 	var out []InflightFile
 	for _, c := range e.Candidates {
-		if (c.Role == RoleDelivered || c.Role == RoleImported) && c.Exists && (c.MatchesHistory == nil || *c.MatchesHistory) {
+		if (c.Role == RoleDelivered || c.Role == RoleImported) && c.Exists && c.MatchesHistory != nil && *c.MatchesHistory {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// unprovable reports whether a delivered or imported file exists that no
+// readable history copy could be compared with.
+func (e *InflightEntry) unprovable() bool {
+	for _, c := range e.Candidates {
+		if (c.Role == RoleDelivered || c.Role == RoleImported) && c.Exists && c.MatchesHistory == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *InflightEntry) hasHistory() bool {
@@ -205,7 +221,7 @@ func (e *InflightEntry) setProof() {
 
 // CheckResolution is whether resolve (fail, done) may be applied to e: nil,
 // or ErrInflightFinal, ErrInflightMayBeWritten, ErrInflightNotWritten,
-// ErrInflightHistoryOnly. acceptHistoryOnly lets done stand on an order's
+// ErrInflightHistoryOnly, ErrInflightHistoryMissing. acceptHistoryOnly lets done stand on an order's
 // history copy alone (a person confirmed Hashavshevet has it).
 func CheckResolution(e *InflightEntry, resolve string, acceptHistoryOnly bool) error {
 	switch orderState(e.State) {
@@ -225,6 +241,9 @@ func CheckResolution(e *InflightEntry, resolve string, acceptHistoryOnly bool) e
 	case ResolveDone:
 		switch {
 		case len(e.proofFiles()) > 0:
+		case e.unprovable():
+			return fmt.Errorf("%w: a file of %s %d is there but no readable history copy — the connector writes that first, so nothing shows the file is its own (planted, or another writer's under the same number): %s",
+				ErrInflightHistoryMissing, singular(e.Kind), e.Number, describeFiles(e.Candidates))
 		case e.hasHistory() && e.Kind == InflightReceipts:
 			return fmt.Errorf("%w (%w): receipt %d has only its history copy, written before the receipt reaches the folder: it was not delivered (%s)",
 				ErrInflightHistoryOnly, ErrRecoverDelivers, e.Number, describeFiles(e.Candidates))
@@ -276,18 +295,50 @@ func lookFor(path, role string) InflightFile {
 	return f
 }
 
-// maxCompareBytes bounds a document read to compare it with its history copy.
-const maxCompareBytes = 8 << 20
-
-// readSmall reads a candidate (never following a link: Lstat first) up to
-// maxCompareBytes; ok false when it cannot be.
-func readCandidate(path string) ([]byte, bool) {
+// plainFile reports whether path is a regular file (Lstat: never following
+// a link), and its size.
+func plainFile(path string) (int64, bool) {
 	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxCompareBytes {
-		return nil, false
+	if err != nil || !fi.Mode().IsRegular() {
+		return 0, false
 	}
-	b, err := os.ReadFile(path)
-	return b, err == nil
+	return fi.Size(), true
+}
+
+// sameContent reports whether a and b, both plain files, hold the same
+// bytes — streamed, whatever their size; false when either cannot be read.
+func sameContent(a, b string) bool {
+	sa, okA := plainFile(a)
+	sb, okB := plainFile(b)
+	if !okA || !okB || sa != sb {
+		return false
+	}
+	fa, err := os.Open(a)
+	if err != nil {
+		return false
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false
+	}
+	defer fb.Close()
+	ba, bb := make([]byte, 64<<10), make([]byte, 64<<10)
+	for {
+		na, errA := io.ReadFull(fa, ba)
+		nb, errB := io.ReadFull(fb, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false
+		}
+		doneA := errors.Is(errA, io.EOF) || errors.Is(errA, io.ErrUnexpectedEOF)
+		doneB := errors.Is(errB, io.EOF) || errors.Is(errB, io.ErrUnexpectedEOF)
+		switch {
+		case doneA && doneB:
+			return true
+		case errA != nil && !doneA, errB != nil && !doneB, doneA != doneB:
+			return false
+		}
+	}
 }
 
 // renamesOf are the importer's renames in dir of a delivered file whose name
@@ -321,9 +372,14 @@ func delivered(dir, name string) []InflightFile {
 // compareWithHistory sets MatchesHistory on every existing delivered or
 // imported candidate, against the history copy at historyDoc (when it
 // exists and reads).
+//
+// Without a readable history copy MatchesHistory stays nil, and the file
+// proves nothing (re-review MINOR 1): the connector always writes the history
+// copy first, so a delivered file without it is not provably the
+// connector's — planted, or another writer's (the legacy app's) under the
+// same number in a shared folder.
 func compareWithHistory(fs []InflightFile, historyDoc string) {
-	h, ok := readCandidate(historyDoc)
-	if !ok {
+	if _, ok := plainFile(historyDoc); !ok {
 		return
 	}
 	for i := range fs {
@@ -331,8 +387,7 @@ func compareWithHistory(fs []InflightFile, historyDoc string) {
 		if (c.Role != RoleDelivered && c.Role != RoleImported) || !c.Exists {
 			continue
 		}
-		b, ok := readCandidate(c.Path)
-		same := ok && bytes.Equal(b, h)
+		same := sameContent(c.Path, historyDoc)
 		c.MatchesHistory = &same
 	}
 }
@@ -476,11 +531,13 @@ func ResolveOrder(dataDir string, cfg config.Config, historyID, expect, resolve,
 }
 
 // existingPaths are the files that exist and are this entry's: the history
-// copies and the proof files (never a delivered file with other bytes).
+// copies and the proof files (never a delivered file with other bytes, or
+// one no history copy could be compared with).
 func existingPaths(fs []InflightFile) []string {
 	var out []string
 	for _, f := range fs {
-		if f.Exists && (f.MatchesHistory == nil || *f.MatchesHistory) {
+		proves := f.MatchesHistory != nil && *f.MatchesHistory
+		if f.Exists && (f.Role == RoleHistory || proves) {
 			out = append(out, f.Path)
 		}
 	}

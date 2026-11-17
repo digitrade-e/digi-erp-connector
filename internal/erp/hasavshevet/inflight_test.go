@@ -290,8 +290,9 @@ func TestReceiptIndex_FailedState(t *testing.T) {
 }
 
 // Review m-b: history pruned and the delivered file renamed by the importer
-// (*.MASOFON2.BAK) is an order the books have — fail is refused, done
-// accepted on the rename; the same for a receipt.
+// (*.MASOFON2.BAK) may be an order the books have — fail is refused; done
+// needs the history copy to show it is the connector's; the same for a
+// receipt.
 func TestInflight_FailSeesTheImportersRename(t *testing.T) {
 	h := newOrderHarness(t)
 	pickup := filepath.Join(t.TempDir(), "pickup")
@@ -301,8 +302,10 @@ func TestInflight_FailSeesTheImportersRename(t *testing.T) {
 	if _, err := ResolveOrder(h.dataDir, cfg, "H-p", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
 		t.Fatalf("fail with the scheduler's rename there: %v, want may_be_written", err)
 	}
-	if r, err := ResolveOrder(h.dataDir, cfg, "H-p", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); err != nil || r.State != "written" {
-		t.Fatalf("done on the rename: %+v %v", r, err)
+	// …and done does not stand on it either: without its history copy
+	// nothing shows the file is the connector's (re-review MINOR 1).
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-p", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightHistoryMissing) {
+		t.Fatalf("done on the rename with no history copy: %v, want history_missing", err)
 	}
 
 	rh := newReceiptHarness(t, 1000)
@@ -310,5 +313,32 @@ func TestInflight_FailSeesTheImportersRename(t *testing.T) {
 	writeFile(t, filepath.Join(rh.sendDir, "KUPAIN_1000.doc.1.MASOFON2.BAK"), "receipt")
 	if _, err := ResolveReceipt(rh.dataDir, config.Config{SendReceiptDir: rh.sendDir}, 1000, "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
 		t.Fatalf("receipt fail with the rename there: %v", err)
+	}
+}
+
+// Re-review MINOR 1: a delivered file with no readable history copy proves
+// nothing — the connector writes history first, so it may be planted, or
+// the legacy app's file under the same number in a shared folder:
+// history_missing. A history copy over 8 MiB is compared by streaming.
+func TestInflight_DeliveredWithoutHistoryProvesNothing(t *testing.T) {
+	h := newOrderHarness(t)
+	pickup := filepath.Join(t.TempDir(), "pickup")
+	cfg := config.Config{SendOrderDir: h.sendDir, SendOrderPickupDir: pickup}
+	h.reservedOrder("H-x", 20, nil)
+	writeFile(t, filepath.Join(pickup, "IMOVEIN_20.doc"), "the legacy app's order 20")
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-x", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightHistoryMissing) {
+		t.Fatalf("done on a delivered file without history: %v, want history_missing", err)
+	}
+
+	big := strings.Repeat("0123456789abcdef", 600_000) // 9.6 MB, over the old 8 MiB read
+	h.reservedOrder("H-y", 21, nil)
+	writeFile(t, filepath.Join(h.sendDir, "history", "21", "IMOVEIN_21.doc"), big)
+	writeFile(t, filepath.Join(pickup, "IMOVEIN_21.doc"), big[:len(big)-1]+"X")
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-y", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); err == nil {
+		t.Fatal("done on a large file that differs from its history copy in the last byte")
+	}
+	writeFile(t, filepath.Join(pickup, "IMOVEIN_21.doc"), big)
+	if r, err := ResolveOrder(h.dataDir, cfg, "H-y", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); err != nil || r.Proof != ProofDelivered {
+		t.Fatalf("done on a large delivered file: %+v %v", r, err)
 	}
 }

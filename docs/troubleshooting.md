@@ -306,7 +306,8 @@ resolves one such entry — or a `retryable` one, or a `reserved` receipt — wi
 `inflight-check` shows it (state, number, counter, folder, frozen rule, age, and which of its candidate files exist),
 then `inflight` with `resolve: "fail"` (only when none of its files exists: `may_be_written` otherwise) or
 `resolve: "done"` (only on proof of delivery — the delivered file or the importer's `*.MASOFON2.BAK` rename of it, with
-the history copy's bytes; the history copy alone is `history_only`, which an order passes only with
+the history copy's bytes; such a file without a readable history copy is `history_missing` — check Hashavshevet and the
+folder by hand; the history copy alone is `history_only`, which an order passes only with
 `acceptHistoryOnly: true` once Hashavshevet is checked to have Asmahta `n`). The steps below are the same decisions by
 hand.
 

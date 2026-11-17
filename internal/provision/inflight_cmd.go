@@ -52,6 +52,8 @@ const (
 	CodeMayBeWritten = "may_be_written"
 	CodeNotWritten   = "not_written"
 	CodeHistoryOnly  = "history_only" // done on the history copy alone (review R6-1)
+	// CodeHistoryMissing: done on a delivered file with no readable history copy (re-review MINOR 1)
+	CodeHistoryMissing = "history_missing"
 )
 
 // InflightInput is the inflight command's stdin.
@@ -250,6 +252,8 @@ func inflightRefusal(err error) error {
 		return refuse(CodeMayBeWritten, "if Hashavshevet has the document, resolve it as done; else move the file aside after checking it, then run it again", "%v", err)
 	case errors.Is(err, hasavshevet.ErrInflightNotWritten):
 		return refuse(CodeNotWritten, "resolve it as failed, or let it be written (a repeat of its key)", "%v", err)
+	case errors.Is(err, hasavshevet.ErrInflightHistoryMissing):
+		return refuse(CodeHistoryMissing, "check Hashavshevet (the document's number) and the folder by hand: without its history copy nothing shows the file is the connector's — never resolve on it from afar", "%v", err)
 	case errors.Is(err, hasavshevet.ErrRecoverDelivers):
 		return refuse(CodeHistoryOnly, "let Recover deliver it: once its folder is allowed and its counter's range holds it, the next start (or a repeat of its key) "+
 			"writes the receipt from its stored request — a receipt is never marked written on its history copy", "%v", err)
