@@ -23,7 +23,8 @@ import (
 //   - fail: a reserved or retryable entry that was never written becomes
 //     failed (a receipt: failed, a state of its own). The box first proves
 //     no file of it exists: neither the file by its frozen name in its
-//     folder, nor the pickup file, nor the history copy
+//     folder, nor the pickup file, nor the importer's *.MASOFON2.BAK rename
+//     of either (review m-b), nor the history copy
 //     (ErrInflightMayBeWritten otherwise; a place that cannot be looked at
 //     counts as written).
 //   - done (review R6-1): a reserved or retryable entry becomes written only
@@ -214,8 +215,10 @@ func CheckResolution(e *InflightEntry, resolve string, acceptHistoryOnly bool) e
 	}
 	switch resolve {
 	case ResolveFail:
+		// Review m-b: the importer's rename counts too — history pruned and
+		// the delivered file renamed *.MASOFON2.BAK is an order the books have.
 		for _, c := range e.Candidates {
-			if c.Error != "" || (c.Exists && c.Role != RoleImported) {
+			if c.Error != "" || c.Exists {
 				return fmt.Errorf("%w: %s %d may have been written: %s", ErrInflightMayBeWritten, singular(e.Kind), e.Number, describeFiles(e.Candidates))
 			}
 		}

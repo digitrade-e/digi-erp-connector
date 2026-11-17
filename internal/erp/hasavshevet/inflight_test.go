@@ -288,3 +288,27 @@ func TestReceiptIndex_FailedState(t *testing.T) {
 		t.Error("an unknown state read back")
 	}
 }
+
+// Review m-b: history pruned and the delivered file renamed by the importer
+// (*.MASOFON2.BAK) is an order the books have — fail is refused, done
+// accepted on the rename; the same for a receipt.
+func TestInflight_FailSeesTheImportersRename(t *testing.T) {
+	h := newOrderHarness(t)
+	pickup := filepath.Join(t.TempDir(), "pickup")
+	cfg := config.Config{SendOrderDir: h.sendDir, SendOrderPickupDir: pickup}
+	h.reservedOrder("H-p", 12, nil)
+	writeFile(t, filepath.Join(pickup, "imovein_12.doc.MASOFON2.BAK"), "order 12") // no history copy: pruned
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-p", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
+		t.Fatalf("fail with the scheduler's rename there: %v, want may_be_written", err)
+	}
+	if r, err := ResolveOrder(h.dataDir, cfg, "H-p", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); err != nil || r.State != "written" {
+		t.Fatalf("done on the rename: %+v %v", r, err)
+	}
+
+	rh := newReceiptHarness(t, 1000)
+	rh.reservedReceipt(testKey(4), 1000)
+	writeFile(t, filepath.Join(rh.sendDir, "KUPAIN_1000.doc.1.MASOFON2.BAK"), "receipt")
+	if _, err := ResolveReceipt(rh.dataDir, config.Config{SendReceiptDir: rh.sendDir}, 1000, "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
+		t.Fatalf("receipt fail with the rename there: %v", err)
+	}
+}

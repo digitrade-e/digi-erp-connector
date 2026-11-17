@@ -513,8 +513,10 @@ the link; WinRM too), not sealed.
   `sendOrderDir\history\<n>\IMOVEIN_<n>.doc` / `.prm`, `DataDir\history\receipts\<n>\KUPAIN_<n>.doc`. A delivered or
   imported file carries `matchesHistory` (its bytes against the history copy's). A place that cannot be looked at (a
   typed folder no longer configured) counts as written.
-- **`fail`**: only when none exists (`may_be_written` otherwise — check Hashavshevet, Asmahta `n`, then resolve it as
-  done, or move the file aside after checking it). An order becomes `failed`; a receipt `failed`, its number void.
+- **`fail`**: only when none exists — the importer's `*.MASOFON2.BAK` rename included (review m-b: history pruned and
+  the file imported is an order the books have) — `may_be_written` otherwise (check Hashavshevet, Asmahta `n`, then
+  resolve it as done, or move the file aside after checking it). **Never prune `history\` while an entry is
+  unfinished**: model (b)'s renames name no number, so its history copy is the only proof there. An order becomes `failed`; a receipt `failed`, its number void.
 - **`done`** (review R6-1): only on proof of **delivery** — a `delivered` or `imported` file with the history copy's
   bytes (or with no history copy to compare with); a planted file with other bytes proves nothing. The history copy
   alone is `history_only`: every path writes it BEFORE the document reaches Hashavshevet (model (a) and typed folders
