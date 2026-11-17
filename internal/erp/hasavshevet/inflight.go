@@ -1,6 +1,7 @@
 package hasavshevet
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -25,9 +26,17 @@ import (
 //     folder, nor the pickup file, nor the history copy
 //     (ErrInflightMayBeWritten otherwise; a place that cannot be looked at
 //     counts as written).
-//   - done: a reserved or retryable entry becomes written, only when the box
-//     finds its written file or its history copy (ErrInflightNotWritten
-//     otherwise); those files are what the entry then names.
+//   - done (review R6-1): a reserved or retryable entry becomes written only
+//     on proof of DELIVERY — the file the importer reads, in its target
+//     folder, or the importer's rename of it (*.MASOFON2.BAK), with the same
+//     bytes as the history copy wherever both exist (review m-a: a planted
+//     file proves nothing). The history copy alone proves nothing — every
+//     path writes it before the document reaches Hashavshevet
+//     (ErrInflightHistoryOnly); only an order may be resolved on it, with
+//     acceptHistoryOnly — model (b) truly leaves nothing else after a real
+//     import, so a person confirms Hashavshevet has it. A receipt with only
+//     its history copy is never marked written: Recover delivers it
+//     (complete() is idempotent). Nothing of either: ErrInflightNotWritten.
 //   - Compare-and-set: the entry's state must still be the one expected
 //     (ErrInflightMoved). A written or failed entry is final
 //     (ErrInflightFinal).
@@ -64,9 +73,32 @@ var (
 	// ErrInflightMayBeWritten: fail refused — a file of the entry exists, or
 	// a place it could be cannot be looked at (may_be_written).
 	ErrInflightMayBeWritten = errors.New("INFLIGHT_MAY_BE_WRITTEN")
-	// ErrInflightNotWritten: done refused — neither the written file nor its
-	// history copy is there (not_written).
+	// ErrInflightNotWritten: done refused — no delivered file (nor its
+	// rename) with the history copy's bytes, and no history copy either
+	// (not_written).
 	ErrInflightNotWritten = errors.New("INFLIGHT_NOT_WRITTEN")
+	// ErrInflightHistoryOnly: done refused — only the history copy is there,
+	// which every path writes before the document is delivered
+	// (history_only; an order: acceptHistoryOnly).
+	ErrInflightHistoryOnly = errors.New("INFLIGHT_HISTORY_ONLY")
+	// ErrRecoverDelivers rides with ErrInflightHistoryOnly for a receipt:
+	// Recover (or a repeat of its key) delivers it from its stored request.
+	ErrRecoverDelivers = errors.New("RECOVER_DELIVERS")
+)
+
+// The candidates' roles (review R6-1).
+const (
+	RoleDelivered = "delivered" // the file the importer reads, in its target folder
+	RoleImported  = "imported"  // the importer's rename of it (*.MASOFON2.BAK)
+	RoleHistory   = "history"   // the connector's history copy
+)
+
+// The proof done found (InflightEntry.Proof).
+const (
+	ProofDelivered   = "delivered"
+	ProofImported    = "imported"
+	ProofHistoryOnly = "history-only"
+	ProofNone        = "none"
 )
 
 // receiptFailed is a receipt resolved as failed by inflight: never written,
@@ -85,11 +117,14 @@ var ErrReceiptFailed = errors.New("RECEIPT_FAILED")
 // InflightFile is one place an entry's document could be.
 type InflightFile struct {
 	Path string `json:"path"`
-	// Role: folder (the frozen name in its typed folder), pickup (the
-	// scheduler's folder), history (the connector's copy), receipt (the
-	// receipt folder).
+	// Role: delivered (the file the importer reads: the frozen name in its
+	// typed folder, the pickup file, the receipt's file), imported (the
+	// importer's *.MASOFON2.BAK rename of it), history (the connector's copy).
 	Role   string `json:"role"`
 	Exists bool   `json:"exists"`
+	// MatchesHistory: a delivered or imported file has the history copy's
+	// bytes (nil when there is no history copy to compare with).
+	MatchesHistory *bool `json:"matchesHistory,omitempty"`
 	// Error: the place could not be looked at (it counts as written).
 	Error string `json:"error,omitempty"`
 }
@@ -126,34 +161,76 @@ type InflightEntry struct {
 	// (a resolution's change set and time among them).
 	Note       string         `json:"note,omitempty"`
 	Candidates []InflightFile `json:"candidates"`
+	// Proof is what done would stand on: delivered, imported (a file with the
+	// history copy's bytes, or with none to compare), history-only, none.
+	Proof string `json:"proof"`
 }
 
-// written reports whether a candidate exists — or cannot be looked at.
-func (e *InflightEntry) written() (exists, unknown bool) {
+// proofFiles are the delivered or imported files that prove delivery: they
+// exist and have the history copy's bytes (or there is no history copy).
+func (e *InflightEntry) proofFiles() []InflightFile {
+	var out []InflightFile
 	for _, c := range e.Candidates {
-		exists = exists || c.Exists
-		unknown = unknown || c.Error != ""
+		if (c.Role == RoleDelivered || c.Role == RoleImported) && c.Exists && (c.MatchesHistory == nil || *c.MatchesHistory) {
+			out = append(out, c)
+		}
 	}
-	return exists, unknown
+	return out
+}
+
+func (e *InflightEntry) hasHistory() bool {
+	for _, c := range e.Candidates {
+		if c.Role == RoleHistory && c.Exists {
+			return true
+		}
+	}
+	return false
+}
+
+// setProof fills e.Proof from its candidates.
+func (e *InflightEntry) setProof() {
+	e.Proof = ProofNone
+	for _, c := range e.proofFiles() {
+		if c.Role == RoleDelivered {
+			e.Proof = ProofDelivered
+			return
+		}
+		e.Proof = ProofImported
+	}
+	if e.Proof == ProofNone && e.hasHistory() {
+		e.Proof = ProofHistoryOnly
+	}
 }
 
 // CheckResolution is whether resolve (fail, done) may be applied to e: nil,
-// or ErrInflightFinal, ErrInflightMayBeWritten, ErrInflightNotWritten.
-func CheckResolution(e *InflightEntry, resolve string) error {
+// or ErrInflightFinal, ErrInflightMayBeWritten, ErrInflightNotWritten,
+// ErrInflightHistoryOnly. acceptHistoryOnly lets done stand on an order's
+// history copy alone (a person confirmed Hashavshevet has it).
+func CheckResolution(e *InflightEntry, resolve string, acceptHistoryOnly bool) error {
 	switch orderState(e.State) {
 	case orderReserved, orderRetryable:
 	default:
 		return fmt.Errorf("%w: %s %d is %s: there is nothing to resolve", ErrInflightFinal, singular(e.Kind), e.Number, e.State)
 	}
-	exists, unknown := e.written()
 	switch resolve {
 	case ResolveFail:
-		if exists || unknown {
-			return fmt.Errorf("%w: %s %d may have been written: %s", ErrInflightMayBeWritten, singular(e.Kind), e.Number, describeFiles(e.Candidates))
+		for _, c := range e.Candidates {
+			if c.Error != "" || (c.Exists && c.Role != RoleImported) {
+				return fmt.Errorf("%w: %s %d may have been written: %s", ErrInflightMayBeWritten, singular(e.Kind), e.Number, describeFiles(e.Candidates))
+			}
 		}
 	case ResolveDone:
-		if !exists {
-			return fmt.Errorf("%w: neither the file of %s %d nor its history copy is there: %s", ErrInflightNotWritten, singular(e.Kind), e.Number, describeFiles(e.Candidates))
+		switch {
+		case len(e.proofFiles()) > 0:
+		case e.hasHistory() && e.Kind == InflightReceipts:
+			return fmt.Errorf("%w (%w): receipt %d has only its history copy, written before the receipt reaches the folder: it was not delivered (%s)",
+				ErrInflightHistoryOnly, ErrRecoverDelivers, e.Number, describeFiles(e.Candidates))
+		case e.hasHistory() && !acceptHistoryOnly:
+			return fmt.Errorf("%w: order %d has only its history copy, written before the document is delivered: nothing proves Hashavshevet got it (%s)",
+				ErrInflightHistoryOnly, e.Number, describeFiles(e.Candidates))
+		case e.hasHistory():
+		default:
+			return fmt.Errorf("%w: no file of %s %d with its history copy's bytes, and no history copy: %s", ErrInflightNotWritten, singular(e.Kind), e.Number, describeFiles(e.Candidates))
 		}
 	default:
 		return fmt.Errorf("resolve %q is neither fail nor done", resolve)
@@ -169,6 +246,8 @@ func describeFiles(fs []InflightFile) string {
 		switch {
 		case f.Error != "":
 			parts = append(parts, fmt.Sprintf("%s (%s) cannot be looked at: %s", f.Path, f.Role, f.Error))
+		case f.Exists && f.MatchesHistory != nil && !*f.MatchesHistory:
+			parts = append(parts, fmt.Sprintf("%s (%s) exists, NOT the history copy's bytes", f.Path, f.Role))
 		case f.Exists:
 			parts = append(parts, fmt.Sprintf("%s (%s) exists", f.Path, f.Role))
 		default:
@@ -192,6 +271,67 @@ func lookFor(path, role string) InflightFile {
 		f.Error = err.Error()
 	}
 	return f
+}
+
+// maxCompareBytes bounds a document read to compare it with its history copy.
+const maxCompareBytes = 8 << 20
+
+// readSmall reads a candidate (never following a link: Lstat first) up to
+// maxCompareBytes; ok false when it cannot be.
+func readCandidate(path string) ([]byte, bool) {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxCompareBytes {
+		return nil, false
+	}
+	b, err := os.ReadFile(path)
+	return b, err == nil
+}
+
+// renamesOf are the importer's renames in dir of a delivered file whose name
+// (lower-cased, without its extension) is base: <base>.….MASOFON2.BAK, any
+// case. A folder that cannot be read is one candidate with its error.
+func renamesOf(dir, base string) []InflightFile {
+	des, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return []InflightFile{{Path: filepath.Join(dir, base+".*.MASOFON2.BAK"), Role: RoleImported, Error: err.Error()}}
+	}
+	var out []InflightFile
+	for _, de := range des {
+		lower := strings.ToLower(de.Name())
+		if strings.HasPrefix(lower, base+".") && strings.HasSuffix(lower, ".masofon2.bak") {
+			out = append(out, InflightFile{Path: filepath.Join(dir, de.Name()), Role: RoleImported, Exists: true})
+		}
+	}
+	return out
+}
+
+// delivered are a delivered file's candidates: the file itself and its
+// importer's renames, in dir.
+func delivered(dir, name string) []InflightFile {
+	out := []InflightFile{lookFor(filepath.Join(dir, name), RoleDelivered)}
+	return append(out, renamesOf(dir, strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name))))...)
+}
+
+// compareWithHistory sets MatchesHistory on every existing delivered or
+// imported candidate, against the history copy at historyDoc (when it
+// exists and reads).
+func compareWithHistory(fs []InflightFile, historyDoc string) {
+	h, ok := readCandidate(historyDoc)
+	if !ok {
+		return
+	}
+	for i := range fs {
+		c := &fs[i]
+		if (c.Role != RoleDelivered && c.Role != RoleImported) || !c.Exists {
+			continue
+		}
+		b, ok := readCandidate(c.Path)
+		same := ok && bytes.Equal(b, h)
+		c.MatchesHistory = &same
+	}
 }
 
 func ageSeconds(reservedAt string, now time.Time) int64 {
@@ -230,39 +370,63 @@ func orderView(cfg config.Config, dataDir string, e *orderIndexEntry, now time.T
 	v := &InflightEntry{Kind: InflightOrders, Key: e.Key, Number: e.Number, State: string(e.State), ReservedAt: e.ReservedAt,
 		AgeSeconds: ageSeconds(e.ReservedAt, now), Files: append([]string(nil), e.Files...), Note: e.Error, Candidates: []InflightFile{}}
 	n := strconv.FormatInt(e.Number, 10)
+	sendDir := strings.TrimSpace(cfg.SendOrderDir)
+	historyDoc := ""
+	if sendDir != "" && filepath.IsAbs(sendDir) {
+		historyDoc = filepath.Join(sendDir, "history", n, "IMOVEIN_"+n+".doc")
+	}
 	if r := e.Rule; r != nil {
 		v.Rule = &InflightRule{Counter: r.Counter, Folder: r.Folder, Temporary: r.Temporary, FileName: r.FileName, CounterTest: r.CounterTest, FolderTest: r.FolderTest}
 		v.Counter, v.Folder = r.Counter, r.Folder
 		f, ok := cfg.Documents.Folders[r.Folder]
 		if dir := strings.TrimSpace(f.Path); ok && dir != "" {
-			v.Candidates = append(v.Candidates, lookFor(filepath.Join(dir, r.FileName), "folder"))
+			v.Candidates = append(v.Candidates, delivered(dir, r.FileName)...)
 		} else {
-			v.Candidates = append(v.Candidates, InflightFile{Path: r.FileName, Role: "folder",
+			v.Candidates = append(v.Candidates, InflightFile{Path: r.FileName, Role: RoleDelivered,
 				Error: fmt.Sprintf("folder %s is not configured any more: its file cannot be looked for", r.Folder)})
 		}
 	} else {
 		v.Counter = counterHolding(cfg, dataDir, config.DocumentKindOrders, e.Number)
 		v.Folder = "sendOrderDir"
-		// Model (a) writes the scheduler's file, model (b) the importer's
-		// (whose IMOVEIN.doc the next order overwrites; its history copy is
-		// written before the importer runs). Both are looked for: the model
-		// may have changed since the reservation.
+		// Model (a) delivers the scheduler's file into the pickup folder; the
+		// model may have changed since the reservation, so it is looked for
+		// whenever a pickup folder is configured. Model (b) delivers
+		// sendOrderDir\IMOVEIN.doc, which the next order overwrites: it proves
+		// nothing about this order — only an importer's rename of it with the
+		// history copy's bytes does (or, failing that, acceptHistoryOnly).
 		if pickup := strings.TrimSpace(cfg.SendOrderPickupDir); pickup != "" {
 			if cfg.OrdersPickup() {
 				v.Folder = "pickup"
 			}
-			v.Candidates = append(v.Candidates, lookFor(filepath.Join(pickup, PickupFileName("", e.Number)), "pickup"),
-				lookFor(filepath.Join(pickup, PickupFileName("RETURN", e.Number)), "pickup"))
+			v.Candidates = append(v.Candidates, delivered(pickup, PickupFileName("", e.Number))...)
+			v.Candidates = append(v.Candidates, delivered(pickup, PickupFileName("RETURN", e.Number))...)
+		}
+		if historyDoc != "" {
+			for _, c := range renamesOf(sendDir, "imovein") {
+				v.Candidates = append(v.Candidates, c)
+			}
 		}
 	}
-	if dir := strings.TrimSpace(cfg.SendOrderDir); dir != "" && filepath.IsAbs(dir) {
-		h := filepath.Join(dir, "history", n)
-		v.Candidates = append(v.Candidates, lookFor(filepath.Join(h, "IMOVEIN_"+n+".doc"), "history"),
-			lookFor(filepath.Join(h, "IMOVEIN_"+n+".prm"), "history"))
+	if historyDoc != "" {
+		v.Candidates = append(v.Candidates, lookFor(historyDoc, RoleHistory), lookFor(strings.TrimSuffix(historyDoc, ".doc")+".prm", RoleHistory))
+		compareWithHistory(v.Candidates, historyDoc)
+		// Model (b)'s renames name no number: one counts only with this
+		// order's bytes; the others belong to other orders.
+		if e.Rule == nil {
+			kept := v.Candidates[:0]
+			for _, c := range v.Candidates {
+				if c.Role == RoleImported && filepath.Dir(c.Path) == sendDir && (c.MatchesHistory == nil || !*c.MatchesHistory) && c.Error == "" {
+					continue
+				}
+				kept = append(kept, c)
+			}
+			v.Candidates = kept
+		}
 	} else {
-		v.Candidates = append(v.Candidates, InflightFile{Path: filepath.Join("history", n), Role: "history",
+		v.Candidates = append(v.Candidates, InflightFile{Path: filepath.Join("history", n), Role: RoleHistory,
 			Error: "sendOrderDir is not an absolute folder: the history copy cannot be looked for"})
 	}
+	v.setProof()
 	return v
 }
 
@@ -270,7 +434,7 @@ func orderView(cfg config.Config, dataDir string, e *orderIndexEntry, now time.T
 // checking it is still in state expect and the resolution's rule (above);
 // changeSet and now are recorded on it. It answers the entry as saved, or —
 // refused — as read.
-func ResolveOrder(dataDir string, cfg config.Config, historyID, expect, resolve, changeSet string, now time.Time) (*InflightEntry, error) {
+func ResolveOrder(dataDir string, cfg config.Config, historyID, expect, resolve, changeSet string, acceptHistoryOnly bool, now time.Time) (*InflightEntry, error) {
 	ix := orderIndex{dir: OrderIndexDir(dataDir)}
 	e, found, err := ix.load(historyID)
 	if err != nil {
@@ -283,7 +447,7 @@ func ResolveOrder(dataDir string, cfg config.Config, historyID, expect, resolve,
 	if string(e.State) != expect {
 		return v, fmt.Errorf("%w: order %d is %s, the plan expected %s", ErrInflightMoved, e.Number, e.State, expect)
 	}
-	if err := CheckResolution(v, resolve); err != nil {
+	if err := CheckResolution(v, resolve, acceptHistoryOnly); err != nil {
 		return v, err
 	}
 	at := now.UTC().Format(time.RFC3339)
@@ -295,7 +459,11 @@ func ResolveOrder(dataDir string, cfg config.Config, historyID, expect, resolve,
 	case ResolveDone:
 		e.State = orderWritten
 		e.Files = existingPaths(v.Candidates)
-		e.Error = orderErrorText(fmt.Errorf("resolved as written by inflight change set %s at %s: found %s", changeSet, at, strings.Join(e.Files, ", ")))
+		on := "delivered: " + strings.Join(pathsOf(v.proofFiles()), ", ")
+		if v.Proof == ProofHistoryOnly {
+			on = "on its history copy alone, a person having confirmed Hashavshevet has it (acceptHistoryOnly)"
+		}
+		e.Error = orderErrorText(fmt.Errorf("resolved as written by inflight change set %s at %s, %s", changeSet, at, on))
 	}
 	e.FinishedAt = at
 	if err := ix.save(e); err != nil {
@@ -304,12 +472,22 @@ func ResolveOrder(dataDir string, cfg config.Config, historyID, expect, resolve,
 	return orderView(cfg, dataDir, e, now), nil
 }
 
+// existingPaths are the files that exist and are this entry's: the history
+// copies and the proof files (never a delivered file with other bytes).
 func existingPaths(fs []InflightFile) []string {
 	var out []string
 	for _, f := range fs {
-		if f.Exists {
+		if f.Exists && (f.MatchesHistory == nil || *f.MatchesHistory) {
 			out = append(out, f.Path)
 		}
+	}
+	return out
+}
+
+func pathsOf(fs []InflightFile) []string {
+	var out []string
+	for _, f := range fs {
+		out = append(out, f.Path)
 	}
 	return out
 }
@@ -385,12 +563,15 @@ func receiptView(cfg config.Config, dataDir string, e *receiptIndexEntry, now ti
 		if p := strings.TrimSpace(cfg.ReceiptNamePattern()); p != "" {
 			name = config.DocumentFileName(p, "", false, e.Number)
 		}
-		v.Candidates = append(v.Candidates, lookFor(filepath.Join(dir, name), "receipt"))
+		v.Candidates = append(v.Candidates, delivered(dir, name)...)
 	} else {
-		v.Candidates = append(v.Candidates, InflightFile{Path: "KUPAIN_" + n + ".doc", Role: "receipt",
+		v.Candidates = append(v.Candidates, InflightFile{Path: "KUPAIN_" + n + ".doc", Role: RoleDelivered,
 			Error: "the receipt folder is not an absolute folder: the file cannot be looked for"})
 	}
-	v.Candidates = append(v.Candidates, lookFor(filepath.Join(dataDir, "history", "receipts", n, "KUPAIN_"+n+".doc"), "history"))
+	historyDoc := filepath.Join(dataDir, "history", "receipts", n, "KUPAIN_"+n+".doc")
+	v.Candidates = append(v.Candidates, lookFor(historyDoc, RoleHistory))
+	compareWithHistory(v.Candidates, historyDoc)
+	v.setProof()
 	return v
 }
 
@@ -406,7 +587,7 @@ func ResolveReceipt(dataDir string, cfg config.Config, number int64, expect, res
 	if string(e.State) != expect {
 		return v, fmt.Errorf("%w: receipt %d is %s, the plan expected %s", ErrInflightMoved, e.Number, e.State, expect)
 	}
-	if err := CheckResolution(v, resolve); err != nil {
+	if err := CheckResolution(v, resolve, false); err != nil {
 		return v, err
 	}
 	at := now.UTC().Format(time.RFC3339)
@@ -423,7 +604,7 @@ func ResolveReceipt(dataDir string, cfg config.Config, number int64, expect, res
 		e.State = receiptWritten
 		e.Files = existingPaths(v.Candidates)
 		e.WrittenAt = at
-		note := fmt.Sprintf("resolved as written by inflight change set %s at %s: found %s", changeSet, at, strings.Join(e.Files, ", "))
+		note := fmt.Sprintf("resolved as written by inflight change set %s at %s, delivered: %s", changeSet, at, strings.Join(pathsOf(v.proofFiles()), ", "))
 		if strings.TrimSpace(cfg.HasReceiptBatFile) != "" || strings.TrimSpace(cfg.HasReceiptParamFile) != "" {
 			note += "; the connector did not run the receipt importer for it — import it by hand if Hashavshevet does not have it"
 		}

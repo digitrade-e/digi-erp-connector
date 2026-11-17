@@ -55,17 +55,17 @@ func TestInflight_OrderFail(t *testing.T) {
 	if err != nil || v.State != "reserved" || v.Number != 42 || v.AgeSeconds != 17*3600 || v.Folder != "sendOrderDir" || len(v.Candidates) != 2 {
 		t.Fatalf("inspect %+v %v", v, err)
 	}
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-1", "retryable", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMoved) {
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-1", "retryable", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMoved) {
 		t.Fatalf("expect retryable on a reserved entry: %v", err)
 	}
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-1", "reserved", ResolveDone, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightNotWritten) {
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-1", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightNotWritten) {
 		t.Fatalf("done without a file: %v", err)
 	}
-	r, err := ResolveOrder(h.dataDir, cfg, "H-1", "reserved", ResolveFail, "cs-inflight-1", inflightNow)
+	r, err := ResolveOrder(h.dataDir, cfg, "H-1", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow)
 	if err != nil || r.State != "failed" || !strings.Contains(r.Note, "cs-inflight-1") || !strings.Contains(r.Note, "2026-11-17T03:00:00Z") {
 		t.Fatalf("fail: %+v %v", r, err)
 	}
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-1", "failed", ResolveFail, "cs-inflight-2", inflightNow); !errors.Is(err, ErrInflightFinal) {
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-1", "failed", ResolveFail, "cs-inflight-2", false, inflightNow); !errors.Is(err, ErrInflightFinal) {
 		t.Fatalf("a failed entry again: %v", err)
 	}
 
@@ -90,11 +90,25 @@ func TestInflight_OrderFail(t *testing.T) {
 	}
 }
 
-// Review R6: fail is refused while any file of the order exists (its
-// history copy, the pickup file, its frozen name in its typed folder), and
-// done is allowed then — the entry names the files found; a resend replays
-// done, nothing written again.
-func TestInflight_OrderDoneAndMayBeWritten(t *testing.T) {
+// writeFile writes p with content, making its folder.
+func writeFile(t *testing.T, p, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// Review R6-1: done stands only on proof of DELIVERY — the delivered file,
+// or the importer's *.MASOFON2.BAK rename of it, with the history copy's
+// bytes. The history copy alone (written before the document is delivered,
+// in every path) is history_only; an order may be resolved on it only with
+// acceptHistoryOnly. A planted file with other bytes proves nothing (m-a).
+// fail is refused while any file of the order exists.
+func TestInflight_OrderDoneNeedsDelivery(t *testing.T) {
 	h := newOrderHarness(t)
 	herp, pickup := filepath.Join(t.TempDir(), "herp"), filepath.Join(t.TempDir(), "pickup")
 	for _, d := range []string{herp, pickup} {
@@ -105,56 +119,77 @@ func TestInflight_OrderDoneAndMayBeWritten(t *testing.T) {
 	cfg := config.Config{SendOrderDir: h.sendDir, SendOrderPickupDir: pickup,
 		Documents: config.DocumentsConfig{Folders: map[string]config.FolderConfig{"herp": {Kind: "orders", Path: herp, NamePattern: "IMOVEIN_{n}.doc", Layout: "legacy"}}}}
 
-	// A model (b) order: its history copy.
+	// A model (b) order with its history copy only.
 	h.reservedOrder("H-b", 7, nil)
-	hist := h.history(7)
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
+	h.history(7)
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
 		t.Fatalf("fail with the history copy there: %v", err)
 	}
-	r, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveDone, "cs-inflight-1", inflightNow)
-	if err != nil || r.State != "written" || len(r.Files) != 1 || r.Files[0] != hist {
-		t.Fatalf("done %+v %v", r, err)
+	if v, _ := InspectOrder(h.dataDir, cfg, "H-b", inflightNow); v.Proof != ProofHistoryOnly {
+		t.Errorf("proof %q", v.Proof)
+	}
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightHistoryOnly) {
+		t.Fatalf("done on the history copy alone: %v, want history_only", err)
+	}
+	r, err := ResolveOrder(h.dataDir, cfg, "H-b", "reserved", ResolveDone, "cs-inflight-1", true, inflightNow)
+	if err != nil || r.State != "written" || !strings.Contains(r.Note, "acceptHistoryOnly") {
+		t.Fatalf("done with acceptHistoryOnly: %+v %v", r, err)
 	}
 
-	// A pickup order: the scheduler's file.
+	// A pickup order: a planted file proves nothing; the delivered one does.
 	h.reservedOrder("H-a", 8, nil)
-	if err := os.WriteFile(filepath.Join(pickup, "IMOVEIN_8.doc"), []byte("doc"), 0o644); err != nil {
-		t.Fatal(err)
+	writeFile(t, filepath.Join(h.sendDir, "history", "8", "IMOVEIN_8.doc"), "order 8")
+	writeFile(t, filepath.Join(pickup, "IMOVEIN_8.doc"), "planted")
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-a", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightHistoryOnly) {
+		t.Fatalf("done on a planted file: %v, want history_only", err)
 	}
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-a", "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
-		t.Fatalf("fail with the pickup file there: %v", err)
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-a", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
+		t.Fatalf("fail with a file there: %v", err)
+	}
+	writeFile(t, filepath.Join(pickup, "IMOVEIN_8.doc"), "order 8")
+	r, err = ResolveOrder(h.dataDir, cfg, "H-a", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow)
+	if err != nil || r.State != "written" || !slicesContains(r.Files, filepath.Join(pickup, "IMOVEIN_8.doc")) {
+		t.Fatalf("done on the delivered file: %+v %v", r, err)
 	}
 
-	// An order with a rule: its frozen name in its typed folder; and a
-	// folder no longer configured cannot be looked in.
+	// An order with a rule: the scheduler's rename of its file proves it.
 	rule := &storedRule{Counter: "b2b", Folder: "herp", FileName: "IMOVEIN_9.doc"}
 	h.reservedOrder("H-r", 9, rule)
+	writeFile(t, filepath.Join(h.sendDir, "history", "9", "IMOVEIN_9.doc"), "order 9")
+	bak := writeFile(t, filepath.Join(herp, "IMOVEIN_9.doc.20261117.MASOFON2.BAK"), "order 9")
 	v, err := InspectOrder(h.dataDir, cfg, "H-r", inflightNow)
-	if err != nil || v.Rule == nil || v.Rule.FileName != "IMOVEIN_9.doc" || v.Folder != "herp" || v.Counter != "b2b" || v.Candidates[0].Path != filepath.Join(herp, "IMOVEIN_9.doc") {
+	if err != nil || v.Proof != ProofImported || v.Rule == nil || v.Folder != "herp" {
 		t.Fatalf("inspect %+v %v", v, err)
 	}
-	if err := os.WriteFile(filepath.Join(herp, "IMOVEIN_9.doc"), []byte("doc"), 0o644); err != nil {
-		t.Fatal(err)
+	if r, err = ResolveOrder(h.dataDir, cfg, "H-r", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); err != nil || !slicesContains(r.Files, bak) {
+		t.Fatalf("done on the rename: %+v %v", r, err)
 	}
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-r", "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
-		t.Fatalf("fail with the folder's file there: %v", err)
+	// Nothing at all: not_written; a folder no longer configured cannot be looked in.
+	h.reservedOrder("H-n", 10, &storedRule{Counter: "b2b", Folder: "gone", FileName: "IMOVEIN_10.doc"})
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-n", "reserved", ResolveDone, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightNotWritten) {
+		t.Fatalf("done with nothing: %v", err)
 	}
-	delete(cfg.Documents.Folders, "herp")
-	if _, err := ResolveOrder(h.dataDir, cfg, "H-r", "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
+	if _, err := ResolveOrder(h.dataDir, cfg, "H-n", "reserved", ResolveFail, "cs-inflight-1", false, inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
 		t.Fatalf("fail with the folder gone (cannot be looked in): %v", err)
 	}
 
 	q := h.queue(false)
-	acc, err := q.Accept(keyedOrder("H-b"))
+	acc, err := q.Accept(keyedOrder("H-a"))
 	if err != nil || !acc.Replay || acc.Status != JobStatusDone {
 		t.Fatalf("resend of the done order %+v %v", acc, err)
-	}
-	if st, ok := q.Status("7"); !ok || st.Status != JobStatusDone || len(st.WrittenFiles) != 1 {
-		t.Fatalf("status poll %+v", st)
 	}
 	if _, err := InspectOrder(h.dataDir, cfg, "nope", inflightNow); !errors.Is(err, ErrInflightMissing) {
 		t.Errorf("an unknown key: %v", err)
 	}
+}
+
+func slicesContains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedReceipt saves a receipt left reserved, the store past it.
@@ -210,30 +245,35 @@ func TestInflight_ReceiptFail(t *testing.T) {
 	}
 }
 
-// Review R6: a reserved receipt whose history copy is there is resolved as
-// done — written, naming the files found, the importer not run — and a
-// resend replays it; fail is refused then.
+// Review R6-1: a reserved receipt with only its history copy is NOT
+// resolved as done — it was never delivered, and Recover delivers it
+// (complete() is idempotent); a planted file with other bytes proves
+// nothing; the delivered receipt (or its rename) does — written, naming the
+// files, the importer not run — and a resend replays it; fail is refused.
 func TestInflight_ReceiptDone(t *testing.T) {
 	h := newReceiptHarness(t, 1000)
 	h.reservedReceipt(testKey(3), 1000)
 	cfg := config.Config{SendReceiptDir: h.sendDir, HasReceiptBatFile: `C:\Hash7\kupain.bat`}
-	hist := filepath.Join(h.dataDir, "history", "receipts", "1000", "KUPAIN_1000.doc")
-	if err := os.MkdirAll(filepath.Dir(hist), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hist, []byte("doc"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(h.dataDir, "history", "receipts", "1000", "KUPAIN_1000.doc"), "receipt 1000")
 	if _, err := ResolveReceipt(h.dataDir, cfg, 1000, "reserved", ResolveFail, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightMayBeWritten) {
 		t.Fatalf("fail with the history copy there: %v", err)
 	}
+	_, err := ResolveReceipt(h.dataDir, cfg, 1000, "reserved", ResolveDone, "cs-inflight-1", inflightNow)
+	if !errors.Is(err, ErrInflightHistoryOnly) || !errors.Is(err, ErrRecoverDelivers) {
+		t.Fatalf("done on the history copy alone: %v, want history_only (Recover delivers it)", err)
+	}
+	writeFile(t, filepath.Join(h.sendDir, "KUPAIN_1000.doc"), "planted")
+	if _, err := ResolveReceipt(h.dataDir, cfg, 1000, "reserved", ResolveDone, "cs-inflight-1", inflightNow); !errors.Is(err, ErrInflightHistoryOnly) {
+		t.Fatalf("done on a planted file: %v", err)
+	}
+	writeFile(t, filepath.Join(h.sendDir, "KUPAIN_1000.doc"), "receipt 1000")
 	r, err := ResolveReceipt(h.dataDir, cfg, 1000, "reserved", ResolveDone, "cs-inflight-1", inflightNow)
-	if err != nil || r.State != "written" || len(r.Files) != 1 || !strings.Contains(r.Note, "did not run the receipt importer") {
+	if err != nil || r.State != "written" || len(r.Files) != 2 || r.Proof != ProofDelivered || !strings.Contains(r.Note, "did not run the receipt importer") {
 		t.Fatalf("done %+v %v", r, err)
 	}
 	h.cfg.HasReceiptBatFile = ""
 	res, err := h.writer().Write(context.Background(), receiptFor(testKey(3)))
-	if err != nil || !res.Replayed || res.ReceiptNumber != 1000 || len(h.docs()) != 0 || !strings.Contains(strings.Join(res.Warnings, " "), "cs-inflight-1") {
+	if err != nil || !res.Replayed || res.ReceiptNumber != 1000 || !strings.Contains(strings.Join(res.Warnings, " "), "cs-inflight-1") {
 		t.Fatalf("resend %+v %v", res, err)
 	}
 }

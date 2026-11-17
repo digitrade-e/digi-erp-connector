@@ -28,8 +28,11 @@ import (
 //     resolve it refuses as the run would.
 //   - fail: a reserved or retryable entry never written — the box proves no
 //     file of it exists (its frozen name in its folder, the pickup file, the
-//     history copy), otherwise may_be_written. done: only when the box finds
-//     the written file or its history copy (not_written otherwise).
+//     history copy), otherwise may_be_written. done (review R6-1): only on
+//     proof of delivery — the delivered file or the importer's
+//     *.MASOFON2.BAK rename of it, with the history copy's bytes where both
+//     exist; the history copy alone is history_only (an order: unless
+//     acceptHistoryOnly); nothing at all is not_written.
 //   - Compare-and-set on expect (entry_moved); a written or failed entry is
 //     final (entry_final); an order the running worker has queued or is
 //     writing is entry_busy (a receipt: another process holds the receipt
@@ -48,6 +51,7 @@ const (
 	CodeEntryFinal   = "entry_final"   // written or failed already
 	CodeMayBeWritten = "may_be_written"
 	CodeNotWritten   = "not_written"
+	CodeHistoryOnly  = "history_only" // done on the history copy alone (review R6-1)
 )
 
 // InflightInput is the inflight command's stdin.
@@ -62,8 +66,13 @@ type InflightInput struct {
 	// "reserved", "retryable" — or {"state": …, "configSha256": …}.
 	Expect *InflightExpect `json:"expect,omitempty"`
 	// Resolve is fail or done; the check may leave it out.
-	Resolve    string `json:"resolve,omitempty"`
-	AssumeIdle bool   `json:"assumeIdle,omitempty"`
+	Resolve string `json:"resolve,omitempty"`
+	// AcceptHistoryOnly (an order's done only; review R6-1): resolve it as
+	// written on its history copy alone — a person confirmed Hashavshevet has
+	// it (model (b) leaves nothing else after a real import). The check
+	// answer names it, for the approval form.
+	AcceptHistoryOnly bool `json:"acceptHistoryOnly,omitempty"`
+	AssumeIdle        bool `json:"assumeIdle,omitempty"`
 }
 
 // InflightExpect is expect: the entry's state, and optionally config.yaml's
@@ -111,6 +120,9 @@ type InflightResult struct {
 	// rule, age, and which candidate files exist.
 	Entry   *hasavshevet.InflightEntry `json:"entry"`
 	Resolve string                     `json:"resolve,omitempty"`
+	// AcceptHistoryOnly: done stands on the history copy alone, as a person
+	// confirmed (review R6-1) — the approval form shows it.
+	AcceptHistoryOnly bool `json:"acceptHistoryOnly,omitempty"`
 	// Resolved is the entry as saved (a run that resolved it).
 	Resolved *hasavshevet.InflightEntry `json:"resolved,omitempty"`
 	// B2B is what the B2B shop sees once it is resolved.
@@ -174,6 +186,10 @@ func (in InflightInput) Validate(check bool) *Refusal {
 	default:
 		return refuse(CodeSpecInvalid, `use "fail" or "done"`, "resolve %q is neither", in.Resolve)
 	}
+	if in.AcceptHistoryOnly && (in.Kind != hasavshevet.InflightOrders || in.Resolve != hasavshevet.ResolveDone) {
+		return refuse(CodeSpecInvalid, "leave acceptHistoryOnly out: it is an order's done only — a receipt with only its history copy is delivered by Recover",
+			"acceptHistoryOnly with kind %s, resolve %q", in.Kind, in.Resolve)
+	}
 	if in.Resolve != "" {
 		if in.Expect == nil {
 			return refuse(CodeSpecInvalid, "send expect: the entry's state as the check read it", "expect is missing")
@@ -234,6 +250,12 @@ func inflightRefusal(err error) error {
 		return refuse(CodeMayBeWritten, "if Hashavshevet has the document, resolve it as done; else move the file aside after checking it, then run it again", "%v", err)
 	case errors.Is(err, hasavshevet.ErrInflightNotWritten):
 		return refuse(CodeNotWritten, "resolve it as failed, or let it be written (a repeat of its key)", "%v", err)
+	case errors.Is(err, hasavshevet.ErrRecoverDelivers):
+		return refuse(CodeHistoryOnly, "let Recover deliver it: once its folder is allowed and its counter's range holds it, the next start (or a repeat of its key) "+
+			"writes the receipt from its stored request — a receipt is never marked written on its history copy", "%v", err)
+	case errors.Is(err, hasavshevet.ErrInflightHistoryOnly):
+		return refuse(CodeHistoryOnly, "check Hashavshevet (Asmahta n): if it has the document, resolve done with acceptHistoryOnly: true (the form shows it); "+
+			"if not, it was never delivered — leave it, or move the history copy aside and resolve it as failed", "%v", err)
 	case errors.Is(err, hasavshevet.ErrOrderIndexUnreadable), errors.Is(err, hasavshevet.ErrReceiptIndexUnreadable):
 		return refuse(CodeIndexUnreadable, "repair or move the entry by hand (docs/troubleshooting.md § The order index); the logs name it", "%v", err)
 	}
@@ -253,7 +275,7 @@ func (a *applier) inflight(ctx context.Context, in InflightInput) error {
 	if err != nil {
 		return inflightRefusal(err)
 	}
-	out := &InflightResult{Entry: v, Resolve: in.Resolve}
+	out := &InflightResult{Entry: v, Resolve: in.Resolve, AcceptHistoryOnly: in.AcceptHistoryOnly}
 	a.res.Inflight = out
 	if in.Resolve != "" {
 		out.B2B = inflightB2B(v, in.Resolve)
@@ -278,7 +300,7 @@ func (a *applier) inflight(ctx context.Context, in InflightInput) error {
 		return refuse(CodeEntryMoved, "check the entry again (inflight-check) and make a new plan",
 			"%s %d is %s, the plan expected %s", strings.TrimSuffix(in.Kind, "s"), v.Number, v.State, in.Expect.State)
 	}
-	if err := hasavshevet.CheckResolution(v, in.Resolve); err != nil {
+	if err := hasavshevet.CheckResolution(v, in.Resolve, in.AcceptHistoryOnly); err != nil {
 		return inflightRefusal(err)
 	}
 	if a.check {
@@ -330,7 +352,7 @@ func (a *applier) inflight(ctx context.Context, in InflightInput) error {
 // lock (a process still holding it is entry_busy).
 func (a *applier) inflightResolve(in InflightInput, now time.Time) (*hasavshevet.InflightEntry, error) {
 	if in.Kind == hasavshevet.InflightOrders {
-		v, err := hasavshevet.ResolveOrder(a.dir, a.cur, in.HistoryID, in.Expect.State, in.Resolve, in.ChangeSet, now)
+		v, err := hasavshevet.ResolveOrder(a.dir, a.cur, in.HistoryID, in.Expect.State, in.Resolve, in.ChangeSet, in.AcceptHistoryOnly, now)
 		return v, inflightRefusal(err)
 	}
 	path := filepath.Join(a.dir, "receipts", "writer.lock")

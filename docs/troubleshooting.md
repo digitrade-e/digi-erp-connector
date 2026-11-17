@@ -305,8 +305,10 @@ again on its own.
 resolves one such entry — or a `retryable` one, or a `reserved` receipt — without anyone on the box:
 `inflight-check` shows it (state, number, counter, folder, frozen rule, age, and which of its candidate files exist),
 then `inflight` with `resolve: "fail"` (only when none of its files exists: `may_be_written` otherwise) or
-`resolve: "done"` (only when its written file or its history copy is there: `not_written` otherwise). Check
-Hashavshevet (Asmahta `n`) first when a file exists. The steps below are the same decisions by hand.
+`resolve: "done"` (only on proof of delivery — the delivered file or the importer's `*.MASOFON2.BAK` rename of it, with
+the history copy's bytes; the history copy alone is `history_only`, which an order passes only with
+`acceptHistoryOnly: true` once Hashavshevet is checked to have Asmahta `n`). The steps below are the same decisions by
+hand.
 
 - No `history\<n>\IMOVEIN_<n>.doc` → the connector never ran the importer for
   it: check `server.log` for `both hold order <n>` (as in step 3 above), then

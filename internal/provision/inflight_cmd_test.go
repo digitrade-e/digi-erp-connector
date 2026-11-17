@@ -98,8 +98,26 @@ func TestInflight_Command(t *testing.T) {
 	}
 	sys.daemon.set(func(d *fakeDaemon) { d.jobs = nil })
 
+	// Review R6-1: the history copy alone is history_only (model (b) here);
+	// acceptHistoryOnly — an order's done only — is named by the check.
+	done := func(accept bool) InflightInput {
+		return inflightIn(func(in *InflightInput) {
+			in.Expect, in.Resolve, in.AcceptHistoryOnly = expectState("reserved"), "done", accept
+		})
+	}
+	_, err = ApplyInflight(context.Background(), env, done(false), true)
+	wantRefusal(t, err, CodeHistoryOnly)
+	chk, err = ApplyInflight(context.Background(), env, done(true), true)
+	if err != nil || !chk.Inflight.AcceptHistoryOnly || chk.Inflight.Entry.Proof != "history-only" {
+		t.Fatalf("--check with acceptHistoryOnly: %+v %v", chk.Inflight, err)
+	}
+	_, err = ApplyInflight(context.Background(), env, inflightIn(func(in *InflightInput) {
+		in.Expect, in.Resolve, in.AcceptHistoryOnly = expectState("reserved"), "fail", true
+	}), true)
+	wantRefusal(t, err, CodeSpecInvalid)
+
 	sys.calls = nil
-	res, err := ApplyInflight(context.Background(), env, inflightIn(func(in *InflightInput) { in.Expect, in.Resolve = expectState("reserved"), "done" }), false)
+	res, err := ApplyInflight(context.Background(), env, done(true), false)
 	if err != nil || res.Inflight.Resolved == nil || res.Inflight.Resolved.State != "written" || !res.Restarted || res.Proof == nil {
 		t.Fatalf("done: %+v %v", res, err)
 	}
@@ -109,7 +127,7 @@ func TestInflight_Command(t *testing.T) {
 	if b := res.Inflight.B2B; b == nil || !strings.Contains(b.StatusPoll, "status done") || !strings.Contains(b.Resend, "replay true") {
 		t.Errorf("b2b %+v", b)
 	}
-	_, err = ApplyInflight(context.Background(), env, inflightIn(func(in *InflightInput) { in.Expect, in.Resolve = expectState("reserved"), "done" }), false)
+	_, err = ApplyInflight(context.Background(), env, done(true), false)
 	wantRefusal(t, err, CodeEntryMoved) // written now
 	_, err = ApplyInflight(context.Background(), env, inflightIn(func(in *InflightInput) { in.Expect, in.Resolve = expectState("written"), "done" }), false)
 	wantRefusal(t, err, CodeSpecInvalid)
@@ -148,6 +166,27 @@ func TestInflight_CommandReceipt(t *testing.T) {
 	_, err = ApplyInflight(context.Background(), env, in, false)
 	wantRefusal(t, err, CodeEntryBusy)
 	_ = held.Unlock()
+
+	// A receipt is never resolved on its history copy: Recover delivers it.
+	hist := filepath.Join(sys.dir, "history", "receipts", "500", "KUPAIN_500.doc")
+	if err := os.MkdirAll(filepath.Dir(hist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hist, []byte("receipt 500"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doneIn := in
+	doneIn.Resolve = "done"
+	_, err = ApplyInflight(context.Background(), env, doneIn, true)
+	if r := wantRefusal(t, err, CodeHistoryOnly); !strings.Contains(r.Fix, "Recover") {
+		t.Errorf("fix %q", r.Fix)
+	}
+	doneIn.AcceptHistoryOnly = true
+	_, err = ApplyInflight(context.Background(), env, doneIn, true)
+	wantRefusal(t, err, CodeSpecInvalid)
+	if err := os.Remove(hist); err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := ApplyInflight(context.Background(), env, in, false)
 	if err != nil || res.Inflight.Resolved == nil || res.Inflight.Resolved.State != "failed" || !strings.Contains(res.Inflight.B2B.Resend, "409 RECEIPT_FAILED") {

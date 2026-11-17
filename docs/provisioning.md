@@ -506,14 +506,25 @@ the link; WinRM too), not sealed.
   entry's state as the check read it — a string, or `{"state", "configSha256"?}` — compare-and-set (`entry_moved`).
   `resolve` is `fail` or `done`. Only an unfinished entry: `reserved` (an order's outcome unknown after a restart, or
   a receipt Recover could not finish) or `retryable` (an order); `written` and `failed` are final (`entry_final`).
-- **The candidate files**: an order's frozen name in its typed folder; the pickup folder's `IMOVEIN_<n>.doc` and
-  `TMP_IMOVEIN_<n>.doc`; `sendOrderDir\history\<n>\IMOVEIN_<n>.doc` and `.prm` (model (b)'s importer runs only after
-  them). A receipt's file in the receipt folder (its pattern) and `DataDir\history\receipts\<n>\KUPAIN_<n>.doc`. A
-  place that cannot be looked at (a typed folder no longer configured) counts as written.
+- **The candidate files** (`role`): `delivered` — the file the importer reads, in its target folder: an order's frozen
+  name in its typed folder, the pickup folder's `IMOVEIN_<n>.doc` / `TMP_IMOVEIN_<n>.doc`, a receipt's file in the
+  receipt folder (its pattern); `imported` — the importer's rename of it, `<name>.….MASOFON2.BAK` (model (b)'s
+  `IMOVEIN.….MASOFON2.BAK` in `sendOrderDir` only when its bytes are this order's: it names no number); `history` —
+  `sendOrderDir\history\<n>\IMOVEIN_<n>.doc` / `.prm`, `DataDir\history\receipts\<n>\KUPAIN_<n>.doc`. A delivered or
+  imported file carries `matchesHistory` (its bytes against the history copy's). A place that cannot be looked at (a
+  typed folder no longer configured) counts as written.
 - **`fail`**: only when none exists (`may_be_written` otherwise — check Hashavshevet, Asmahta `n`, then resolve it as
   done, or move the file aside after checking it). An order becomes `failed`; a receipt `failed`, its number void.
-- **`done`**: only when the written file or its history copy is there (`not_written` otherwise). The entry becomes
-  `written`, naming the files found; for a receipt the connector ran no importer (said in its warnings).
+- **`done`** (review R6-1): only on proof of **delivery** — a `delivered` or `imported` file with the history copy's
+  bytes (or with no history copy to compare with); a planted file with other bytes proves nothing. The history copy
+  alone is `history_only`: every path writes it BEFORE the document reaches Hashavshevet (model (a) and typed folders
+  publish after it; model (b) runs has.exe after it; a receipt's `.prm` and `.doc` come after it). An order may be
+  resolved on it only with `acceptHistoryOnly: true` — model (b) truly leaves nothing else after a real import, so a
+  person confirms Hashavshevet has document `n`; the check answer names it (`acceptHistoryOnly`, `entry.proof:
+  "history-only"`) for the approval form. A receipt with only its history copy is never marked written: `history_only`,
+  and Recover delivers it (its folder allowed, its counter's range holding it: the next start or a repeat of its key).
+  Nothing at all: `not_written`. The entry becomes `written`, naming its files; for a receipt the connector ran no
+  importer (said in its warnings). `entry.proof`: `delivered`, `imported`, `history-only` or `none`.
 - **Never a number again**: the entry keeps its number, owned by its key; no counter moves; the number still counts
   as issued. The entry records the change set and the time (an order's `error`, a receipt's `warnings`).
 - **What the B2B sees** (also in the answer's `b2b`): an order resolved as failed — `GET /api/sendOrder/<n>` 200
@@ -532,9 +543,9 @@ the link; WinRM too), not sealed.
   receipt): the box first raises `DataDir\format-floor` to `1.0.32`, so no automatic rollback goes below it. Orders, and
   receipts resolved as done, are written in fields v1.0.31 reads: no floor.
 - **`--check`** reads and writes nothing: `inflight.entry` = `{kind, key, number, state, counter, folder, rule?,
-  reservedAt, ageSeconds, files?, note?, candidates: [{path, role, exists, error?}]}`; with `resolve` it refuses as the
-  run would.
-- The answer: `inflight: {entry, resolve?, resolved?, b2b?: {statusPoll, resend}}`.
+  reservedAt, ageSeconds, files?, note?, candidates: [{path, role, exists, matchesHistory?, error?}], proof}`; with
+  `resolve` it refuses as the run would.
+- The answer: `inflight: {entry, resolve?, acceptHistoryOnly?, resolved?, b2b?: {statusPoll, resend}}`.
 
 ## `folder-acl`: lock a document folder down (plan 087 review R1c)
 
@@ -666,7 +677,7 @@ actually changed.
 | `carry_over_failed` | `folder-acl` with `carryOver` (v1.0.32): a trusted writer the check carried over could not be resolved again before the lock-down wrote anything — nothing written |
 | `entry_missing`, `entry_moved`, `entry_final` | `inflight` (review R6): no order with that `historyId` / no receipt with that number / the entry's state is not `expect` / it is written or failed already |
 | `entry_busy` | `inflight`: the running connector has the order queued or is writing it; another process holds the receipt data |
-| `may_be_written`, `not_written` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` while neither its file nor its history copy is there |
+| `may_be_written`, `not_written`, `history_only` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` with no delivered file (nor its rename) with the history copy's bytes and no history copy / `done` on the history copy alone — an order: `acceptHistoryOnly` after confirming Hashavshevet has it; a receipt: never (Recover delivers it) |
 | `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
