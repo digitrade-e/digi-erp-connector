@@ -45,6 +45,38 @@ func CarryCapable(aces []ACE, allow, deny map[string]bool) bool {
 	return true
 }
 
+// DeniesUnaccounted reports whether aces hold a deny entry for a SID the
+// account's AuthZ context cannot account for (review C-1): AuthZ's view of
+// an account is not its real token — no logon-type or session SIDs
+// (INTERACTIVE, BATCH, SERVICE, NETWORK, LOCAL, the logon SID, …), and
+// domain groups it could not read go missing silently — so a deny naming
+// such a SID is invisible to it, and carrying what AuthZ reports would grant
+// what the deny takes. A SID counts as accounted for when the context holds
+// it (deny), when it is a builtin alias (S-1-5-32-*, resolved locally), the
+// machine's own accounts (SYSTEM, LOCAL SERVICE, NETWORK SERVICE), a
+// creator or owner SID (they match nobody on the entry itself, AuthZ judges
+// OWNER RIGHTS, inheritedCover counts creator denies), or another user
+// account (isUser: a user is nobody's member). Anything else — or a lookup
+// that fails — is unaccounted: carry nothing on that entry.
+func DeniesUnaccounted(aces []ACE, deny map[string]bool, isUser func(sid string) (bool, error)) bool {
+	for _, a := range aces {
+		if !isDenyType(a.Type) || a.SID == "" || deny[a.SID] {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(a.SID, "S-1-5-32-"), a.SID == SIDLocalSystem, a.SID == "S-1-5-19", a.SID == "S-1-5-20", strings.HasPrefix(a.SID, "S-1-3-"):
+			continue
+		}
+		if isUser != nil {
+			if user, err := isUser(a.SID); err == nil && user {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func isCallbackType(t byte) bool { return t == 0x9 || t == 0xA || t == 0xB || t == 0xC }
 
 func isDenyType(t byte) bool { return t == aceTypeDenied || t == 0x6 || t == 0xA || t == 0xC }

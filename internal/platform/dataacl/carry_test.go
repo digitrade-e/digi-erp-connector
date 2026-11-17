@@ -2,6 +2,7 @@ package dataacl
 
 import (
 	"bytes"
+	"errors"
 	"math/rand"
 	"testing"
 )
@@ -18,7 +19,8 @@ func carryAsPlanned(t *testing.T, acl []byte, tok map[string]bool, root, folder 
 	}
 	before, _ = ParseACL(acl)
 	out := masked
-	if CarryCapable(before, tok, tok) {
+	notUser := func(string) (bool, error) { return false, nil } // every other SID a group it may belong to
+	if CarryCapable(before, tok, tok) && !DeniesUnaccounted(before, tok, notUser) {
 		maskedACEs, _ := ParseACL(masked)
 		want := accessFor(before, tok, true, "") & MaskModify
 		if (want&^accessFor(maskedACEs, tok, true, ""))&^maskSynchronize != 0 {
@@ -98,7 +100,7 @@ func TestCarry_NeverGrows(t *testing.T) {
 			}
 		}
 	}
-	if carriedRounds < 200 {
+	if carriedRounds < 100 {
 		t.Fatalf("only %d rounds carried anything: the generator misses the case", carriedRounds)
 	}
 }
@@ -109,7 +111,7 @@ func TestCarry_NeverGrows(t *testing.T) {
 // after the explicit denies.
 func TestCarry_TheSchedulerCase(t *testing.T) {
 	acl := testACL(
-		testACE(t, aceTypeDenied, 0x0, 0x40000, sidOther, 0, nil),
+		testACE(t, aceTypeDenied, 0x0, 0x40000, "S-1-5-32-546", 0, nil), // Guests: a builtin alias AuthZ accounts for
 		testACE(t, aceTypeAllowed, 0x3, fileAllAccess, SIDLocalSystem, 0, nil),
 		testACE(t, aceTypeAllowed, 0x3, MaskModify, sidUsers, 0, nil),
 	)
@@ -138,5 +140,42 @@ func TestCarry_TheSchedulerCase(t *testing.T) {
 	}
 	if b, _ := CarryACE("S-1-5-21-1-2-3-1105", MaskModify, 0x3); !bytes.Equal(b[:8], []byte{0, 3, 36, 0, 0xbf, 0x01, 0x13, 0}) {
 		t.Errorf("ACE %x", b)
+	}
+}
+
+// Review C-1: a deny AuthZ's view of the account cannot account for —
+// logon-type or session SIDs, groups it may have missed — stops the carry on
+// that entry; builtin aliases, the machine's own accounts, creator SIDs,
+// another user, and the context's own SIDs do not; a failed lookup does.
+func TestCarry_DeniesUnaccounted(t *testing.T) {
+	deny := map[string]bool{sidTrusted: true, sidUsers: true}
+	users := map[string]bool{"S-1-5-21-1-2-3-2001": true}
+	isUser := func(s string) (bool, error) {
+		if s == "S-1-5-21-1-2-3-9999" {
+			return false, errors.New("the domain controller does not answer")
+		}
+		return users[s], nil
+	}
+	for sid, want := range map[string]bool{
+		"S-1-5-4":             true,  // INTERACTIVE: not in an AuthZ context
+		"S-1-5-3":             true,  // BATCH: the scheduler's real logon
+		"S-1-5-5-0-123456":    true,  // a logon session
+		"S-1-5-21-1-2-3-3001": true,  // a domain group it may have missed
+		"S-1-5-21-1-2-3-9999": true,  // a lookup that fails
+		"S-1-5-80-1-2-3-4-5":  true,  // a service SID
+		"S-1-5-32-546":        false, // Guests: a builtin alias, resolved locally
+		"S-1-5-18":            false,
+		"S-1-3-0":             false,
+		"S-1-5-21-1-2-3-2001": false, // another user
+		sidUsers:              false, // in the context
+	} {
+		aces, _ := ParseACL(testACL(testACE(t, aceTypeDenied, 0x3, 0x2, sid, 0, nil), testACE(t, aceTypeAllowed, 0x3, MaskModify, sidUsers, 0, nil)))
+		if got := DeniesUnaccounted(aces, deny, isUser); got != want {
+			t.Errorf("a deny for %s: unaccounted %v, want %v", sid, got, want)
+		}
+	}
+	aces, _ := ParseACL(testACL(testACE(t, aceTypeAllowed, 0x3, MaskModify, sidUsers, 0, nil)))
+	if DeniesUnaccounted(aces, deny, isUser) {
+		t.Error("no deny at all: unaccounted")
 	}
 }

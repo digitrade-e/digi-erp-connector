@@ -589,7 +589,11 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   rights never grow. On a folder the entry is inheritable to files (OI) and folders (CI) only as far as the old DACL
   handed the account at least those rights there (a lower bound: an allow that may not apply counts for nothing, a
   deny that may counts); on a file never. It sits after the entry's explicit denies. An entry with a conditional
-  entry for the account gets none (`skipped`). An account whose groups cannot be resolved (the domain controller does
+  entry for the account gets none (`skipped`), and so does one with a deny AuthZ's view cannot account for (review
+  C-1: the context comes from an S4U logon — `AUTHZ_REQUIRE_S4U_LOGON`, failing closed to `carry_over_failed` — and
+  still holds no logon-type or session SID, and may miss a domain group: a deny for INTERACTIVE, BATCH, SERVICE, a
+  logon session, a service SID, or a group not in the context that is neither a builtin alias nor another user, means
+  nothing is carried there). An account whose groups cannot be resolved (the domain controller does
   not answer, an error) gets nothing carried over — `carry_over_failed:` warns and `trusted_writer_no_write:` stays —
   and if one resolved for the check no longer does when the run writes, nothing is written (`carry_over_failed`). The
   answer's `carriedOver: [{sid, name, rights, entries, skipped?}]` per folder; the pre-image and `restore` are

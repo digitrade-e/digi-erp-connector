@@ -410,7 +410,10 @@ func effectiveFor(t *testing.T, ctx *authzCtx, path string) uint32 {
 // AuthZ on the new descriptors: never more than before — and a file made
 // afterwards hands it the same; the restore takes the carried entries away
 // with the rest, exactly. Without carryOver it keeps read & execute.
-func TestLockdown_CarryOver(t *testing.T) {
+// localTestUser makes a local account for the test (a member of Users
+// only) and removes it afterwards.
+func localTestUser(t *testing.T) Account {
+	t.Helper()
 	name := fmt.Sprintf("dgcarry%05d", time.Now().UnixNano()%100000)
 	// 14 characters at most: net user asks (Y/N) about a longer one.
 	pass := fmt.Sprintf("Dg#%08xZ9!", uint32(time.Now().UnixNano()))
@@ -422,6 +425,11 @@ func TestLockdown_CarryOver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return acct
+}
+
+func TestLockdown_CarryOver(t *testing.T) {
+	acct := localTestUser(t)
 	herp := filepath.Join(longTemp(t), "herp")
 	sub := filepath.Join(herp, "sub")
 	paths := []string{herp, filepath.Join(herp, "a.doc"), sub, filepath.Join(sub, "b.doc")}
@@ -511,4 +519,30 @@ func TestLockdown_CarryOverUnresolved(t *testing.T) {
 		t.Fatalf("failed %+v, carried %+v, carry SIDs %v", plan.CarryFailed, plan.Carried, plan.CarrySIDs)
 	}
 	t.Logf("AuthZ on a SID of no account: failed %+v", plan.CarryFailed)
+}
+
+// Review C-1 on real DACLs: a deny for INTERACTIVE — a logon-type SID no
+// AuthZ context holds, though the account's real token may — stops the
+// carry on every entry it sits on (skipped), and nothing is added for the
+// account there.
+func TestLockdown_CarryOverStopsAtADenyItCannotSee(t *testing.T) {
+	acct := localTestUser(t)
+	herp := filepath.Join(longTemp(t), "herp")
+	mkfile(t, filepath.Join(herp, "a.doc"))
+	setDACL(t, herp, "D:P(D;OICI;0x2;;;IU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	plan, err := PlanLockdown(herp, []string{acct.SID}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Carried) != 1 || plan.Carried[0].Entries != 0 || plan.Carried[0].Skipped != 2 {
+		t.Fatalf("carried %+v (failed %+v): want nothing carried, both entries skipped", plan.Carried, plan.CarryFailed)
+	}
+	if _, err := ApplyLockdown(herp, []string{acct.SID}, plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{herp, filepath.Join(herp, "a.doc")} {
+		if d, _ := kernelOf(t, p); strings.Contains(d, acct.SID) {
+			t.Errorf("%s: an entry for the account: %s", p, d)
+		}
+	}
 }

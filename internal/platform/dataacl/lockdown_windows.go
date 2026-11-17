@@ -238,7 +238,9 @@ func carryEntry(e *lockdownEntry, carriers []*authzCtx, owner, group *windows.SI
 	}
 	var add [][]byte
 	for _, c := range carriers {
-		if !CarryCapable(aces, c.allow, c.deny) {
+		// A conditional entry for it, or a deny AuthZ's view cannot account for
+		// (review C-1): carry nothing — if unsure, nothing.
+		if !CarryCapable(aces, c.allow, c.deny) || DeniesUnaccounted(aces, c.deny, c.isUser) {
 			e.skipped = append(e.skipped, c.sid)
 			continue
 		}

@@ -27,7 +27,8 @@ var (
 
 const (
 	authzRMFlagNoAudit         = 0x1
-	authzContextInfoGroupsSids = 2 // AUTHZ_CONTEXT_INFORMATION_CLASS AuthzContextInfoGroupsSids
+	authzRequireS4ULogon       = 0x4 // AUTHZ_REQUIRE_S4U_LOGON: the groups from a real S4U logon, or fail (review C-1)
+	authzContextInfoGroupsSids = 2   // AUTHZ_CONTEXT_INFORMATION_CLASS AuthzContextInfoGroupsSids
 	maximumAllowed             = 0x02000000
 	seGroupEnabled             = 0x4
 	seGroupUseForDenyOnly      = 0x10
@@ -78,6 +79,28 @@ type authzCtx struct {
 	h           uintptr
 	sid         string
 	allow, deny map[string]bool
+	users       map[string]bool // isUser's answers, by SID
+}
+
+// isUser reports whether sid names a user account (LookupAccountSid), for
+// DeniesUnaccounted; an answer is kept for the walk.
+func (c *authzCtx) isUser(sid string) (bool, error) {
+	if u, ok := c.users[sid]; ok {
+		return u, nil
+	}
+	s, err := windows.StringToSid(sid)
+	if err != nil {
+		return false, err
+	}
+	_, _, use, err := s.LookupAccount("")
+	if err != nil {
+		return false, err
+	}
+	if c.users == nil {
+		c.users = map[string]bool{}
+	}
+	c.users[sid] = use == windows.SidTypeUser
+	return c.users[sid], nil
 }
 
 // context resolves sid's groups (a domain account's from its domain
@@ -90,7 +113,7 @@ func (rm *authzRM) context(sid string) (*authzCtx, error) {
 	var h uintptr
 	// LUID Identifier is passed by value: one 8-byte slot on amd64 and arm64,
 	// two 4-byte ones on 386.
-	args := []uintptr{0, uintptr(unsafe.Pointer(s)), rm.h, 0, 0}
+	args := []uintptr{authzRequireS4ULogon, uintptr(unsafe.Pointer(s)), rm.h, 0, 0}
 	if unsafe.Sizeof(uintptr(0)) == 4 {
 		args = append(args, 0)
 	}
