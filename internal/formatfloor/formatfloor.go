@@ -26,7 +26,9 @@ import (
 )
 
 // RollbackFloor is the oldest release that reads every format this build writes. v1.0.30 (plan 087) changed the order
-// index and the counter recovery; nothing since has changed a format.
+// index and the counter recovery; nothing since has changed a format every box writes. v1.0.32's receipt resolved as
+// failed (the inflight command, plan 087 review R6) is read by v1.0.32 on only: the box raises the floor to
+// hasavshevet.ReceiptFailedFloor when it writes one, so a box that never does keeps its rollback to v1.0.31.
 const RollbackFloor = "1.0.30"
 
 // FileName is the floor's file in the data directory.

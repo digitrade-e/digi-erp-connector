@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -85,7 +87,7 @@ func TestLockdown_MasksAndRestores(t *testing.T) {
 	me := currentUserSID(t)
 	users := wellKnownName(t, windows.WinBuiltinUsersSid)
 
-	plan, err := PlanLockdown(herp, []string{me}, map[string]bool{".dll": true})
+	plan, err := PlanLockdown(herp, []string{me}, map[string]bool{".dll": true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +157,7 @@ func TestLockdown_GrantsNothing(t *testing.T) {
 	mkfile(t, filepath.Join(herp, "kupain.doc"))
 	setDACL(t, top, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x2;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	setDACL(t, herp, "D:(XA;OICI;0x1301bf;;;WD;(Member_of {SID(BA)}))", 0) // inherits top's entries
-	plan, err := PlanLockdown(herp, []string{"S-1-5-21-1-2-3-1105"}, nil)
+	plan, err := PlanLockdown(herp, []string{"S-1-5-21-1-2-3-1105"}, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +185,7 @@ func TestLockdown_NamesExecutables(t *testing.T) {
 	mkfile(t, filepath.Join(herp, "IMOVEIN_1.doc"))
 	mkfile(t, filepath.Join(herp, "site.php"))
 	mkfile(t, filepath.Join(herp, "lib", "wtsapi32.DLL"))
-	plan, err := PlanLockdown(herp, nil, map[string]bool{".dll": true, ".exe": true})
+	plan, err := PlanLockdown(herp, nil, map[string]bool{".dll": true, ".exe": true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,13 +204,13 @@ func TestLockdown_RefusesAJunctionAndTooManyEntries(t *testing.T) {
 	mkfile(t, filepath.Join(herp, "a.txt"))
 	mklinkJ(t, filepath.Join(herp, "zz-link"), target)
 	beforeTarget, beforeHerp := ownerAndDACL(t, target), ownerAndDACL(t, herp)
-	if _, err := PlanLockdown(herp, nil, nil); !errors.Is(err, ErrReparsePoint) {
+	if _, err := PlanLockdown(herp, nil, nil, false); !errors.Is(err, ErrReparsePoint) {
 		t.Fatalf("a junction inside: %v, want ErrReparsePoint", err)
 	}
 	if ownerAndDACL(t, target) != beforeTarget || ownerAndDACL(t, herp) != beforeHerp {
 		t.Fatal("a refused plan changed something")
 	}
-	if _, err := PlanLockdown(filepath.Join(herp, "zz-link"), nil, nil); !errors.Is(err, ErrReparsePoint) {
+	if _, err := PlanLockdown(filepath.Join(herp, "zz-link"), nil, nil, false); !errors.Is(err, ErrReparsePoint) {
 		t.Fatalf("the folder itself a junction: %v, want ErrReparsePoint", err)
 	}
 	if err := os.Remove(filepath.Join(herp, "zz-link")); err != nil {
@@ -221,7 +223,7 @@ func TestLockdown_RefusesAJunctionAndTooManyEntries(t *testing.T) {
 	for _, n := range []string{"b.txt", "c.txt", "d.txt"} {
 		mkfile(t, filepath.Join(herp, n))
 	}
-	if _, err := PlanLockdown(herp, nil, nil); !errors.Is(err, ErrTooManyEntries) {
+	if _, err := PlanLockdown(herp, nil, nil, false); !errors.Is(err, ErrTooManyEntries) {
 		t.Fatalf("five entries with a bound of three: %v, want ErrTooManyEntries", err)
 	}
 }
@@ -235,7 +237,7 @@ func TestLockdown_ReportsParentWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 	setDACL(t, top, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;0x1200a9;;;BU)(A;;0x40;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	plan, err := PlanLockdown(herp, nil, nil)
+	plan, err := PlanLockdown(herp, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +261,7 @@ func TestLockdown_RefusesAFolderThatResolvesElsewhere(t *testing.T) {
 	a := filepath.Join(root, "a")
 	herp := filepath.Join(a, "herp")
 	mkfile(t, filepath.Join(herp, "x.doc"))
-	plan, err := PlanLockdown(herp, nil, nil)
+	plan, err := PlanLockdown(herp, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +293,7 @@ func TestLockdown_LongPaths(t *testing.T) {
 	setDACL(t, longPath(deep), "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	setDACL(t, longPath(file), "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	before, ctlBefore := kernelOf(t, file)
-	plan, err := PlanLockdown(herp, nil, nil)
+	plan, err := PlanLockdown(herp, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,5 +375,174 @@ func TestWriteDACL_KeepsInheritanceAndTouchesNoChild(t *testing.T) {
 	write(g, false)
 	if s, ctl := kernelOf(t, g); ctl&windows.SE_DACL_PROTECTED != 0 || ctl&windows.SE_DACL_AUTO_INHERITED == 0 || !strings.Contains(s, "(A;ID;0x1200a9;;;BU)") || strings.Contains(s, "0x1301bf") {
 		t.Errorf("g after its write: %s [%#x]", s, ctl)
+	}
+}
+
+// effectiveFor is what AuthZ says ctx's account may do with path now.
+func effectiveFor(t *testing.T, ctx *authzCtx, path string) uint32 {
+	t.Helper()
+	n, err := open(path, windows.READ_CONTROL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(n.h)
+	sd, err := kernelSD(n.h, windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := sd.Owner()
+	g, _, _ := sd.Group()
+	dacl, err := daclBytes(sd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := ctx.access(o, g, dacl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// v1.0.32's carry-over on real DACLs, AuthZ resolving a real local account
+// (made for the test, a member of Users only): it wrote through Users. With
+// carryOver each entry gets one explicit entry with what the account had ∩
+// Modify (inheritable on the folders, as Users' was), so it still writes —
+// AuthZ on the new descriptors: never more than before — and a file made
+// afterwards hands it the same; the restore takes the carried entries away
+// with the rest, exactly. Without carryOver it keeps read & execute.
+// localTestUser makes a local account for the test (a member of Users
+// only) and removes it afterwards.
+func localTestUser(t *testing.T) Account {
+	t.Helper()
+	name := fmt.Sprintf("dgcarry%05d", time.Now().UnixNano()%100000)
+	// 14 characters at most: net user asks (Y/N) about a longer one.
+	pass := fmt.Sprintf("Dg#%08xZ9!", uint32(time.Now().UnixNano()))
+	if out, err := exec.Command("net", "user", name, pass, "/add").CombinedOutput(); err != nil {
+		t.Fatalf("net user %s /add: %v %s", name, err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("net", "user", name, "/delete").Run() })
+	acct, err := LookupAccount(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return acct
+}
+
+func TestLockdown_CarryOver(t *testing.T) {
+	acct := localTestUser(t)
+	herp := filepath.Join(longTemp(t), "herp")
+	sub := filepath.Join(herp, "sub")
+	paths := []string{herp, filepath.Join(herp, "a.doc"), sub, filepath.Join(sub, "b.doc")}
+	mkfile(t, paths[1])
+	mkfile(t, paths[3])
+	setDACL(t, herp, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+
+	rm, err := newAuthzRM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rm.close()
+	ctx, err := rm.context(acct.SID)
+	if err != nil {
+		t.Fatalf("AuthZ could not resolve the local account %s: %v", acct.SID, err)
+	}
+	defer ctx.close()
+	before, kernelBefore := map[string]uint32{}, map[string]string{}
+	for _, p := range paths {
+		before[p] = effectiveFor(t, ctx, p)
+		kernelBefore[p], _ = kernelOf(t, p)
+		if before[p]&0x2 == 0 {
+			t.Fatalf("%s: the account cannot write before (%#x): the test's premise", p, before[p])
+		}
+	}
+
+	plain, err := PlanLockdown(herp, []string{acct.SID}, nil, false)
+	if err != nil || len(plain.Carried) != 0 {
+		t.Fatalf("without carryOver: %+v %v", plain.Carried, err)
+	}
+	plan, err := PlanLockdown(herp, []string{acct.SID}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.CarryFailed) != 0 || len(plan.Carried) != 1 || plan.Carried[0].Entries != 4 || plan.Carried[0].Rights != "modify" || plan.Carried[0].NotInheritable != 0 {
+		t.Fatalf("carried %+v, failed %+v", plan.Carried, plan.CarryFailed)
+	}
+	if p, ok := principal(plan, acct.SID); !ok || p.Before != "modify" || p.After != "modify" || p.Entries != 0 {
+		t.Errorf("the account among the principals: %+v %v (want modify → modify: it had it through Users)", p, ok)
+	}
+	if _, err := ApplyLockdown(herp, []string{acct.SID}, plan); err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range paths {
+		after := effectiveFor(t, ctx, p)
+		if after&^before[p] != 0 || after&0x2 == 0 {
+			t.Errorf("%s: the account may do %#x after, %#x before: it must still write and never gain", p, after, before[p])
+		}
+		d, _ := kernelOf(t, p)
+		want := "(A;;0x1301bf;;;" + acct.SID + ")"
+		if i%2 == 0 { // the folders: inheritable, as Users' was
+			want = "(A;OICI;0x1301bf;;;" + acct.SID + ")"
+		}
+		if !strings.Contains(d, want) || !strings.Contains(d, "0x1200a9;;;BU)") {
+			t.Errorf("%s: %s, want %s and Users at read & execute", p, d, want)
+		}
+	}
+	newFile := filepath.Join(herp, "c.doc")
+	mkfile(t, newFile)
+	if m := effectiveFor(t, ctx, newFile); m&0x2 == 0 || m&^MaskModify != 0 {
+		t.Errorf("a file made after the lock-down: %#x, want write, at most Modify", m)
+	}
+	_ = os.Remove(newFile)
+	if _, skipped, err := RestoreFolder(herp, plan.Entries); err != nil || skipped != 0 {
+		t.Fatalf("RestoreFolder: %d skipped, %v", skipped, err)
+	}
+	for _, p := range paths {
+		if got, _ := kernelOf(t, p); got != kernelBefore[p] {
+			t.Errorf("%s after the restore:\n got  %s\n want %s", p, got, kernelBefore[p])
+		}
+	}
+}
+
+// A trusted SID of no account gets nothing carried over — AuthZ cannot
+// resolve it (the plan says so in CarryFailed), or, resolved with no group
+// that writes there, it had nothing to carry; the lock-down goes on.
+func TestLockdown_CarryOverUnresolved(t *testing.T) {
+	herp := filepath.Join(longTemp(t), "herp")
+	mkfile(t, filepath.Join(herp, "a.doc"))
+	setDACL(t, herp, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	ghost := "S-1-5-21-111111111-222222222-333333333-4001"
+	plan, err := PlanLockdown(herp, []string{ghost}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Carried) != 0 || (len(plan.CarryFailed) == 1) == (len(plan.CarrySIDs) == 1) {
+		t.Fatalf("failed %+v, carried %+v, carry SIDs %v", plan.CarryFailed, plan.Carried, plan.CarrySIDs)
+	}
+	t.Logf("AuthZ on a SID of no account: failed %+v", plan.CarryFailed)
+}
+
+// Review C-1 on real DACLs: a deny for INTERACTIVE — a logon-type SID no
+// AuthZ context holds, though the account's real token may — stops the
+// carry on every entry it sits on (skipped), and nothing is added for the
+// account there.
+func TestLockdown_CarryOverStopsAtADenyItCannotSee(t *testing.T) {
+	acct := localTestUser(t)
+	herp := filepath.Join(longTemp(t), "herp")
+	mkfile(t, filepath.Join(herp, "a.doc"))
+	setDACL(t, herp, "D:P(D;OICI;0x2;;;IU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	plan, err := PlanLockdown(herp, []string{acct.SID}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Carried) != 1 || plan.Carried[0].Entries != 0 || plan.Carried[0].Skipped != 2 {
+		t.Fatalf("carried %+v (failed %+v): want nothing carried, both entries skipped", plan.Carried, plan.CarryFailed)
+	}
+	if _, err := ApplyLockdown(herp, []string{acct.SID}, plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{herp, filepath.Join(herp, "a.doc")} {
+		if d, _ := kernelOf(t, p); strings.Contains(d, acct.SID) {
+			t.Errorf("%s: an entry for the account: %s", p, d)
+		}
 	}
 }

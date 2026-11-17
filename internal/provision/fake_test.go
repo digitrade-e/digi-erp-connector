@@ -39,7 +39,9 @@ type fakeDaemon struct {
 	// queuedFrom: from the queuedFrom-th question about the queue on (1-based), it answers queuedLater orders — an
 	// order that arrives in the middle of a run. 0: never.
 	queuedFrom, queuedLater, queueAsks int
-	srv                                *httptest.Server
+	// jobs are GET /api/sendOrder/{jobId}'s statuses (review R6: entry_busy).
+	jobs map[string]string
+	srv  *httptest.Server
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
@@ -74,6 +76,13 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": 1, "version": d.version})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/health":
 		w.WriteHeader(d.health)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sendOrder/"):
+		st, ok := d.jobs[strings.TrimPrefix(r.URL.Path, "/api/sendOrder/")]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": st})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sendOrder" && !d.noQueueRoute:
 		d.queueAsks++
 		queued := d.queued
@@ -114,9 +123,13 @@ type fakeSys struct {
 	finalPath     map[string]string   // the plan's final path, by folder (default \\?\<dir>)
 	lastExecExts  map[string]bool     // what the last plan was asked to flag
 	lastTrusted   []string            // and whom it trusted
-	folderRules   FolderRules         // FolderRules (review T3); none by default
-	reparse       map[string]string   // ReparsePointOn by path; otherwise only the path itself is looked at
-	daemon        *fakeDaemon
+	lastCarry     bool                // and whether it carried over (v1.0.32)
+	carryFails    map[string]string   // trusted SIDs whose carry-over fails, with why
+	// carryNotInheritable: trusted SIDs whose carried entry is not handed down to files, on how many folders
+	carryNotInheritable map[string]int
+	folderRules         FolderRules       // FolderRules (review T3); none by default
+	reparse             map[string]string // ReparsePointOn by path; otherwise only the path itself is looked at
+	daemon              *fakeDaemon
 	// onStart runs when the service starts, after the daemon reloaded.
 	onStart func(cfg config.Config)
 	calls   []string
@@ -285,9 +298,9 @@ func (s *fakeSys) sidOf(name string) string {
 
 // The folder-acl fakes: a folder's security is one SDDL string; a lock-down
 // replaces it (and clears its writers), a restore puts the recorded one back.
-func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool) (dataacl.LockdownPlan, error) {
+func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[string]bool, carry bool) (dataacl.LockdownPlan, error) {
 	s.call("plan-lockdown:" + filepath.Base(dir))
-	s.lastExecExts, s.lastTrusted = execExts, trusted
+	s.lastExecExts, s.lastTrusted, s.lastCarry = execExts, trusted, carry
 	if err := s.lockdownErr[dir]; err != nil {
 		return dataacl.LockdownPlan{}, err
 	}
@@ -303,6 +316,19 @@ func (s *fakeSys) PlanFolderLockdown(dir string, trusted []string, execExts map[
 		Principals:     []dataacl.PrincipalRights{{SID: "S-1-5-32-545", Name: `BUILTIN\Users`, Before: "modify", After: "read", Entries: 2}},
 		Owners:         []dataacl.OwnerChange{{SID: "S-1-5-21-0-0-0-1001", Name: `BFL\olduser`, Entries: 1}},
 		EntriesChanged: 2, Executables: s.executables[dir], FinalPath: final, ParentWriters: s.parentWriters[dir]}
+	// v1.0.32's carry-over: every trusted writer given back Modify on both
+	// entries, but those the test says do not resolve.
+	if carry {
+		for _, t := range trusted {
+			if why, ok := s.carryFails[t]; ok {
+				plan.CarryFailed = append(plan.CarryFailed, dataacl.CarryFailure{SID: t, Name: t, Error: why})
+				continue
+			}
+			plan.CarrySIDs = append(plan.CarrySIDs, t)
+			plan.Carried = append(plan.Carried, dataacl.CarriedRights{SID: t, Name: t, Rights: "modify", Entries: 2, NotInheritable: s.carryNotInheritable[t]})
+			plan.Principals = append(plan.Principals, dataacl.PrincipalRights{SID: t, Name: t, Before: "none", After: "modify", Entries: 2})
+		}
+	}
 	return plan, nil
 }
 
@@ -549,6 +575,17 @@ func handInstallBox(t *testing.T) (*fakeSys, *fakeDB, string) {
 }
 
 func (s *fakeSys) FolderRules() FolderRules { return s.folderRules }
+
+// FinalFilePath is the test's final path for path (finalPath), else \\?\<path> for a file that exists.
+func (s *fakeSys) FinalFilePath(path string) (string, error) {
+	if f, ok := s.finalPath[path]; ok {
+		return f, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", err
+	}
+	return `\\?\` + path, nil
+}
 
 // FinalPath is the test's final path for dir (finalPath), else \\?\<dir> for a folder that exists.
 func (s *fakeSys) FinalPath(dir string) (string, error) {

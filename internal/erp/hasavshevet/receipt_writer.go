@@ -409,6 +409,12 @@ func (w *ReceiptWriter) Write(ctx context.Context, req ReceiptRequest) (*Receipt
 		return nil, err
 	}
 	if found {
+		// Review R6: a receipt resolved as failed (the inflight command) was
+		// never written and never will be under its key: its number is void.
+		if e.State == receiptFailed {
+			w.log.Warn(fmt.Sprintf("receipt key=%s repeated: receipt %d was resolved as failed (never written); answering 409 RECEIPT_FAILED", key, e.Number))
+			return nil, fmt.Errorf("%w: receipt %d of idempotency key %s was resolved as failed and never written; a new receipt needs a new key", ErrReceiptFailed, e.Number, key)
+		}
 		var notes []string
 		if !sameReceiptRequest(e.Request, req, key) {
 			notes = append(notes, fmt.Sprintf("this request differs from the one first sent with idempotency key %s; receipt %d was written from the first", key, e.Number))

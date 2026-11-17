@@ -58,6 +58,22 @@ func FinalDirPath(dir string) (string, error) {
 	return filepath.Clean(dir), nil
 }
 
+// FinalFilePath is FinalDirPath for a file: path itself, unless it is a
+// symlink or not a regular file.
+func FinalFilePath(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%w: %s", ErrReparsePoint, path)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("dataacl: %s is not a regular file", path)
+	}
+	return filepath.Clean(path), nil
+}
+
 // PlainDir reports an error unless path is a directory and not a symlink.
 func PlainDir(path string) error {
 	fi, err := os.Lstat(path)

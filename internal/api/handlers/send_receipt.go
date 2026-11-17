@@ -148,6 +148,11 @@ func writeReceiptError(w http.ResponseWriter, log logger.LoggerService, key stri
 	case errors.Is(err, hasavshevet.ErrCounterRetired):
 		status, code, msg = http.StatusServiceUnavailable, "COUNTER_EXHAUSTED",
 			"The receipt counter is retired and issues no new number; nothing was written — see the connector log"
+	// Review R6: the key's receipt was resolved as failed on the box (the
+	// inflight command): never written, its number void. Not a retry.
+	case errors.Is(err, hasavshevet.ErrReceiptFailed):
+		status, code, msg = http.StatusConflict, "RECEIPT_FAILED",
+			"This idempotencyKey's receipt was resolved as failed on the connector: it was never written and never will be; send the receipt again with a new idempotencyKey"
 	case errors.Is(err, hasavshevet.ErrImporterWritable):
 		status, code, msg = http.StatusServiceUnavailable, "IMPORTER_WRITABLE",
 			"The receipt importer can be changed by accounts besides the administrators, and this connector is behind the link: it is not run — nothing was written; see the connector log"

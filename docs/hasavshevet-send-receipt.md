@@ -270,7 +270,10 @@ One Write, under the import lock:
 1. validate the whole request — before any number is touched;
 2. a key already `written` answers its stored number and `import`, touching
    nothing (a different body is a warning; the stored request is what the
-   receipt holds); a key `reserved` is finished from its stored request;
+   receipt holds); a key `reserved` is finished from its stored request; a key
+   `failed` — resolved as failed on the box by the `inflight` command (v1.0.32,
+   plan 087 review R6): never written, its number void — answers `409
+   RECEIPT_FAILED`, never written under it;
 3. otherwise persist the index entry owning the next number (`reserved`), then
    move the store on;
 4. write the history copies, `KUPAIN.prm` if missing or different, and **last**

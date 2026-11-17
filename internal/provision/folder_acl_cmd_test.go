@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
@@ -152,7 +153,11 @@ func TestFolderACL_Refusals(t *testing.T) {
 	wantRefusal(t, err, CodeFolderTooLarge)
 	sys.lockdownErr = nil
 
-	// An order frozen for herp is not finished; orders without a rule go to sendOrderDir.
+	// Re-review MINOR 3: unfinished index entries — an order frozen for
+	// herp, a rule-less one for sendOrderDir — do not hold a lock-down back
+	// (it changes none of SYSTEM's rights, and they are not in the running
+	// connector's memory); an order the running connector holds does: the
+	// restart after it would lose it (orders_pending, nothing written).
 	ix := hasavshevet.OrderIndexDir(sys.dir)
 	if err := os.MkdirAll(ix, 0o700); err != nil {
 		t.Fatal(err)
@@ -163,12 +168,18 @@ func TestFolderACL_Refusals(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ix, "p.json"), []byte(`{"key":"p","number":1000301,"state":"reserved","reservedAt":"x"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"herp", "sendOrderDir"} {
-		_, err = ApplyFolderACL(context.Background(), env, lock(n), false)
-		wantRefusal(t, err, CodeFolderInFlight)
-	}
+	sys.daemon.set(func(d *fakeDaemon) { d.queued = 1 })
+	sys.calls = nil
+	_, err = ApplyFolderACL(context.Background(), env, lock("herp"), false)
+	wantRefusal(t, err, CodeOrdersPending)
 	if slices.ContainsFunc(sys.calls, func(c string) bool { return strings.HasPrefix(c, "lockdown:") }) {
 		t.Fatalf("a refusal wrote: %v", sys.calls)
+	}
+	sys.daemon.set(func(d *fakeDaemon) { d.queued = 0 })
+	for _, n := range []string{"herp", "sendOrderDir"} {
+		if _, err = ApplyFolderACL(context.Background(), env, lock(n), true); err != nil {
+			t.Errorf("--check lock-down of %s with unfinished entries: %v", n, err)
+		}
 	}
 
 	// A folder holding the data directory is never locked down.
@@ -289,5 +300,149 @@ func TestState_ListsFolderACLPreimages(t *testing.T) {
 	st, _ = State(context.Background(), env, StateInput{})
 	if len(st.FolderACL.Preimages) != 1 || st.FolderACL.Preimages[0].Error == "" || st.FolderACL.Preimages[0].Folder != "" {
 		t.Errorf("a changed pre-image: %+v", st.FolderACL.Preimages)
+	}
+}
+
+// v1.0.32: carryOver reaches the lock-down; the answer names the writers
+// given back their write (carriedOver) and trusted_writer_no_write is gone
+// for them; one whose groups do not resolve is carry_over_failed and keeps
+// the warning; a restore takes no carryOver.
+func TestFolderACL_CarryOver(t *testing.T) {
+	sys, env, _, _ := aclBox(t)
+	cfg, _ := readConfig(t, sys.dir)
+	cfg.Documents.TrustedWriters = []config.TrustedWriter{{SID: "S-1-5-21-1-2-3-1105", Name: `BFL\wizsched`}, {SID: "S-1-5-21-1-2-3-1106", Name: `BFL\other`}}
+	writeConfig(t, sys.dir, cfg)
+	sys.carryFails = map[string]string{"S-1-5-21-1-2-3-1106": "the domain controller does not answer"}
+	lock := aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"}; in.CarryOver = true })
+	res, err := ApplyFolderACL(context.Background(), env, lock, true)
+	if err != nil || !sys.lastCarry {
+		t.Fatalf("--check: %v (carry %v)", err, sys.lastCarry)
+	}
+	h := res.FolderACL.Folders[0]
+	if len(h.CarriedOver) != 1 || h.CarriedOver[0].SID != "S-1-5-21-1-2-3-1105" || h.CarriedOver[0].Rights != "modify" || h.CarriedOver[0].Entries != 2 {
+		t.Errorf("carriedOver %+v", h.CarriedOver)
+	}
+	if warned(res, `trusted_writer_no_write: BFL\wizsched`) || !warned(res, `trusted_writer_no_write: BFL\other`) || !warned(res, "carry_over_failed: S-1-5-21-1-2-3-1106") {
+		t.Errorf("warnings %v", res.Warnings)
+	}
+	b, _ := json.Marshal(res)
+	if !strings.Contains(string(b), `"carriedOver":[{"sid":"S-1-5-21-1-2-3-1105"`) {
+		t.Errorf("the wire shape: %s", b)
+	}
+	// Review item 5: a carried entry not handed down to new files is said.
+	sys.carryNotInheritable = map[string]int{"S-1-5-21-1-2-3-1105": 1}
+	res, err = ApplyFolderACL(context.Background(), env, lock, true)
+	if err != nil || !warned(res, "carried_not_inheritable: S-1-5-21-1-2-3-1105") || res.FolderACL.Folders[0].CarriedOver[0].NotInheritable != 1 {
+		t.Errorf("not inheritable: %v %v", res.Warnings, err)
+	}
+	sys.carryNotInheritable = nil
+	// Without it: today's lock-down.
+	if _, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp"} }), true); err != nil || sys.lastCarry {
+		t.Errorf("without carryOver: %v (carry %v)", err, sys.lastCarry)
+	}
+	_, err = ApplyFolderACL(context.Background(), env, aclIn("restore", func(in *FolderACLInput) {
+		in.Folder, in.Preimage, in.CarryOver = "herp", strings.Repeat("a", 64), true
+	}), true)
+	wantRefusal(t, err, CodeSpecInvalid)
+}
+
+// warnLog keeps what a component warns about (the folder guard, Recover).
+type warnLog struct{ warns []string }
+
+func (l *warnLog) Info(string)             {}
+func (l *warnLog) Error(m string, _ error) { l.warns = append(l.warns, m) }
+func (l *warnLog) Warn(m string)           { l.warns = append(l.warns, m) }
+func (l *warnLog) Success(string)          {}
+func (l *warnLog) Close() error            { return nil }
+
+// Re-review MINOR 3, the receipt dead end: a receipt reserved for the bound
+// receipt folder while the guard refuses that folder (others can write to
+// it, behind the link). Recover cannot deliver it; folder-acl used to refuse
+// the lock-down (folder_in_flight: a reserved receipt), inflight done
+// answered RECOVER_DELIVERS and fail may_be_written — only a fix by hand on
+// the box was left. Now the lock-down goes through (it changes none of
+// SYSTEM's rights), and at the start after it the daemon's guard allows the
+// folder and Recover delivers the receipt.
+func TestFolderACL_LockdownLetsRecoverDeliverAReservedReceipt(t *testing.T) {
+	sys, env, _ := countersBox(t)
+	kupain := mkdir(t, "kupain")
+	if _, err := ApplyDocuments(context.Background(), env, docsIn(func(in *DocumentsInput) {
+		in.ChangeSet = "cs-minor3-d1"
+		in.Folders = map[string]*FolderInput{"herp_receipts": {Kind: "receipts", Path: kupain, NamePattern: "KUPAIN_{n}.doc"}}
+		in.Receipts = &DocumentsReceiptsInput{Folder: strp("herp_receipts"), Counter: strp("receipts")}
+	}), false); err != nil {
+		t.Fatal(err)
+	}
+	sys.writers = map[string][]string{kupain: {usersWrite}}
+	cfg, _ := readConfig(t, sys.dir)
+
+	// The receipt, reserved as the writer leaves it when the folder is
+	// refused at its finishing (fake customer data).
+	const key, number = "0b8f6a4e-3c1d-4e2f-9a7b-5c6d7e8f9a0b", 500_100
+	req := hasavshevet.ReceiptRequest{IdempotencyKey: key, AccountKey: "100234", SettledDate: "2026-10-11", AmountMinor: 710700,
+		Installments: 1, CardIssuer: "2", CardBrand: "2", Last4: "1234", ConfirmationCode: "0123456", ProviderUID: "26101112345678901234567",
+		Remarks: "INV-1001", AgentKey: "17", Name: "Test Customer Ltd", Address: "1 Example St", Phone: "04-0000000", Email: "test@example.com"}
+	b, err := json.Marshal(map[string]any{"key": key, "number": number, "state": "reserved", "request": req, "files": nil,
+		"import": "not_run", "reservedAt": "2026-11-17T08:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := filepath.Join(sys.dir, "receipts", "index")
+	if err := os.MkdirAll(ix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ix, key+".json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The store past it, as the reservation left it.
+	if err := os.WriteFile(filepath.Join(sys.dir, "receipts", "receiptNumber.json"), []byte(fmt.Sprintf(`{"nextReceiptNumber": %d}`, number+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	delivered := filepath.Join(kupain, fmt.Sprintf("KUPAIN_%d.doc", number))
+
+	// A daemon start: the guard reads the folders, then Recover runs.
+	start := func() *warnLog {
+		t.Helper()
+		log := &warnLog{}
+		cfg, _ := readConfig(t, sys.dir)
+		guard := hasavshevet.NewFolderGuard(cfg, true, sys.FolderWriters, nil, log)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		guard.Run(ctx) // the first read of every folder, then it returns
+		wc := hasavshevet.ReceiptWriterConfigFrom(cfg, sys.dir)
+		wc.FolderCheck = guard.ReceiptCheck(cfg)
+		w, err := hasavshevet.NewReceiptWriter(wc, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer w.Close() // the service stops before the next start
+		if err := w.Recover(); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+		return log
+	}
+
+	log := start()
+	if _, err := os.Stat(delivered); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused folder got the receipt: %v", err)
+	}
+	if !slices.ContainsFunc(log.warns, func(m string) bool { return strings.Contains(m, "reserved but not finished yet") }) {
+		t.Fatalf("Recover did not say it waits for the folder: %v", log.warns)
+	}
+	if v, err := hasavshevet.InspectReceipt(sys.dir, cfg, number, time.Now()); err != nil || v.State != "reserved" {
+		t.Fatalf("before the lock-down: %+v %v", v, err)
+	}
+
+	res, err := ApplyFolderACL(context.Background(), env, aclIn("lockdown", func(in *FolderACLInput) { in.Folders = []string{"herp_receipts"} }), false)
+	if err != nil || len(res.FolderACL.Folders) != 1 || res.FolderACL.Folders[0].Written == 0 {
+		t.Fatalf("lock-down with a reserved receipt in the folder: %+v %v", res, err)
+	}
+
+	start()
+	if _, err := os.Stat(delivered); err != nil {
+		t.Fatalf("Recover did not deliver the receipt after the lock-down: %v", err)
+	}
+	if v, err := hasavshevet.InspectReceipt(sys.dir, cfg, number, time.Now()); err != nil || v.State != "written" {
+		t.Fatalf("after the lock-down and the start: %+v %v", v, err)
 	}
 }

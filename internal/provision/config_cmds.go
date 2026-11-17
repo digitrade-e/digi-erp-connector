@@ -259,6 +259,9 @@ func (a *applier) checkReceipts(in ReceiptsInput) error {
 			return refuse(CodeImporterMissing, "name a file that exists", "receipt importer file %s is not on this machine", p)
 		}
 	}
+	if err := a.checkLinkedPaths(); err != nil { // review m6's rest (v1.0.32), behind the link
+		return err
+	}
 	for _, p := range runs {
 		if p == "" {
 			continue
@@ -326,7 +329,7 @@ func (a *applier) checkOrders(allowWritable bool) error {
 	if r := a.s.validateOrders(); r != nil {
 		return r
 	}
-	checks := []func() error{a.checkFilesExist, a.checkImporterWriters, a.checkOrderNumbers}
+	checks := []func() error{a.checkFilesExist, a.checkLinkedPaths, a.checkImporterWriters, a.checkOrderNumbers}
 	if !a.tgt.OrdersPickup() { // model (a): the ERP's scheduler imports
 		checks = append([]func() error{a.checkImporterStated}, checks...)
 	}

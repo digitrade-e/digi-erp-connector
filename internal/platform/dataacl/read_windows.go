@@ -75,6 +75,21 @@ func PlainDir(path string) error {
 // are. A reparse point or a file is refused; one that does not exist wraps os.ErrNotExist.
 func FinalDirPath(dir string) (string, error) { return plainFinalPath(dir) }
 
+// FinalFilePath is FinalDirPath for a file (v1.0.32, review m6: the importer
+// files a command names): opened without following it — a reparse point or a
+// multiply-linked file is refused, a folder too — its final path.
+func FinalFilePath(path string) (string, error) {
+	n, err := open(path, windows.READ_CONTROL)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(n.h)
+	if n.dir() {
+		return "", fmt.Errorf("dataacl: %s is a folder, not a file", path)
+	}
+	return finalPath(n.h)
+}
+
 // plainFinalPath opens dir (not following it) and returns its final path; a reparse point or a file is refused.
 func plainFinalPath(dir string) (string, error) {
 	n, err := open(dir, windows.READ_CONTROL)

@@ -88,6 +88,17 @@ Consequences worth knowing:
 - CI runs on Windows because of the GUI build tags and because the config/secrets
   tests exercise `PROGRAMDATA` and DPAPI.
 
+### Contracts with older builds (plan 088 review m8, v1.0.32)
+
+The link's upgrade runner of the build BEFORE judges a new build by what the new build writes: it runs the new
+`provision.exe state` (`ok`, `result.daemon.{asked, version, health, queue.{queued, running}, error}`) and reads the new
+link's `DataDir\link\session.json` (`build`, `connected`, `epoch`, `relay`, `connectedAt`, `liveAt`). A build that drops
+or renames one of them, or changes its type, is rolled back in the field by the build before it. The golden files
+`internal/provision/testdata/contract/state-runner-v1.0.31.json` and
+`internal/link/testdata/contract/session-runner-v1.0.31.json` are those readers' views;
+`TestContract_StateForTheOlderRunner` and `TestContract_SessionMarkerForTheOlderRunner` fail when a build breaks them.
+Add a field freely; never remove or rename one listed there (a newer runner reading more gets a file of its own).
+
 ## House rules
 
 These exist because each one was violated at least once and cost something.

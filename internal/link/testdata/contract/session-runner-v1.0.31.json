@@ -1,0 +1,11 @@
+{
+  "reader": "the link's upgrade runner from v1.0.31 (internal/link/upgrade_health.go, ReadSessionMarker): it reads the NEW link's DataDir\\link\\session.json and judges the upgrade by these fields; a build that drops or renames one is rolled back by the build before it",
+  "paths": {
+    "build": "string",
+    "connected": "bool",
+    "epoch": "number",
+    "relay": "string",
+    "connectedAt": "time",
+    "liveAt": "time"
+  }
+}

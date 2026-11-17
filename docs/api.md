@@ -144,7 +144,7 @@ strictly: a missing or `null` key, an unknown field, a wrong type, a duplicate k
 or a key in the wrong case is a 400. Only a 400 is final for the backend; it
 retries anything else with the same key. Errors: `VALIDATION_ERROR` (400, `details.field`),
 `RECEIPTS_NOT_CONFIGURED` / `RECEIPT_NUMBER_STORE_UNAVAILABLE` /
-`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` / `FOLDER_WRITABLE` / `IMPORTER_WRITABLE` (503), `RECEIPT_CONFIG_INVALID` /
+`RECEIPT_WRITER_BUSY` / `RECEIPT_REQUEST_READ_FAILED` / `RECEIPT_DATA_IN_USE` / `COUNTER_EXHAUSTED` / `COUNTER_MISSING` / `FOLDER_WRITABLE` / `IMPORTER_WRITABLE` (503), `RECEIPT_FAILED` (409, v1.0.32), `RECEIPT_CONFIG_INVALID` /
 `RECEIPT_INDEX_UNREADABLE` / `RECEIPT_STORED_REQUEST_INVALID` /
 `RECEIPT_WRITE_FAILED` (500). Full contract, field
 table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
@@ -198,6 +198,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `FOLDER_TEST_CHANGED` | 503 | Plan 087 review R2: the resend of a retryable order whose folder's test flag is no longer the one frozen at its reservation. Nothing written; the order stays retryable; resend once the flag is back (`state`'s `orders.folderTestChanged`). |
 | `FOLDER_WRITABLE` | 503 | Plan 087 review M1: behind the link, the order's typed folder (or the bound receipt folder) can be written by accounts besides the administrators, so the connector writes nothing there. Nothing reserved; resend with the same key once the folder is locked down and the service restarted ([troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to)). |
 | `IMPORTER_WRITABLE` | 503 | Plan 087 review T1: behind the link, the importer the order or receipt would run (has.exe or a BAT: the file, its folder or a folder above — and, since v1.0.31, the parameter file has.exe is handed: review R4-4) can be changed by accounts besides the administrators, or does not read — `trustedWriters` included — so the connector runs nothing and reserves nothing. Read before each run (the daemon's guard; a refused one again at most once a minute when needed). A queued order stays retryable. |
+| `RECEIPT_FAILED` | 409 | v1.0.32 (plan 087 review R6): the idempotency key's receipt was resolved as failed on the box (the `inflight` command): never written, its number void, never written under this key. Not a retry: send the receipt again with a new `idempotencyKey`. The B2B today (review m-c; client-instance/backend `ReceiptProjector::onResult` via `GenericDocumentSender::failed`, read 2026-11-17): a non-400 refusal is recorded `failed` and re-sent by reconcile up to `ReceiptStatus::MAX_ATTEMPTS` (3), then `stopped` with the `STOPPED` alarm ("will not be retried automatically") — no crash, no endless retry, two needless re-sends. Treating 409 `RECEIPT_FAILED` like 400 (stop at once) is the backend's follow-up. |
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |

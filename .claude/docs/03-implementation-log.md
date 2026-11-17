@@ -388,3 +388,61 @@ and digi-mcp stay pinned at `fcd0277`):
   slow domain controller); only a folder never read is unknown.
 - R4-4: the importer guard reads the parameter file has.exe is handed (`OrderImporterFiles`, `ReceiptImporterFiles`).
 - D12's comments now say what the relays serve: 0.3.0's `/readyz` checks its registry; 0.2.0's only said draining.
+
+## 2026-11-17 — v1.0.32: plan 087/088 follow-ups (unattended; decisions recorded here)
+
+Branch `feat/v1.0.32-followups` from v1.0.31 (775d937); a security review comes before any merge.
+
+- **R6, the `inflight` command** (`provision/inflight_cmd.go`, `hasavshevet/inflight.go`, link `commands_v1032.go`;
+  digi-mcp feature `inflight`): resolves ONE unfinished order (by `historyId`) or receipt (by `number`) as `fail`
+  (no candidate file may exist — `may_be_written`; a place that cannot be looked at counts as written) or `done` (its
+  written file or history copy must exist — `not_written`); CAS on `expect` (`entry_moved`), `entry_final`,
+  `entry_busy` (the daemon's `GET /api/sendOrder/<n>` queued/running; a receipt's `writer.lock` held), `entry_missing`.
+  Decisions: the run stops and restarts the service as `counters start-from` does, orders included (a concurrent
+  re-queue of a retryable entry is otherwise possible); `expect` takes a string or `{state, configSha256}`; model (b)'s
+  evidence is the history copy (the importer runs only after it; the live `IMOVEIN.doc` is not attributable); `done`
+  takes the history copy alone, as asked, the check showing which files exist. Orders are resolved into values v1.0.31
+  reads (`failed`/`written`, the change set and time in `error`) — no format floor; a receipt resolved as failed needs
+  a new state (`failed`, `409 RECEIPT_FAILED`) and raises `DataDir\format-floor` to 1.0.32 when written — not the
+  compiled RollbackFloor, so a box that never does keeps its rollback to v1.0.31.
+- **Carry-over at lock-down** (`dataacl/carry.go`, `authz_windows.go`; `folder-acl` `carryOver`, answer
+  `carriedOver`; proposed digi-mcp feature `folder_acl_carry_over`): ONE explicit allow per trusted writer per entry =
+  AuthZ effective on the old descriptor ∩ Modify, only where the masking took some; inheritable only as far as the old
+  DACL handed it down (a lower bound); none on an entry with a conditional entry for it; after the leading explicit
+  denies. AuthZ failure → no carry-over, `carry_over_failed:` warning; resolved again before the run writes (refusal
+  `carry_over_failed`). Property test; Windows test with a real local account.
+- **m6's rest**: behind the link, image folders and importer files a command sets are judged where they resolve
+  (`checkLinkedPaths`: reparse point → refused; an existing one must resolve to itself) — `image_folder_forbidden`,
+  `importer_not_erp`.
+- **m8**: golden contracts of what the v1.0.31 upgrade runner reads (`state`'s daemon fields, `session.json`).
+- **ProtectTree / ProtectFile** keep the auto-inherited mark (templates carry P|AI|REQ); entries written before are
+  not rewritten for it (the comparison ignores the mark — a one-time rewrite of the whole data directory was not worth
+  it: its root is truly protected, so no propagation reaches it).
+
+## 2026-11-17 — v1.0.32: the re-review's minors (at dfa8a31)
+
+- **MINOR 1, `history_missing`** (`hasavshevet/inflight.go`): a delivered or imported file proves `done` only when its
+  bytes equal a READABLE history copy's. Without one (missing, a link, unreadable) the connector cannot show the file
+  is its own — it writes history first, so the file may be planted, or the legacy app's under the same number in a
+  shared `herp` — and `done` answers `history_missing` (a new code rather than reusing `not_written`: the file IS there,
+  and the fix is a check by hand, not a resend). The comparison streams both files (64 KiB blocks, sizes first), so the
+  old 8 MiB read cap is gone and a large history copy compares instead of counting as absent.
+- **MINOR 2, `acceptHistoryOnly` for model (b) only** (`hasavshevet/inflight.go` `historyOnlyOK`,
+  `ErrDeliveryLeavesFile`): a typed-folder order (a frozen rule) or a model (a) order refuses the flag
+  (`history_only`). Their delivery leaves the file, or the importer's `*.MASOFON2.BAK` rename of it, so history alone
+  says the document never got there. Decision: the model is today's config, because the entry does not record it. A
+  configured `sendOrderPickupDir` counts as model (a), the same test the view uses to decide whether to look for pickup
+  files. Those two orders now have no remote way out on history alone (`fail` still answers `may_be_written` while the
+  history copy exists). That is accepted: the fix is by hand, putting the history copy where the importer reads it,
+  whose rename then proves `done`.
+- **MINOR 3, no `folder_in_flight` in `folder-acl`** (`provision/folder_acl_cmd.go`: `folderACLIdle` removed, from
+  both lock-down and restore). An ACL change touches none of SYSTEM's rights, and the connector writes as SYSTEM.
+  Unfinished index entries are not in the running connector's memory. The one hazard is the restart afterwards, and
+  `a.idle` already guards it (`orders_pending`). The refusal turned a reserved receipt in a refused bound folder into a
+  dead end: Recover waits for the folder, the lock-down that would allow the folder refused, and `inflight` sends the
+  receipt back to Recover. Decisions:
+  - Restore loses the check too: it puts back recorded entries and SYSTEM's are as they were, so it cannot break a
+    write either.
+  - `acceptUnreadable` stays in folder-acl's input (digi-mcp may send it) but accepts nothing, since no index is read.
+  - Test `TestFolderACL_LockdownLetsRecoverDeliverAReservedReceipt` runs the chain with the daemon's real
+    `FolderGuard` (over the fake's writers) and receipt writer: refused → lock-down → start → delivered and `written`.

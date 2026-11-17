@@ -30,7 +30,8 @@ same way in an elevated PowerShell. The code is
 | `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
 | `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
 | `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
-| `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`?, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
+| `inflight [--check] --spec -` | `{"version":1,"changeSet","kind":"orders"\|"receipts","historyId"\|"number","expect":"reserved"\|"retryable","resolve":"fail"\|"done"}` (+ `assumeIdle`?; the check needs only `kind` and the key) | Resolves ONE unfinished order or receipt index entry as failed or done (plan 087 review R6, v1.0.32, below) | that entry; `DataDir\format-floor` (a receipt resolved as failed) |
+| `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`? — accepted, unused since v1.0.32 —, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
@@ -489,6 +490,73 @@ Config-command flow; `restore` puts
 test ranges, and its GUI save drops the block —
 [troubleshooting.md § A downgrade below v1.0.30](troubleshooting.md#a-downgrade-below-v1030-plan-087).
 
+## `inflight`: resolve one unfinished order or receipt (plan 087 review R6)
+
+Connector v1.0.32; digi-mcp's feature `inflight`. An entry that can only finish after a folder change blocked that
+change for good (reviews m5, m9: `documents`, `receipts` and `restore` wait for unfinished entries), and the only way
+out was editing the index on the box (troubleshooting.md § The order index). Signed (`inflight`, `inflight-check` over
+the link; WinRM too), not sealed.
+
+```json
+{"version":1,"changeSet":"cs-bfl-inflight-01","kind":"orders","historyId":"<historyId>","expect":"reserved","resolve":"fail"}
+{"version":1,"changeSet":"cs-bfl-inflight-02","kind":"receipts","number":500123,"expect":"reserved","resolve":"done"}
+```
+
+- **One entry**: an order by its `historyId`, a receipt by its `number` (`entry_missing`: none). `expect` is the
+  entry's state as the check read it — a string, or `{"state", "configSha256"?}` — compare-and-set (`entry_moved`).
+  `resolve` is `fail` or `done`. Only an unfinished entry: `reserved` (an order's outcome unknown after a restart, or
+  a receipt Recover could not finish) or `retryable` (an order); `written` and `failed` are final (`entry_final`).
+- **The candidate files** (`role`): `delivered` — the file the importer reads, in its target folder: an order's frozen
+  name in its typed folder, the pickup folder's `IMOVEIN_<n>.doc` / `TMP_IMOVEIN_<n>.doc`, a receipt's file in the
+  receipt folder (its pattern); `imported` — the importer's rename of it, `<name>.….MASOFON2.BAK` (model (b)'s
+  `IMOVEIN.….MASOFON2.BAK` in `sendOrderDir` only when its bytes are this order's: it names no number); `history` —
+  `sendOrderDir\history\<n>\IMOVEIN_<n>.doc` / `.prm`, `DataDir\history\receipts\<n>\KUPAIN_<n>.doc`. A delivered or
+  imported file carries `matchesHistory` (its bytes against the history copy's, streamed whatever their size). A place that cannot be looked at (a
+  typed folder no longer configured) counts as written.
+- **`fail`**: only when none exists — the importer's `*.MASOFON2.BAK` rename included (review m-b: history pruned and
+  the file imported is an order the books have) — `may_be_written` otherwise (check Hashavshevet, Asmahta `n`, then
+  resolve it as done, or move the file aside after checking it). **Never prune `history\` while an entry is
+  unfinished**: model (b)'s renames name no number, so its history copy is the only proof there. An order becomes `failed`; a receipt `failed`, its number void.
+- **`done`** (review R6-1): only on proof of **delivery** — a `delivered` or `imported` file with the history copy's
+  bytes; a planted file with other bytes proves nothing. A delivered or imported file with **no readable history
+  copy** is `history_missing` (re-review MINOR 1): the connector writes the history copy first, so without it nothing
+  shows the file is the connector's — it may be planted, or the legacy app's under the same number in a shared folder;
+  check Hashavshevet and the folder by hand. The history copy
+  alone is `history_only`: every path writes it BEFORE the document reaches Hashavshevet (model (a) and typed folders
+  publish after it; model (b) runs has.exe after it; a receipt's `.prm` and `.doc` come after it). A **model (b)**
+  order (no rule, no pickup folder configured) may be resolved on it only with `acceptHistoryOnly: true` — model (b)
+  truly leaves nothing else after a real import (the next order overwrites `IMOVEIN.doc`), so a person confirms
+  Hashavshevet has document `n`. **Model (a) and typed-folder orders refuse the flag** (`history_only`, re-review
+  MINOR 2): their delivery leaves the file or the importer's rename of it, so the history copy alone says it was never
+  delivered — check Hashavshevet and the folder by hand; if the document is missing, put the history copy where the
+  importer reads it, and its rename then proves `done`. The model is judged by today's config (the entry does not
+  record it): a pickup folder configured means model (a). The check answer names the flag (`acceptHistoryOnly`, `entry.proof:
+  "history-only"`) for the approval form. A receipt with only its history copy is never marked written: `history_only`,
+  and Recover delivers it (its folder allowed, its counter's range holding it: the next start or a repeat of its key).
+  Nothing at all: `not_written`. The entry becomes `written`, naming its files; for a receipt the connector ran no
+  importer (said in its warnings). `entry.proof`: `delivered`, `imported`, `history-only` or `none`.
+- **Never a number again**: the entry keeps its number, owned by its key; no counter moves; the number still counts
+  as issued. The entry records the change set and the time (an order's `error`, a receipt's `warnings`).
+- **What the B2B sees** (also in the answer's `b2b`): an order resolved as failed — `GET /api/sendOrder/<n>` 200
+  `status: failed`; a resend with its `historyId` 202 `status: failed`, `replay: true`, never written again (a new
+  order needs a new `historyId`). Resolved as done — `status: done` with the files; a resend 202 `status: done`,
+  `replay: true`. A receipt resolved as failed — a resend with its idempotency key `409 RECEIPT_FAILED` (a new receipt
+  needs a new key); as done — 200, replayed, `import: not_run`, the resolution among its warnings. Receipts have no
+  status route.
+- **Busy**: an order the running connector has queued or is writing is `entry_busy` (asked with
+  `GET /api/sendOrder/<n>`), before anything is stopped; a receipt is `entry_busy` while another process holds
+  `DataDir\receipts\writer.lock`.
+- **The run** asks the queue (`orders_pending` / `pending_unknown`, `assumeIdle`), stops the service, reads the entry
+  again (`entry_moved` if it changed), resolves it — a receipt under `writer.lock` — starts the service and proves it,
+  as `counters start-from`.
+- **A receipt resolved as failed** is the one value a build older than v1.0.32 cannot read (it would refuse every
+  receipt): the box first raises `DataDir\format-floor` to `1.0.32`, so no automatic rollback goes below it. Orders, and
+  receipts resolved as done, are written in fields v1.0.31 reads: no floor.
+- **`--check`** reads and writes nothing: `inflight.entry` = `{kind, key, number, state, counter, folder, rule?,
+  reservedAt, ageSeconds, files?, note?, candidates: [{path, role, exists, matchesHistory?, error?}], proof}`; with
+  `resolve` it refuses as the run would.
+- The answer: `inflight: {entry, resolve?, acceptHistoryOnly?, resolved?, b2b?: {statusPoll, resend}}`.
+
 ## `folder-acl`: lock a document folder down (plan 087 review R1c)
 
 digi-mcp locks down a folder the connector writes documents into itself — no human running `icacls` on the box.
@@ -520,7 +588,29 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   execute — generic rights mapped first, an entry left with nothing beyond SYNCHRONIZE dropped. Conditional, callback
   and object entries keep their condition and type; deny entries stay; flags and order are kept. **No entry is ever
   added**: a trusted writer with no right before keeps none (write it had only through a group is capped with the
-  group: `trusted_writer_no_write:` warns, on `--check` too), and an account that could only add files gains no read.
+  group: `trusted_writer_no_write:` warns, on `--check` too — unless `carryOver`, below), and an account that could
+  only add files gains no read.
+- **`carryOver: true`** (lockdown only; v1.0.32; digi-mcp's feature `folder_acl_carry_over`): a trusted writer whose
+  write the masking takes — it wrote through a group, the WizSched case — gets back, per entry, ONE explicit allow
+  entry with exactly what it effectively had there before (AuthZ on the entry's old descriptor:
+  `AuthzInitializeContextFromSid` + `AuthzAccessCheck`, its groups resolved) intersected with Modify: its effective
+  rights never grow. On a folder the entry is inheritable to files (OI) and folders (CI) only as far as the old DACL
+  handed the account at least those rights there; where it handed the account its write down to files but the folder
+  alone gave a little more, the rights are narrowed to what was handed down so the entry stays inheritable to files —
+  the scheduler must be able to rename or delete what the connector writes there after the lock-down (Modify holds no
+  delete-child; review item 5). Where the write was the folder's alone, `carriedOver[].notInheritable` counts the
+  folders and `carried_not_inheritable:` warns (a lower bound: an allow that may not apply counts for nothing, a
+  deny that may counts); on a file never. It sits after the entry's explicit denies. An entry with a conditional
+  entry for the account gets none (`skipped`), and so does one with a deny AuthZ's view cannot account for (review
+  C-1: a domain account's context comes from an S4U logon — `AUTHZ_REQUIRE_S4U_LOGON`, failing closed to
+  `carry_over_failed`; a local account, for which Windows has no S4U, from the machine's own account database — and
+  still holds no logon-type or session SID, and may miss a domain group: a deny for INTERACTIVE, BATCH, SERVICE, a
+  logon session, a service SID, or a group not in the context that is neither a builtin alias nor another user, means
+  nothing is carried there). An account whose groups cannot be resolved (the domain controller does
+  not answer, an error) gets nothing carried over — `carry_over_failed:` warns and `trusted_writer_no_write:` stays —
+  and if one resolved for the check no longer does when the run writes, nothing is written (`carry_over_failed`). The
+  answer's `carriedOver: [{sid, name, rights, entries, skipped?, notInheritable?}]` per folder; the pre-image and `restore` are
+  unchanged (a restore takes the carried entries away with the rest). Without it (the default): today's lock-down.
   The folder's link to its parent is cut (its DACL protected, its inherited entries kept as explicit and masked the
   same way); every other entry keeps its own protection. An owner that is not SYSTEM, an administrator or
   TrustedInstaller is handed to Administrators.
@@ -544,12 +634,19 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   `special`, `none`) and on how many entries they change (review T4), the owners handed to Administrators, and how many
   entries change: the approval form shows exactly who loses write — at BFL, the legacy PHP site's account if it writes
   into the folder.
-- **Unfinished work**: `folder_in_flight` (as the `documents` command) — orders frozen for a typed folder, rule-less
-  orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
-  unless `acceptUnreadable` is their total over both indexes (review m3).
+- **Unfinished work does not hold it back** (v1.0.32, re-review MINOR 3; until then `folder_in_flight`). A lock-down
+  and a restore change none of SYSTEM's rights, and the connector writes as SYSTEM, so a pending write is unaffected.
+  Unfinished index entries (orders frozen for a typed folder, rule-less orders, reserved receipts) are not in the
+  running connector's memory. The one thing the restart afterwards could lose, the queue, is asked first
+  (`orders_pending`). The case this unblocks is a receipt reserved for a bound receipt folder the guard refuses
+  (writable by others, behind the link): the lock-down goes through, and at the start after it the guard allows the
+  folder and Recover delivers the receipt. The command reads no index any more; `acceptUnreadable` is still accepted
+  as a count, and accepts nothing. A lock-down without `carryOver` can still take the ERP scheduler's write, and with
+  it the import of a document already delivered there (`trusted_writer_no_write` says so). That holds for every later
+  document too, and is not a reason to wait.
 - **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
-- The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, parentWritable?,
-  preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
+- The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, carriedOver?,
+  parentWritable?, preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its
   pre-image listed in `state`'s `folderAcl.preimages` (review T5).
 
 ## `restore` and pre-images without files
@@ -603,6 +700,10 @@ actually changed.
 | `folder_unknown`, `folder_missing`, `folder_forbidden` | `documents`, `folder-acl`: no folder of that key / the path is not a folder here / inside the data directory, not a path link mode takes, or one of the [places a document folder may not be](#where-a-document-folder-may-be) (review T3: typed folders behind the link, every `folder-acl` target, and behind the link the `sendOrderDir`, pickup and receipt folders `apply`, `orders` and `receipts` set or move) |
 | `folder_in_flight`, `receipts_in_flight` | `documents`: unfinished orders frozen for the folder / a reserved receipt, and the receipt folder or counter would change |
 | `folder_reparse`, `folder_too_large` | `folder-acl`: a reparse point, hard link or replaced entry in the folder (never followed or written through), or — with `documents` and, behind the link, `apply`/`orders`/`receipts` — a junction, link or mount point on the configured path, or a folder whose handle resolves to another path (review T3) / more than 20 000 entries |
+| `carry_over_failed` | `folder-acl` with `carryOver` (v1.0.32): a trusted writer the check carried over could not be resolved again before the lock-down wrote anything — nothing written |
+| `entry_missing`, `entry_moved`, `entry_final` | `inflight` (review R6): no order with that `historyId` / no receipt with that number / the entry's state is not `expect` / it is written or failed already |
+| `entry_busy` | `inflight`: the running connector has the order queued or is writing it; another process holds the receipt data |
+| `may_be_written`, `not_written`, `history_only`, `history_missing` | `inflight`: `fail` while a file of the entry exists (or a place cannot be looked at) / `done` with no delivered file (nor its rename) with the history copy's bytes and no history copy / `done` on the history copy alone — a model (b) order: `acceptHistoryOnly` after confirming Hashavshevet has it; model (a), typed folders: by hand; a receipt: never (Recover delivers it) / `done` on a delivered file (or rename) with no readable history copy to show it is the connector's |
 | `folder_has_executables` | `folder-acl` (review T1): the folder holds an importer file or a file Windows runs (PATHEXT, `.dll`, `.ps1`, …; never `.php`): a lock-down never tightens a folder code runs from |
 | `writer_unknown`, `writer_too_broad` | `documents` `trustedWriters`: a name the box does not resolve to an account / one that is not a single user account (a group, an alias, a computer, a well-known SID) |
 | `folder_writable` | `documents`, `receipts`, `orders`: accounts besides the administrators can write to a folder the connector writes documents into (or its writers could not be read); `allowWritable` over WinRM only — [troubleshooting.md](troubleshooting.md#a-folder-others-can-write-to) |
@@ -679,6 +780,14 @@ cmd.exe's characters, and — since the system-folder rules compare text — non
 (plan 087 review m6): no `~` (an 8.3 short name, `C:\PROGRA~1`), no `:` after the drive letter (a stream), no part
 ending in `.` or a space (`C:\Windows.\System32` is `C:\Windows\System32`). `apply`'s `sendOrderDir` included
 (review R4-1, v1.0.31: before, only `orders`, `receipts` and `documents` took the rule for theirs).
+
+Then the box judges where Windows resolves them (review m6's rest, v1.0.32 — R4-1's and T3's helpers): the image
+folders `options` and `apply` set, and the importer files (`has.exe`, the BATs, the parameter files) `apply`, `orders`
+and `receipts` set, are refused when a junction, symbolic link or mount point is anywhere on the path, its own name
+included, or — once they exist — when the path the handle resolves to (opened without following it) is not the
+configured path itself (a SUBST or mapped drive, an 8.3 name, a link above). An image folder is
+`image_folder_forbidden`, an importer file `importer_not_erp`. Paths left as they were are not judged again; WinRM is
+unchanged.
 
 ### Where a document folder may be
 

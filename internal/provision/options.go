@@ -98,6 +98,9 @@ func (a *applier) runOptions(ctx context.Context) error {
 	if err := a.checkImageFolders(); err != nil {
 		return err
 	}
+	if err := a.checkLinkedPaths(); err != nil { // review m6's rest (v1.0.32), behind the link
+		return err
+	}
 	out, err := config.Marshal(a.tgt)
 	if err != nil {
 		return refuse(CodeWriteFailed, "report it", "%v", err)

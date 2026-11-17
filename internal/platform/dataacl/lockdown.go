@@ -75,4 +75,16 @@ type LockdownPlan struct {
 	Executables    []string          `json:"executables"`
 	FinalPath      string            `json:"finalPath"`
 	ParentWriters  []Writer          `json:"parentWriters"`
+	// Carried (v1.0.32, carry.go) are the trusted writers given back, per
+	// entry, the write they had through a group; CarryFailed those whose
+	// groups could not be resolved (no carry-over for them). CarrySIDs are
+	// the SIDs ApplyLockdown carries over (resolved again before it writes).
+	Carried     []CarriedRights `json:"carried,omitempty"`
+	CarryFailed []CarryFailure  `json:"carryFailed,omitempty"`
+	CarrySIDs   []string        `json:"carrySids,omitempty"`
 }
+
+// ErrCarryOver: a trusted writer the plan carried over could not be resolved
+// again before the lock-down wrote anything (its domain controller stopped
+// answering): nothing written.
+var ErrCarryOver = errors.New("dataacl: a carried-over writer could not be resolved again")

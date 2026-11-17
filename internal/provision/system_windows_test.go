@@ -105,3 +105,36 @@ func TestWinSystem_FinalPath(t *testing.T) {
 		t.Fatal("a file resolved as a folder")
 	}
 }
+
+// Review m6's rest (v1.0.32) on this machine: an importer file resolves to
+// its long name (the CI's temp folder is 8.3), a folder is no file, and a
+// file behind a junction shows the junction on its way.
+func TestWinSystem_FinalFilePath(t *testing.T) {
+	dir := t.TempDir()
+	long, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "has.exe")
+	if err := os.WriteFile(exe, []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	final, err := winSystem{}.FinalFilePath(exe)
+	fp, onDrive := finalDrivePath(final)
+	if err != nil || !onDrive || !strings.EqualFold(filepath.Clean(fp), filepath.Join(long, "has.exe")) {
+		t.Fatalf("FinalFilePath(%s) = %q (%v)", exe, final, err)
+	}
+	if _, err := (winSystem{}).FinalFilePath(dir); err == nil {
+		t.Error("a folder resolved as a file")
+	}
+	if _, err := (winSystem{}).FinalFilePath(filepath.Join(dir, "none.exe")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a file not there: %v", err)
+	}
+	j := filepath.Join(long, "j")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", j, long).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v %s", err, out)
+	}
+	if at, err := (winSystem{}).ReparsePointOn(filepath.Join(j, "has.exe")); err != nil || at != j {
+		t.Errorf("has.exe through a junction: %q %v", at, err)
+	}
+}

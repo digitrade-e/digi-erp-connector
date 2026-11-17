@@ -168,9 +168,17 @@ Administrators and TrustedInstaller keep theirs, a trusted writer keeps at most 
 most read & execute (review T2) — and restarts the service. Name the ERP's scheduler account in `documents`'
 `trustedWriters` **before** the lock-down, or it too drops to read & execute — and since nothing is ever granted, it
 keeps only what **its own** entries give it: write it had only through a group (`Users`, `Authenticated Users`) is
-capped with the group. `folder-acl-check` warns `trusted_writer_no_write:` for such an account; give it its own entry
-first (as an administrator: `icacls "<folder>" /grant "<DOMAINccount>:(OI)(CI)M"`), then lock down. Folders above it
+capped with the group. `folder-acl-check` warns `trusted_writer_no_write:` for such an account. From v1.0.32 send the
+lock-down with `carryOver: true`: the box gives that account back, per entry, exactly the rights it had there (AuthZ,
+its groups resolved) within Modify — `carriedOver` in the answer, and the warning gone; if its groups cannot be
+resolved (the domain controller does not answer: `carry_over_failed:`) nothing is carried over for it. Before
+v1.0.32: give it its own entry first (as an administrator: `icacls "<folder>" /grant "<DOMAIN\account>:(OI)(CI)M"`),
+then lock down. Folders above it
 are never changed — `parentWritable` says who could still rename the folder away through one.
+From v1.0.32 unfinished documents do not hold the lock-down back (re-review MINOR 3). Before, it refused
+`folder_in_flight`. A receipt reserved while its bound folder was refused (server.log `receipt <n> (key …) is reserved
+but not finished yet`) is the case to lock down for: at the start after the lock-down, the guard allows the folder and
+Recover delivers the receipt.
 
 **Lock a folder down by hand** (background, for a box without the link: a stricter, simpler recipe than the command's
 masking — it replaces the folder's DACL instead of lowering it; an elevated prompt; the path is an example):
@@ -296,6 +304,17 @@ a new order — a second Hashavshevet document if the first was written.
 
 The entry is still `reserved` after a restart. The connector never writes it
 again on its own.
+
+**From afar (v1.0.32): the `inflight` command** ([provisioning.md](provisioning.md#inflight-resolve-one-unfinished-order-or-receipt-plan-087-review-r6))
+resolves one such entry — or a `retryable` one, or a `reserved` receipt — without anyone on the box:
+`inflight-check` shows it (state, number, counter, folder, frozen rule, age, and which of its candidate files exist),
+then `inflight` with `resolve: "fail"` (only when none of its files exists: `may_be_written` otherwise) or
+`resolve: "done"` (only on proof of delivery — the delivered file or the importer's `*.MASOFON2.BAK` rename of it, with
+the history copy's bytes; such a file without a readable history copy is `history_missing` — check Hashavshevet and the
+folder by hand; the history copy alone is `history_only`, which a model (b) order passes only with
+`acceptHistoryOnly: true` once Hashavshevet is checked to have Asmahta `n`; model (a) and typed-folder orders refuse
+the flag — their delivery leaves the file or its rename, so go by hand). The steps below are the same decisions by
+hand.
 
 - No `history\<n>\IMOVEIN_<n>.doc` → the connector never ran the importer for
   it: check `server.log` for `both hold order <n>` (as in step 3 above), then

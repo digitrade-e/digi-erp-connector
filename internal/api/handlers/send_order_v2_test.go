@@ -578,3 +578,13 @@ func TestImporterWritableIs503(t *testing.T) {
 		t.Fatalf("receipt: %d %s", rw.Code, rw.Body)
 	}
 }
+
+// Review R6: a repeat of a receipt resolved as failed is 409 RECEIPT_FAILED —
+// not a retry: a new receipt needs a new key.
+func TestReceiptFailedIs409(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeReceiptError(w, nil, "k", fmt.Errorf("%w: receipt 500", hasavshevet.ErrReceiptFailed))
+	if w.Code != http.StatusConflict || decodeBody(t, w)["code"] != "RECEIPT_FAILED" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}

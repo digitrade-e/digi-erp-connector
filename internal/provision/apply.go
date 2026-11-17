@@ -47,6 +47,8 @@ type ApplyResult struct {
 	WritableFolders []StateWritableFolder `json:"writableFolders,omitempty"`
 	// FolderACL (plan 087 review R1c) is the folder-acl command's answer.
 	FolderACL *FolderACLResult `json:"folderAcl,omitempty"`
+	// Inflight (plan 087 review R6, v1.0.32) is the inflight command's answer.
+	Inflight *InflightResult `json:"inflight,omitempty"`
 	// Check is what the run would do, when it was apply --check.
 	Check *CheckResult `json:"check,omitempty"`
 
@@ -251,7 +253,7 @@ func (a *applier) run(ctx context.Context) error {
 	if err := api.CheckConfig(check); err != nil {
 		return refuse(CodeConfigRefused, "fix the spec: the connector would refuse to start on this config", "%v", err)
 	}
-	for _, f := range []func() error{a.checkSetFolderPaths, a.checkImporterStated, a.checkFilesExist, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
+	for _, f := range []func() error{a.checkSetFolderPaths, a.checkImporterStated, a.checkFilesExist, a.checkLinkedPaths, a.checkImporterWriters, a.checkOrderNumbers, a.checkFirewallOwner} {
 		if err := f(); err != nil {
 			return err
 		}
