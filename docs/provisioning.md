@@ -594,7 +594,8 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   folders and `carried_not_inheritable:` warns (a lower bound: an allow that may not apply counts for nothing, a
   deny that may counts); on a file never. It sits after the entry's explicit denies. An entry with a conditional
   entry for the account gets none (`skipped`), and so does one with a deny AuthZ's view cannot account for (review
-  C-1: the context comes from an S4U logon — `AUTHZ_REQUIRE_S4U_LOGON`, failing closed to `carry_over_failed` — and
+  C-1: a domain account's context comes from an S4U logon — `AUTHZ_REQUIRE_S4U_LOGON`, failing closed to
+  `carry_over_failed`; a local account, for which Windows has no S4U, from the machine's own account database — and
   still holds no logon-type or session SID, and may miss a domain group: a deny for INTERACTIVE, BATCH, SERVICE, a
   logon session, a service SID, or a group not in the context that is neither a builtin alias nor another user, means
   nothing is carried there). An account whose groups cannot be resolved (the domain controller does

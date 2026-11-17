@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -105,23 +106,25 @@ func (c *authzCtx) isUser(sid string) (bool, error) {
 
 // context resolves sid's groups (a domain account's from its domain
 // controller: this is what fails when none answers).
+//
+// Review C-1: through an S4U logon (AUTHZ_REQUIRE_S4U_LOGON), so a domain
+// account's groups are the ones its real logon gets — or nothing is carried
+// over for it. S4U is not available for a LOCAL account (Windows answers
+// ERROR_NOT_SUPPORTED; seen on the CI): its groups come from this machine's
+// own account database, which AuthZ reads whole, so it is resolved without
+// the flag. The logon-type and session SIDs neither way gives are
+// DeniesUnaccounted's.
 func (rm *authzRM) context(sid string) (*authzCtx, error) {
 	s, err := windows.StringToSid(sid)
 	if err != nil {
 		return nil, err
 	}
-	var h uintptr
-	// LUID Identifier is passed by value: one 8-byte slot on amd64 and arm64,
-	// two 4-byte ones on 386.
-	args := []uintptr{authzRequireS4ULogon, uintptr(unsafe.Pointer(s)), rm.h, 0, 0}
-	if unsafe.Sizeof(uintptr(0)) == 4 {
-		args = append(args, 0)
+	h, err := rm.initContext(s, authzRequireS4ULogon)
+	if errors.Is(err, windows.ERROR_NOT_SUPPORTED) && localAccount(s) {
+		h, err = rm.initContext(s, 0)
 	}
-	args = append(args, 0, uintptr(unsafe.Pointer(&h)))
-	r, _, callErr := procAuthzInitializeContextFromSid.Call(args...)
-	runtime.KeepAlive(s)
-	if r == 0 {
-		return nil, fmt.Errorf("resolve the groups of %s: %w", sid, callErr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the groups of %s: %w", sid, err)
 	}
 	c := &authzCtx{h: h, sid: sid, allow: map[string]bool{sid: true}, deny: map[string]bool{sid: true}}
 	if err := c.readGroups(); err != nil {
@@ -129,6 +132,35 @@ func (rm *authzRM) context(sid string) (*authzCtx, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// initContext is AuthzInitializeContextFromSid with flags.
+func (rm *authzRM) initContext(s *windows.SID, flags uintptr) (uintptr, error) {
+	var h uintptr
+	// LUID Identifier is passed by value: one 8-byte slot on amd64 and arm64,
+	// two 4-byte ones on 386.
+	args := []uintptr{flags, uintptr(unsafe.Pointer(s)), rm.h, 0, 0}
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		args = append(args, 0)
+	}
+	args = append(args, 0, uintptr(unsafe.Pointer(&h)))
+	r, _, callErr := procAuthzInitializeContextFromSid.Call(args...)
+	runtime.KeepAlive(s)
+	if r == 0 {
+		return 0, callErr
+	}
+	return h, nil
+}
+
+// localAccount reports whether s is a user account of this machine (its
+// domain is the computer's own name).
+func localAccount(s *windows.SID) bool {
+	_, domain, use, err := s.LookupAccount("")
+	if err != nil || use != windows.SidTypeUser {
+		return false
+	}
+	name, err := windows.ComputerName()
+	return err == nil && strings.EqualFold(domain, name)
 }
 
 func (c *authzCtx) readGroups() error {
