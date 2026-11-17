@@ -185,9 +185,10 @@ func sidBinary(s string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dataacl: %q is not a SID", s)
 	}
+	// The 48-bit identifier authority, big-endian, one masked byte at a time.
 	b := []byte{1, byte(len(parts) - 3), 0, 0, 0, 0, 0, 0}
 	for i := 7; i >= 2; i-- {
-		b[i] = byte(auth)
+		b[i] = byte(auth & 0xff)
 		auth >>= 8
 	}
 	for _, p := range parts[3:] {
