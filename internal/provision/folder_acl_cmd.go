@@ -12,11 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
-	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/atomicfile"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/dataacl"
 )
@@ -85,7 +83,9 @@ type FolderACLInput struct {
 	// lockdown of it answered.
 	Folder   string `json:"folder,omitempty"`
 	Preimage string `json:"preimage,omitempty"`
-	// AcceptUnreadable: the in-flight check reads the indexes (review R7).
+	// AcceptUnreadable is still accepted (a count), but folder-acl reads no
+	// index since v1.0.32 (re-review MINOR 3: no in-flight scan), so it
+	// accepts nothing.
 	AcceptUnreadable *int    `json:"acceptUnreadable,omitempty"`
 	AssumeIdle       bool    `json:"assumeIdle,omitempty"`
 	Expect           *Expect `json:"expect,omitempty"`
@@ -301,49 +301,6 @@ func (a *applier) finalPathRefusal(name, p, final string) error {
 	return nil
 }
 
-// folderACLIdle refuses a folder with unfinished work in it (as the
-// documents command): orders frozen for a typed folder, orders without a rule
-// for sendOrderDir and the pickup folder, reserved receipts for the receipt
-// folder; and index entries it cannot read unless accepted (review R7).
-func (a *applier) folderACLIdle(folders map[string]string) error {
-	orders, err := hasavshevet.ScanOrdersInFlight(a.dir)
-	if err != nil {
-		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the order index: %v", err)
-	}
-	receipts, rUnreadable, err := hasavshevet.ScanReceiptsInFlight(a.dir)
-	if err != nil {
-		return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "read the receipt index: %v", err)
-	}
-	a.noteUnreadable(config.DocumentKindOrders, orders.Unreadable, "an unfinished one among them could be in the folder")
-	a.noteUnreadable(config.DocumentKindReceipts, rUnreadable, "an unfinished one among them could be in the folder")
-	if r := a.unreadableSettled(); r != nil { // review m3: the command's one total
-		return r
-	}
-	for _, name := range sortedKeys(folders) {
-		n := orders.ByFolder[name]
-		if name == FolderRoleSendOrderDir || name == FolderRolePickup {
-			n = orders.Default
-		}
-		if rd := a.cur.ReceiptDir(); a.cur.ReceiptsConfigured() && rd != "" && sameFolder(rd, folders[name]) {
-			n += receipts
-		}
-		if n > 0 {
-			return refuse(CodeFolderInFlight, "let them finish (a repeat of their key, the next start; docs/troubleshooting.md), then run it again",
-				"%d unfinished order(s) or receipt(s) go to folder %s", n, name)
-		}
-	}
-	return nil
-}
-
-func sortedKeys(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // lockdownRefusal maps dataacl's errors to refusals.
 func lockdownRefusal(name, path string, err error) *Refusal {
 	switch {
@@ -357,6 +314,16 @@ func lockdownRefusal(name, path string, err error) *Refusal {
 	return refuse(CodeWriteFailed, "run it elevated (as an administrator)", "folder %s (%s): %v", name, path, err)
 }
 
+// folderLockdown locks in.Folders down. There is no in-flight scan here or in
+// the restore (re-review MINOR 3): a lock-down and a restore change no
+// entry of SYSTEM's, as which the connector writes, so neither breaks a
+// pending write; unfinished index entries (a reserved receipt, an order
+// frozen for the folder) are not in the running connector's memory, and the
+// restart after the change asks the queue first (idle: orders_pending), which
+// is the one thing a restart could lose. A reserved receipt in a bound folder
+// the guard refuses is exactly what a lock-down is for: after it, the guard
+// allows the folder and Recover delivers it. Before v1.0.32 the command
+// refused folder_in_flight here, a dead end for that receipt.
 func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 	paths := map[string]string{}
 	for _, n := range in.Folders {
@@ -365,9 +332,6 @@ func (a *applier) folderLockdown(ctx context.Context, in FolderACLInput) error {
 			return r
 		}
 		paths[n] = p
-	}
-	if err := a.folderACLIdle(paths); err != nil {
-		return err
 	}
 	trustedFor := map[string][]string{}
 	for _, n := range in.Folders {
@@ -535,9 +499,6 @@ func (a *applier) folderACLRestore(ctx context.Context, in FolderACLInput) error
 	case pre.Folder != in.Folder || !sameFolder(pre.Path, path):
 		return refuse(CodePreimageMissing, "give the preimage recorded for this folder at its configured path",
 			"pre-image %s was recorded for folder %s at %s, not folder %s at %s", in.Preimage, pre.Folder, pre.Path, in.Folder, path)
-	}
-	if err := a.folderACLIdle(map[string]string{in.Folder: path}); err != nil {
-		return err
 	}
 	out := FolderACLFolder{Name: in.Folder, Path: path, Entries: len(pre.Entries), Preimage: in.Preimage}
 	if a.check {

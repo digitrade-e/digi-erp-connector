@@ -31,7 +31,7 @@ same way in an elevated PowerShell. The code is
 | `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
 | `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
 | `inflight [--check] --spec -` | `{"version":1,"changeSet","kind":"orders"\|"receipts","historyId"\|"number","expect":"reserved"\|"retryable","resolve":"fail"\|"done"}` (+ `assumeIdle`?; the check needs only `kind` and the key) | Resolves ONE unfinished order or receipt index entry as failed or done (plan 087 review R6, v1.0.32, below) | that entry; `DataDir\format-floor` (a receipt resolved as failed) |
-| `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`?, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
+| `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`? — accepted, unused since v1.0.32 —, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
@@ -634,9 +634,16 @@ Signed (`folder-acl`, `folder-acl-check` over the link; WinRM too), not sealed.
   `special`, `none`) and on how many entries they change (review T4), the owners handed to Administrators, and how many
   entries change: the approval form shows exactly who loses write — at BFL, the legacy PHP site's account if it writes
   into the folder.
-- **Unfinished work**: `folder_in_flight` (as the `documents` command) — orders frozen for a typed folder, rule-less
-  orders for `sendOrderDir` and `pickup`, reserved receipts for the receipt folder; unreadable index entries refuse
-  unless `acceptUnreadable` is their total over both indexes (review m3).
+- **Unfinished work does not hold it back** (v1.0.32, re-review MINOR 3; until then `folder_in_flight`). A lock-down
+  and a restore change none of SYSTEM's rights, and the connector writes as SYSTEM, so a pending write is unaffected.
+  Unfinished index entries (orders frozen for a typed folder, rule-less orders, reserved receipts) are not in the
+  running connector's memory. The one thing the restart afterwards could lose, the queue, is asked first
+  (`orders_pending`). The case this unblocks is a receipt reserved for a bound receipt folder the guard refuses
+  (writable by others, behind the link): the lock-down goes through, and at the start after it the guard allows the
+  folder and Recover delivers the receipt. The command reads no index any more; `acceptUnreadable` is still accepted
+  as a count, and accepts nothing. A lock-down without `carryOver` can still take the ERP scheduler's write, and with
+  it the import of a document already delivered there (`trusted_writer_no_write` says so). That holds for every later
+  document too, and is not a reason to wait.
 - **Afterwards** the service is restarted (the queue asked first) and proved: the daemon reads the new ACLs at once.
 - The answer: `folderAcl: {op, folders: [{name, path, entries, entriesChanged?, principals?, owners?, carriedOver?,
   parentWritable?, preimage?, written?, restored?, skipped?}]}`. A lock-down that never answered (killed after recording) leaves its

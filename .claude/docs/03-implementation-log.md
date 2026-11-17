@@ -435,3 +435,14 @@ Branch `feat/v1.0.32-followups` from v1.0.31 (775d937); a security review comes 
   files. Those two orders now have no remote way out on history alone (`fail` still answers `may_be_written` while the
   history copy exists). That is accepted: the fix is by hand, putting the history copy where the importer reads it,
   whose rename then proves `done`.
+- **MINOR 3, no `folder_in_flight` in `folder-acl`** (`provision/folder_acl_cmd.go`: `folderACLIdle` removed, from
+  both lock-down and restore). An ACL change touches none of SYSTEM's rights, and the connector writes as SYSTEM.
+  Unfinished index entries are not in the running connector's memory. The one hazard is the restart afterwards, and
+  `a.idle` already guards it (`orders_pending`). The refusal turned a reserved receipt in a refused bound folder into a
+  dead end: Recover waits for the folder, the lock-down that would allow the folder refused, and `inflight` sends the
+  receipt back to Recover. Decisions:
+  - Restore loses the check too: it puts back recorded entries and SYSTEM's are as they were, so it cannot break a
+    write either.
+  - `acceptUnreadable` stays in folder-acl's input (digi-mcp may send it) but accepts nothing, since no index is read.
+  - Test `TestFolderACL_LockdownLetsRecoverDeliverAReservedReceipt` runs the chain with the daemon's real
+    `FolderGuard` (over the fake's writers) and receipt writer: refused → lock-down → start → delivered and `written`.

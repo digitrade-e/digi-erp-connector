@@ -175,6 +175,10 @@ resolved (the domain controller does not answer: `carry_over_failed:`) nothing i
 v1.0.32: give it its own entry first (as an administrator: `icacls "<folder>" /grant "<DOMAIN\account>:(OI)(CI)M"`),
 then lock down. Folders above it
 are never changed — `parentWritable` says who could still rename the folder away through one.
+From v1.0.32 unfinished documents do not hold the lock-down back (re-review MINOR 3). Before, it refused
+`folder_in_flight`. A receipt reserved while its bound folder was refused (server.log `receipt <n> (key …) is reserved
+but not finished yet`) is the case to lock down for: at the start after the lock-down, the guard allows the folder and
+Recover delivers the receipt.
 
 **Lock a folder down by hand** (background, for a box without the link: a stricter, simpler recipe than the command's
 masking — it replaces the folder's DACL instead of lowering it; an elevated prompt; the path is an example):
