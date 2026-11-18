@@ -143,7 +143,10 @@ func (l *Link) command(st net.Conn) {
 	state, _ := l.cfg.Store.LoadState()
 	ans := linkproto.Answer{Box: state.Box, Started: l.cfg.Now().Unix()}
 	var stdout []byte
-	env, keyID, digest, refusal := l.verify(state, envFrame)
+	env, keyID, cert, digest, refusal := l.verify(state, envFrame)
+	if cert != nil {
+		env.By = "installer " + cert.Name // the certificate's name, which a team key signed; never the envelope's own by
+	}
 	if digest != "" {
 		ans.Nonce, ans.Env = env.Nonce, digest
 	}
@@ -156,6 +159,9 @@ func (l *Link) command(st net.Conn) {
 		}
 		_ = st.SetDeadline(time.Now().Add(CommandDeadline + time.Minute))
 		refusal = l.checkInput(env, stdin)
+		if refusal == "" {
+			refusal = l.checkInstaller(cert, env, stdin)
+		}
 		if refusal == "" {
 			refusal = l.checkUpgrade(env)
 		}
@@ -197,36 +203,51 @@ func (l *Link) command(st net.Conn) {
 // verify checks the envelope alone, in order, and spends its nonce. digest is
 // set once the signature verified: refusals from there on are about this
 // envelope. Nothing from an unverified envelope is returned or logged.
-func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, keyID, digest, refusal string) {
+//
+// An envelope carrying a certificate is an installer's (plan 090 D1): the
+// certificate must verify with the compiled-in team keys, and the envelope with
+// the certified key. cert is then set, keyID is the installer's id, and the
+// caller applies checkInstaller. Without one it is a team key's, as before.
+func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, keyID string, cert *linkproto.InstallerCert, digest, refusal string) {
 	var s linkproto.Signed
 	if err := json.Unmarshal(envFrame, &s); err != nil {
-		return env, "", "", linkproto.CodeMalformed
+		return env, "", nil, "", linkproto.CodeMalformed
 	}
 	if state.Box == "" {
-		return env, "", "", linkproto.CodeBoxUnknown
+		return env, "", nil, "", linkproto.CodeBoxUnknown
 	}
 	minEpoch, err := l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
 	if err != nil {
-		return env, "", "", "state_unreadable"
+		return env, "", nil, "", "state_unreadable"
 	}
-	env, key, err := l.cfg.Team.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+	var key linkproto.TeamKey
+	if s.Cert != nil {
+		var c linkproto.InstallerCert
+		env, c, key, err = l.cfg.Team.VerifyInstallerEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+		if err == nil {
+			cert, keyID = &c, c.ID
+		}
+	} else {
+		env, key, err = l.cfg.Team.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+		keyID = key.ID
+	}
 	if err != nil {
-		return linkproto.Envelope{}, "", "", refusalCode(err)
+		return linkproto.Envelope{}, "", nil, "", refusalCode(err)
 	}
 	digest = linkproto.EnvelopeDigest(s)
 	if err := l.cfg.Store.UseNonce(env.Nonce, time.Unix(env.ExpiresAt, 0), l.cfg.Now()); err != nil {
-		return env, key.ID, digest, refusalCode(err) // replayed_nonce: this envelope reached the box before
+		return env, keyID, cert, digest, refusalCode(err) // replayed_nonce: this envelope reached the box before
 	}
-	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil {
+	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil { // an installer's: its certifier's
 		l.cfg.Log.Error("link: recording the key epoch", err)
 	}
 	if !state.AdminOn() {
-		return env, key.ID, digest, "admin_off" // the client's off switch (link.yaml admin: false)
+		return env, keyID, cert, digest, "admin_off" // the client's off switch (link.yaml admin: false)
 	}
 	if state.UnknownKeys() {
-		return env, key.ID, digest, "state_unreadable" // link.yaml names a key we do not know: perhaps a misspelt off switch
+		return env, keyID, cert, digest, "state_unreadable" // link.yaml names a key we do not know: perhaps a misspelt off switch
 	}
-	return env, key.ID, digest, ""
+	return env, keyID, cert, digest, ""
 }
 
 // checkInput is what needs the stdin: its digest, then the command's argv.

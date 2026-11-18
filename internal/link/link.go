@@ -36,6 +36,9 @@ type Config struct {
 	Host       string
 	Domain     string
 	DomainRole int
+	// DomainRoleKnown says Windows reported DomainRole itself. When it could not, DomainRole is a guess that is never a
+	// domain controller (MachineFacts), so installers are refused (plan 090 D3: installer_role_unknown).
+	DomainRoleKnown bool
 
 	// APIAddr is the daemon's local address (127.0.0.1:<apiListen port>);
 	// APITLS when the daemon serves TLS there.
@@ -390,12 +393,27 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 		switch w.Code {
 		case linkproto.CodePending:
 			if hello.PairCode != "" && linkproto.ValidBoxID(w.Box) {
+				// Who made the code (plan 090 D2), recorded before the box id: a box whose binding was not written
+				// keeps its code, and a binding never outlives the pairing it came from. An id that is no installer's
+				// binds none: such a box obeys the team only.
+				installer := w.Installer
+				if installer != "" && !linkproto.ValidInstallerID(installer) {
+					l.cfg.Log.Warn("link: the relay named an installer id of the wrong shape; no installer may command this box")
+					installer = ""
+				}
+				if err := l.cfg.Store.BindInstaller(installer); err != nil {
+					return nil, 0, fmt.Errorf("recording who made the pairing code: %w", err)
+				}
 				st.Box, st.PairCode = w.Box, ""
 				if err := l.cfg.Store.SaveState(st); err != nil {
 					return nil, 0, fmt.Errorf("saving the box id %s: %w", w.Box, err)
 				}
-				l.cfg.Log.Info(fmt.Sprintf("link: pairing code redeemed: box %s, fingerprint %s; waiting for confirmation",
-					w.Box, l.cfg.Keys.Public().Fingerprint()))
+				madeBy := "the team"
+				if installer != "" {
+					madeBy = "installer " + installer
+				}
+				l.cfg.Log.Info(fmt.Sprintf("link: pairing code redeemed: box %s, fingerprint %s, code made by %s; waiting for confirmation",
+					w.Box, l.cfg.Keys.Public().Fingerprint(), madeBy))
 			}
 			return nil, l.cfg.PendingRetry, errPending
 		case linkproto.CodeBoxKeyChanged, linkproto.CodeBoxUnknown, linkproto.CodePairExpired, linkproto.CodeBadPairCode, "box_disabled":

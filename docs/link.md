@@ -28,7 +28,8 @@ digi-erp-connector-link ── wss://link.digitrade-admin.org ──► relay �
 ## What it runs — and what it never runs
 
 A command reaches this server only as an envelope **signed by Digitrade's team key**, which is compiled into this
-release (the relay cannot add or change one). The link checks the signature, the key's generation, that the command
+release (the relay cannot add or change one), or by an installer that key certified, for reads on its own new box only
+([§ Installers](#installers-digitrade-plan-090)). The link checks the signature, the key's generation, that the command
 is for this box, that it has not expired and was not seen before, and the digest of its input. Then it runs **only
 `digi-erp-connector-provision.exe`**, with one of: `version`, `discover`, `apply` (and `--check`), `options` (and
 `--check`), `verify`, `restore <change-set>`; or answers `hashes` itself (the digests of the installed executables).
@@ -63,6 +64,31 @@ Since v1.0.29 (Digitrade plan 086) the set also has, run by `provision` the same
 From v1.0.31 (Digitrade plan 088) the link also takes **upgrade policies**: not commands, but approvals signed by the
 same team key, on which the box upgrades itself in its own maintenance window and checks it is healthy afterwards —
 [§ Managed auto-update](#managed-auto-update-plan-088-v1031).
+
+### Installers (Digitrade plan 090)
+
+An **installer** is a person who installs the connector at a new server for Digitrade, with a key of their own. The
+team key **certifies** that key: a certificate names the installer's id (`inst-…`), a name, the public key and an
+expiry of at most 90 days, signed by the team key under its own domain. An installer's envelope carries that
+certificate; the link checks the certificate against the compiled-in team keys, then the envelope against the
+certified key (under the installer domain, so an installer's signature can never pass as the team's), then everything
+a team envelope is checked for.
+
+What an installer may do is fixed in this release, not in the certificate:
+
+- **Only on a box bound to it.** When this server redeems a pairing code, the relay says who made the code; the link
+  records it (`secrets\link_installer.bin`, DPAPI) before it records the box id, every time. A box paired from a code
+  the team made, or paired before this release, is bound to no installer and refuses every installer
+  (`installer_not_bound`). Pairing again means uninstalling, which gives a new box id and needs a new code.
+- **Only reads, with no input:** `version`, `hashes`, `link-status`, `state`, `verify`, and `discover` without a
+  database (`installer_input_refused` for any input, sealed or not; `installer_not_allowed` for any other command).
+  `discover` without input opens no database, so an installer's key cannot test passwords against a SQL Server.
+- **Never on a domain controller** (`installer_dc`), and never where Windows did not report the server's role
+  (`installer_role_unknown`): the team sets those up.
+
+The relay adds its own limits (the installer's own boxes, until the team adopts the box, within the setup window, and
+revocation, which the box cannot see; Digitrade's `connector-link`). The log names the installer from its certificate,
+never from the envelope's own `by`. The team key's commands are unchanged on every box, installer-bound or not.
 
 ## For the client's IT
 

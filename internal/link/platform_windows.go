@@ -41,22 +41,23 @@ func (e winEvents) close() { _ = e.l.Close() }
 // its DNS domain, and its role as Windows itself reports it — the same numbers
 // as Win32_ComputerSystem.DomainRole, which discover reads: 2 a standalone
 // server, 3 a member, 4 and 5 a domain controller. The NTDS service key is not
-// a DC's sign: BFL's member server SQLSRV has one (2026-11-15).
-func MachineFacts() (string, string, int) {
-	host, _ := os.Hostname()
-	domain := ""
+// a DC's sign: BFL's member server SQLSRV has one (2026-11-15). roleKnown is
+// false when DsRole did not answer and the role is the guess below: installers
+// are then refused (plan 090 D3), whatever the guess says.
+func MachineFacts() (host, domain string, role int, roleKnown bool) {
+	host, _ = os.Hostname()
 	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters`, registry.QUERY_VALUE); err == nil {
 		domain, _, _ = k.GetStringValue("Domain")
 		_ = k.Close()
 	}
 	if role, ok := dsRole(); ok {
-		return host, domain, role
+		return host, domain, role, true
 	}
-	role := 2 // DsRole unavailable: a member when joined, never a guess of DC
+	role = 2 // DsRole unavailable: a member when joined, never a guess of DC
 	if domain != "" {
 		role = 3
 	}
-	return host, domain, role
+	return host, domain, role, false
 }
 
 var (

@@ -108,6 +108,7 @@ type fakeRelay struct {
 	srv       *httptest.Server
 	mu        sync.Mutex
 	codes     map[string]string // normalized pair code → box id
+	madeBy    map[string]string // normalized pair code → the installer who made it (plan 090); none: the team
 	pending   map[string]linkproto.BoxPublic
 	confirmed map[string]linkproto.BoxPublic
 	conns     chan *relayConn
@@ -117,7 +118,7 @@ type fakeRelay struct {
 }
 
 func newRelay(t *testing.T) *fakeRelay {
-	r := &fakeRelay{t: t, codes: map[string]string{}, pending: map[string]linkproto.BoxPublic{},
+	r := &fakeRelay{t: t, codes: map[string]string{}, madeBy: map[string]string{}, pending: map[string]linkproto.BoxPublic{},
 		confirmed: map[string]linkproto.BoxPublic{}, conns: make(chan *relayConn, 16)}
 	r.current.Store(true)
 	r.answer.Store(true)
@@ -152,6 +153,7 @@ func (r *fakeRelay) handle(w http.ResponseWriter, req *http.Request) {
 	if h.PairCode != "" {
 		n, _ := linkproto.NormalizePairCode(h.PairCode)
 		id, ok := r.codes[n]
+		installer := r.madeBy[n]
 		delete(r.codes, n)
 		if ok {
 			r.pending[id] = pub
@@ -160,7 +162,7 @@ func (r *fakeRelay) handle(w http.ResponseWriter, req *http.Request) {
 		if !ok {
 			welcome(linkproto.Welcome{Code: linkproto.CodePairExpired})
 		} else {
-			welcome(linkproto.Welcome{Code: linkproto.CodePending, Box: id})
+			welcome(linkproto.Welcome{Code: linkproto.CodePending, Box: id, Installer: installer})
 		}
 		_ = c.CloseNow()
 		return

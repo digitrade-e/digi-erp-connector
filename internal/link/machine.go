@@ -33,7 +33,7 @@ type Machine struct {
 	LoadDaemon func() (config.Config, error)
 	Build      string
 	Log        Logger
-	HostFacts  func() (host, domain string, role int)
+	HostFacts  func() (host, domain string, role int, roleKnown bool)
 }
 
 // Protect gives the data directory the connector's protected DACL (SYSTEM and Administrators only) before the link
@@ -93,12 +93,13 @@ func (m Machine) Config() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	host, domain, role := "", "", 0
+	host, domain, role, roleKnown := "", "", 0, false
 	if m.HostFacts != nil {
-		host, domain, role = m.HostFacts()
+		host, domain, role, roleKnown = m.HostFacts()
 	}
 	return Config{
-		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
+		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain,
+		DomainRole: role, DomainRoleKnown: roleKnown,
 		Daemon: watch, Proxy: proxy, Upgrade: UpgradeConfig{DataDir: m.DataDir, Protect: m.Protect},
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,

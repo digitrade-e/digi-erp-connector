@@ -42,10 +42,16 @@ func (kr Keyring) find(id string) (TeamKey, bool) {
 
 // Signed carries a signed JSON body: the signature covers the exact bytes of
 // Body, so nothing is re-encoded between signer and verifier.
+//
+// Cert is set only on what an installer signed (plan 090 D1): its team-signed
+// certificate, and Key is then the installer's id. Every team-key check refuses
+// a Signed carrying one; a box before plan 090 ignores the field and finds no
+// team key of that id (key_unknown).
 type Signed struct {
 	Key  string          `json:"key"`
 	Body json.RawMessage `json:"body"`
 	Sig  string          `json:"sig"`
+	Cert *Signed         `json:"cert,omitempty"`
 }
 
 // Envelope is one command for one box (plan 083 §3.3).
@@ -110,6 +116,9 @@ func sign(priv ed25519.PrivateKey, keyID, domain string, v any) (Signed, error) 
 }
 
 func (kr Keyring) verify(s Signed, domain string, minEpoch int) (TeamKey, error) {
+	if s.Cert != nil {
+		return TeamKey{}, refuse(CodeMalformed) // an installer's signature never passes as a team key's (plan 090)
+	}
 	k, ok := kr.find(s.Key)
 	if !ok {
 		return TeamKey{}, refuse(CodeKeyUnknown)
@@ -152,22 +161,31 @@ func (kr Keyring) VerifyEnvelope(s Signed, now time.Time, box string, minEpoch i
 	if err != nil {
 		return Envelope{}, TeamKey{}, err
 	}
-	var e Envelope
-	if err := strictUnmarshal(s.Body, &e); err != nil {
-		return Envelope{}, TeamKey{}, err
-	}
-	switch {
-	case e.V != Version:
-		return Envelope{}, TeamKey{}, refuse(CodeVersion)
-	case !commandShape.MatchString(e.Command), !nonceShape.MatchString(e.Nonce), !sha256Shape.MatchString(e.StdinSHA256):
-		return Envelope{}, TeamKey{}, refuse(CodeMalformed)
-	case e.Box != box:
-		return Envelope{}, TeamKey{}, refuse(CodeWrongBox)
-	}
-	if err := checkTimes(e.IssuedAt, e.ExpiresAt, now); err != nil {
+	e, err := decodeEnvelope(s.Body, now, box)
+	if err != nil {
 		return Envelope{}, TeamKey{}, err
 	}
 	return e, k, nil
+}
+
+// decodeEnvelope checks a verified envelope body: strict decoding, the version, the shapes, the box id and the times.
+func decodeEnvelope(body []byte, now time.Time, box string) (Envelope, error) {
+	var e Envelope
+	if err := strictUnmarshal(body, &e); err != nil {
+		return Envelope{}, err
+	}
+	switch {
+	case e.V != Version:
+		return Envelope{}, refuse(CodeVersion)
+	case !commandShape.MatchString(e.Command), !nonceShape.MatchString(e.Nonce), !sha256Shape.MatchString(e.StdinSHA256):
+		return Envelope{}, refuse(CodeMalformed)
+	case e.Box != box:
+		return Envelope{}, refuse(CodeWrongBox)
+	}
+	if err := checkTimes(e.IssuedAt, e.ExpiresAt, now); err != nil {
+		return Envelope{}, err
+	}
+	return e, nil
 }
 
 // SignAdmin signs a request to the relay's operation op over body.
@@ -183,24 +201,34 @@ func (kr Keyring) VerifyAdmin(s Signed, now time.Time, op string, body []byte, m
 	if err != nil {
 		return AdminRequest{}, TeamKey{}, err
 	}
-	var r AdminRequest
-	if err := strictUnmarshal(s.Body, &r); err != nil {
-		return AdminRequest{}, TeamKey{}, err
-	}
-	switch {
-	case r.V != Version:
-		return AdminRequest{}, TeamKey{}, refuse(CodeVersion)
-	case !nonceShape.MatchString(r.Nonce):
-		return AdminRequest{}, TeamKey{}, refuse(CodeMalformed)
-	case r.Op != op:
-		return AdminRequest{}, TeamKey{}, refuse(CodeWrongOp)
-	case r.BodySHA256 != SHA256Hex(body):
-		return AdminRequest{}, TeamKey{}, refuse(CodeBodyMismatch)
-	}
-	if err := checkTimes(r.IssuedAt, r.ExpiresAt, now); err != nil {
+	r, err := decodeAdmin(s.Body, now, op, body)
+	if err != nil {
 		return AdminRequest{}, TeamKey{}, err
 	}
 	return r, k, nil
+}
+
+// decodeAdmin checks a verified admin request body: strict decoding, the version, the nonce's shape, the operation,
+// the HTTP body's digest and the times.
+func decodeAdmin(raw []byte, now time.Time, op string, body []byte) (AdminRequest, error) {
+	var r AdminRequest
+	if err := strictUnmarshal(raw, &r); err != nil {
+		return AdminRequest{}, err
+	}
+	switch {
+	case r.V != Version:
+		return AdminRequest{}, refuse(CodeVersion)
+	case !nonceShape.MatchString(r.Nonce):
+		return AdminRequest{}, refuse(CodeMalformed)
+	case r.Op != op:
+		return AdminRequest{}, refuse(CodeWrongOp)
+	case r.BodySHA256 != SHA256Hex(body):
+		return AdminRequest{}, refuse(CodeBodyMismatch)
+	}
+	if err := checkTimes(r.IssuedAt, r.ExpiresAt, now); err != nil {
+		return AdminRequest{}, err
+	}
+	return r, nil
 }
 
 // Answer is the box's signed account of one command (plan 083 §8 A11): the relay

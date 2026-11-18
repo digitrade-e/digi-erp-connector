@@ -175,6 +175,8 @@ begin
   DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\link.yaml'));
   DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\secrets\link_box_keys.bin'));
   DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\secrets\link_min_key_epoch.bin'));
+  // Who made the pairing code (plan 090) belongs to that pairing; the next redemption writes it again anyway.
+  DeleteFile(ExpandConstant('{commonappdata}\digi-erp-connector\secrets\link_installer.bin'));
   DelTree(ExpandConstant('{commonappdata}\digi-erp-connector\link'), True, True, True);
   if not StopServiceAndWait('{#ServiceName}') then
   begin

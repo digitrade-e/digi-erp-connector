@@ -49,6 +49,9 @@ type Welcome struct {
 	Box   string `json:"box,omitempty"`   // the box id (assigned at pairing)
 	Epoch int64  `json:"epoch,omitempty"` // this connection's epoch, for the liveness check
 	Relay string `json:"relay,omitempty"`
+	// Installer is set on the answer to a redeemed pairing code an installer made (plan 090 D2): the box binds to
+	// that installer and obeys no other one. Empty for a code the team made: no installer ever counts on that box.
+	Installer string `json:"installer,omitempty"`
 }
 
 var (
