@@ -423,3 +423,53 @@ func TestSQLSetupIsNeverALinkCommand(t *testing.T) {
 		t.Fatalf("Argv(sql-setup): %v", err)
 	}
 }
+
+// The first setup happens once per pairing: after an installer's apply succeeded, no installer writes on the box again,
+// even when config.yaml no longer holds a credential (a team restore). A new pairing starts over.
+func TestAnInstallersFirstSetupHappensOnce(t *testing.T) {
+	teamPriv, kr := team(t, 1)
+	dana := newInstaller(t, teamPriv, "team-1", "inst-dana", 30*24*time.Hour)
+	r := newRelay(t)
+	b, rc := installerPairedBox(t, r, "acme-erp", "inst-dana", kr, func(c *Config) { c.APICredentialSet = func() (bool, error) { return false, nil } })
+	apply := func(command string) string {
+		in, _ := linkproto.Seal(b.keys.Public().Seal, []byte(`{"version":1}`))
+		raw, _ := dana.envelope("acme-erp", command, nil, in, true)
+		_, sa := send(t, rc, raw, in)
+		return refusalOf(sa)
+	}
+	if got := apply("apply-check"); got != "" {
+		t.Fatalf("the check: %q", got)
+	}
+	if done, _ := b.store.InstallerSetupDone(); done {
+		t.Fatal("a check marked the setup done")
+	}
+	if got := apply("apply"); got != "" {
+		t.Fatalf("the first setup: %q", got)
+	}
+	if done, err := b.store.InstallerSetupDone(); err != nil || !done {
+		t.Fatalf("after the first setup: done %v, %v", done, err)
+	}
+	for _, c := range []string{"apply", "apply-check"} {
+		if got := apply(c); got != CodeInstallerConfigured {
+			t.Errorf("%s after the first setup (config.yaml still says no credential): %q", c, got)
+		}
+	}
+	// reads go on, for the installer's own verification
+	raw, _ := dana.envelope("acme-erp", "state", nil, nil, false)
+	if _, sa := send(t, rc, raw, nil); refusalOf(sa) != "" {
+		t.Fatalf("a read after the setup: %q", refusalOf(sa))
+	}
+	// a new pairing resets it
+	if err := b.store.BindInstaller("inst-dana"); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := b.store.InstallerSetupDone(); done {
+		t.Fatal("a new pairing kept the old setup marker")
+	}
+	if err := b.store.Secrets.Set(secretInstallerSetup, []byte("garbage")); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := b.store.InstallerSetupDone(); !done || err == nil {
+		t.Fatal("an unreadable marker did not count as done")
+	}
+}

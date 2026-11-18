@@ -21,6 +21,35 @@ const secretInstaller = "link_installer"
 // installerNone is the stored value for a box no installer may command (a code the team made, or an old relay).
 const installerNone = "none"
 
+// secretInstallerSetup is one-way within a pairing: "done" once an installer's apply succeeded on this box, after which
+// no installer writes here again, whatever config.yaml holds later (a team restore can remove it; plan 090 review).
+// Reset to "no" at every redemption, with the binding.
+const secretInstallerSetup = "link_installer_setup"
+
+// InstallerSetupDone reports whether an installer's first setup succeeded on this box. An unreadable marker counts as
+// done: the caller refuses.
+func (s *Store) InstallerSetupDone() (bool, error) {
+	b, err := s.Secrets.Get(secretInstallerSetup)
+	if errors.Is(err, ErrNoSecret) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	switch string(b) {
+	case "no":
+		return false, nil
+	case "done":
+		return true, nil
+	}
+	return true, errors.New("link: the installer setup marker does not parse")
+}
+
+// MarkInstallerSetupDone records that an installer's first setup succeeded.
+func (s *Store) MarkInstallerSetupDone() error {
+	return s.Secrets.Set(secretInstallerSetup, []byte("done"))
+}
+
 // Installer is the installer this box is bound to; "" when none. An unreadable binding is an error, never "none":
 // the caller refuses.
 func (s *Store) Installer() (string, error) {
@@ -51,6 +80,9 @@ func (s *Store) BindInstaller(id string) error {
 		return fmt.Errorf("link: %q is not an installer id", id)
 	}
 	if err := s.Secrets.Set(secretInstaller, []byte(v)); err != nil {
+		return err
+	}
+	if err := s.Secrets.Set(secretInstallerSetup, []byte("no")); err != nil { // a new pairing, no setup yet
 		return err
 	}
 	back, err := s.Installer()
@@ -119,6 +151,9 @@ func (l *Link) checkInstaller(cert *linkproto.InstallerCert, env linkproto.Envel
 		}
 		if set, err := l.apiCredentialSet(); err != nil || set {
 			return CodeInstallerConfigured
+		}
+		if done, err := l.cfg.Store.InstallerSetupDone(); err != nil || done {
+			return CodeInstallerConfigured // the first setup succeeded here already: once, whatever config.yaml says now
 		}
 		return ""
 	case !installerReads[env.Command]:

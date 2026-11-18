@@ -84,7 +84,10 @@ What an installer may do is fixed in this release, not in the certificate:
   (`installer_input_refused` for any input, sealed or not). `discover` without input opens no database, so an
   installer's key cannot test passwords against a SQL Server.
 - **The first setup, once:** `apply-check` and `apply`, sealed, only while `config.yaml` holds no API credential
-  (`installer_box_configured`; a `config.yaml` that cannot be read counts as one). The link runs them as
+  (`installer_box_configured`; a `config.yaml` that cannot be read counts as one) **and** no installer apply has
+  succeeded on this box: the link records that (`secrets\link_installer_setup.bin`, `done`) when one exits 0, and
+  from then on refuses installer writes whatever `config.yaml` holds — a team `restore` that removes it does not
+  reopen them. A new pairing starts over. The link runs them as
   `apply … --installer`: a short list of fields, the database `sql-setup` recorded, no SQL administrator
   ([provisioning.md § An installer's first setup](provisioning.md#an-installers-first-setup-apply---installer)).
   The client's IT runs `sql-setup` at the server's console first; it is never a link command.

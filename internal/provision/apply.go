@@ -137,6 +137,12 @@ func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, erro
 
 func applyAs(ctx context.Context, env Env, s Spec, check, installer bool) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
+	if s.DB.Mode == "" && s.DB.adminless() && s.DB.Login == "" {
+		// No administrator and no login named: the login sql-setup made, not DefaultLogin (plan 090 review).
+		if rec, ok, _ := ReadSQLSetup(env.Sys.DataDir()); ok {
+			s.DB.Login = rec.Login
+		}
+	}
 	if r := s.ValidateFor(LinkMode(env.Sys.DataDir()), SystemDirs()); r != nil {
 		return res, r
 	}
@@ -724,7 +730,8 @@ func (a *applier) procedures(ctx context.Context, admin Database) error {
 	}
 	if admin == nil {
 		detail := "not checked: no administrator was given"
-		if rec, ok, _ := ReadSQLSetup(a.dir); ok && a.s.DB.adminless() {
+		if rec, ok, _ := ReadSQLSetup(a.dir); ok && a.s.DB.adminless() && strings.EqualFold(rec.Host, a.tgt.DB.Host) &&
+			rec.Port == a.tgt.DB.Port && strings.EqualFold(rec.Database, a.tgt.DB.Database) && rec.Login == a.s.DB.login() {
 			detail = "not checked: sql-setup set them up (" + rec.At + ")"
 		}
 		a.step("procedures", false, detail)

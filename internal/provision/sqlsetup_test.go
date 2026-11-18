@@ -398,9 +398,6 @@ func TestSQLSetupHelpers(t *testing.T) {
 			t.Errorf("splitHostPort(%q) = %q %d", in, h, p)
 		}
 	}
-	if got := instanceAddress(SQLInstance{Name: "MSSQLSERVER", DynamicPort: 50111}); got != "127.0.0.1:50111" {
-		t.Errorf("default instance: %q", got)
-	}
 }
 
 // An unpaired box is told to pair first, not that its box id is too long.
@@ -411,5 +408,150 @@ func TestSQLSetupOnAnUnpairedBoxSaysPairFirst(t *testing.T) {
 	var r *Refusal
 	if !errors.As(err, &r) || r.Code != CodeSQLSetupNeedsLink || !strings.Contains(r.Message, "not paired") || !strings.Contains(r.Fix, "pair") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// A box in service: config.yaml logs in as the login sql-setup manages. sql-setup never gives that login a new password
+// (the running connector would lose its database), takes only the server and database the connector uses, and a re-run
+// then only puts the procedures back (plan 090 review, major).
+func TestSQLSetupOnABoxInService(t *testing.T) {
+	setUp := func(t *testing.T) (*fakeSys, *fakeDB, Env) {
+		sys, fdb := freshLinkedBox(t)
+		env := testEnv(sys, fdb)
+		if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ApplyAsInstaller(context.Background(), env, installerSpec(), false); err != nil {
+			t.Fatal(err)
+		}
+		return sys, fdb, env
+	}
+	t.Run("another database", func(t *testing.T) {
+		sys, fdb, env := setUp(t)
+		before, _ := sys.SecretGet(loginKey(testBoxLogin))
+		calls := fdb.loginCalls
+		in := sqlSetupInput()
+		in.Database = "erp_2027"
+		if _, err := SQLSetup(context.Background(), env, in); refusalCode(err) != CodeSQLSetupInService {
+			t.Fatalf("%v", err)
+		}
+		after, _ := sys.SecretGet(loginKey(testBoxLogin))
+		if string(before) != string(after) || fdb.loginCalls != calls {
+			t.Fatal("the running connector's login was touched")
+		}
+		if rec, _, _ := ReadSQLSetup(sys.dir); rec.Database != "erp_db" {
+			t.Fatalf("the record moved to %s", rec.Database)
+		}
+	})
+	t.Run("the same database again", func(t *testing.T) {
+		sys, fdb, env := setUp(t)
+		before, _ := sys.SecretGet(loginKey(testBoxLogin))
+		calls := fdb.loginCalls
+		res, err := SQLSetup(context.Background(), env, sqlSetupInput())
+		if err != nil || res.LoginDone != "kept" {
+			t.Fatalf("%+v %v", res, err)
+		}
+		after, _ := sys.SecretGet(loginKey(testBoxLogin))
+		if string(before) != string(after) || fdb.loginCalls != calls {
+			t.Fatal("a kept login was sent to SQL Server again (a password-history policy can refuse the same password)")
+		}
+	})
+	t.Run("the box's passwords no longer log in", func(t *testing.T) {
+		sys, fdb, env := setUp(t)
+		fdb.setLogin(testBoxLogin, "changed-by-a-dba")
+		if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); refusalCode(err) != CodeSQLSetupInService {
+			t.Fatalf("%v", err)
+		}
+		if pw, _ := fdb.login(testBoxLogin); pw != "changed-by-a-dba" {
+			t.Fatal("sql-setup rotated the login of a connector in service")
+		}
+		_ = sys
+	})
+}
+
+func TestSQLSetupInAConsoleThatIsNotElevated(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	// link.yaml that cannot be read, as a protected folder is to a console that is not elevated
+	if err := os.Remove(filepath.Join(sys.dir, "link.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(sys.dir, "link.yaml"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := testEnv(sys, fdb)
+	if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); refusalCode(err) != CodeSQLSetupNeedsAdmin {
+		t.Fatalf("%v", err)
+	}
+	con := &fakeConsole{answers: []string{"", "erp_db", "sa", testSaPass, ""}}
+	env.Console = con
+	if _, code := Run(context.Background(), env, []string{"sql-setup"}, strings.NewReader("")); code != ExitRefused {
+		t.Fatalf("exit %d", code)
+	}
+	if len(con.asked) != 0 {
+		t.Fatalf("questions asked before it could know it cannot run: %q", con.asked)
+	}
+	if all := strings.Join(con.said, "\n"); !strings.Contains(all, CodeSQLSetupNeedsAdmin) || !strings.Contains(all, "Run as administrator") {
+		t.Fatalf("said:\n%s", all)
+	}
+}
+
+func TestATeamApplyWithoutALoginTakesSQLSetups(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	env := testEnv(sys, fdb)
+	if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); err != nil {
+		t.Fatal(err)
+	}
+	s := installerSpec()
+	s.ERP = "hasavshevet"
+	s.DB = DBSpec{Host: `127.0.0.1\WIZSOFT`, Database: "erp_db", LeastPrivilege: true} // no login named
+	if _, err := Apply(context.Background(), env, s); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if cfg, _ := readConfig(t, sys.dir); cfg.DB.User != testBoxLogin {
+		t.Fatalf("config.yaml logs in as %s, not sql-setup's login", cfg.DB.User)
+	}
+}
+
+func TestSQLSetupResultCarriesWhatToRedact(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	res, err := SQLSetup(context.Background(), testEnv(sys, fdb), sqlSetupInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, _ := sys.SecretGet(loginKey(testBoxLogin))
+	has := func(v string) bool {
+		for _, s := range res.secrets {
+			if s == v {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(testSaPass) || !has(string(pw)) {
+		t.Fatal("the result does not carry the administrator's and the login's passwords for redaction")
+	}
+	res, err = SQLSetup(context.Background(), testEnv(sys, fdb), SQLSetupInput{Host: `127.0.0.1\WIZSOFT`, Database: "erp_db", AdminUser: "sa", AdminPassword: "Wrong-1"})
+	if err == nil || res == nil || len(res.secrets) == 0 || res.secrets[0] != "Wrong-1" {
+		t.Fatalf("a refused run must still say what to redact: %+v %v", res, err)
+	}
+}
+
+func TestSQLSetupOffersWhatWorks(t *testing.T) {
+	for _, c := range []struct {
+		in    SQLInstance
+		addr  string
+		notes string
+	}{
+		{SQLInstance{Name: "WIZSOFT", StaticPort: 1500, TCPEnabled: true, MixedAuth: true}, "127.0.0.1:1500", ""},
+		{SQLInstance{Name: "WIZSOFT", DynamicPort: 63501, TCPEnabled: true, MixedAuth: true}, `127.0.0.1\WIZSOFT`, ""},
+		{SQLInstance{Name: "MSSQLSERVER", DynamicPort: 50111, TCPEnabled: true, MixedAuth: true}, "127.0.0.1:50111", "dynamic port"},
+		{SQLInstance{Name: "SQLEXPRESS"}, `127.0.0.1\SQLEXPRESS`, "TCP/IP is off; SQL logins are off"},
+	} {
+		if got := instanceAddress(c.in); got != c.addr {
+			t.Errorf("%+v: address %q, want %q", c.in, got, c.addr)
+		}
+		if got := instanceNotes(c.in); (c.notes == "") != (got == "") || !strings.Contains(got, c.notes) {
+			t.Errorf("%+v: notes %q, want %q", c.in, got, c.notes)
+		}
 	}
 }

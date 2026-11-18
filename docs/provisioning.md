@@ -284,19 +284,28 @@ never leaves the server: not in a ticket, a phone call to Digitrade, a secret st
 & 'C:\Program Files\digi-erp-connector\digi-erp-connector-provision.exe' sql-setup
 ```
 
-It asks: the SQL Server (the instances on this machine are offered: `127.0.0.1\<instance>`, or `host:port` for a
-default instance or another server on the LAN), the Hashavshevet company database, the administrator's login
+It first checks it can run at all — an elevated console (`sql_setup_needs_admin`), a paired server
+(`sql_setup_needs_link`) — before it asks for any password. It asks: the SQL Server (the instances on this machine are
+offered: `127.0.0.1:<port>` for a static port, else `127.0.0.1\<instance>`, each with what will stop the connector's
+login — TCP/IP off, SQL logins off, a default instance on a dynamic port; or type another server on the LAN), the Hashavshevet company database, the administrator's login
 (sysadmin, or securityadmin with db_owner on that database), its password **with the echo off**, and whether the
 connection must be encrypted. Then, under the run lock, every check before a write (a paired box, the names, the
 server on this machine or its LAN — `db_host_public` otherwise —, the administrator logs in):
 
 1. the procedures (`EnsureProcedures`);
 2. the login `erp_connector_<box id, - as _>` — this box's own: **kept** when the box knows a password it logs in with
-   (a second run), else **created**, or **given a new password** when it exists; its password is born here and kept
-   with DPAPI (`login_<name>`) before SQL Server hears it; the grants are put back either way;
+   (a second run; nothing is sent to SQL Server then — setting the same password again can be refused by a
+   password-history policy), else **created**, or **given a new password** when it exists; its password is born here
+   and kept with DPAPI (`login_<name>`) before SQL Server hears it;
 3. a log-in as the login, to prove it;
 4. the record `provision\sql-setup.json` **last**: `{v, erp, host, port?, database, login, encrypt?,
    trustServerCertificate?, at}` — never a password. A run that stopped half-way leaves none; run it again.
+
+**On a box in service** (`config.yaml` logs in as that login) it never gives the login a new password — the running
+connector would lose its database: it takes only the server and database the connector uses, keeps a password the box
+knows (its own key or the daemon's), and otherwise refuses `sql_setup_in_service`. A re-run there only puts the
+procedures back (a release that needs new ones). Moving the connector to another database, or a new password, is the
+team's `db` command, which stops the connector first.
 
 It writes no `config.yaml` and no DB secret: `apply` does, without any administrator (next). `state` shows it as
 `sqlSetup: {state: done|absent|unreadable, host, database, login, at}`, read from the record alone. Refusals:
@@ -308,7 +317,8 @@ authentication cannot run it: the connector does not support integrated authenti
 ### `apply` without an administrator
 
 `"db": {"host", "database", "leastPrivilege": true, "login"?}` with **no `user` and no `password`** keeps the login
-this box knows (the one `sql-setup` made) and opens nothing as an administrator: the procedures are not checked (the
+this box knows (the one `sql-setup` made; a `login` left out is the record's, not `erp_connector_read`) and opens
+nothing as an administrator: the procedures are not checked (the
 step says sql-setup set them up), `rotateLogin` is refused (a new password needs an administrator). A box that knows
 no password that logs in as that login is `db_admin_required`, with nothing written.
 
@@ -321,7 +331,8 @@ credential. The link adds `--installer` (last, never from the envelope), and `ap
 - takes only `version`, `changeSet`, `erp` (`hasavshevet`), `apiListen`, `auth`, `service`, `expect`, `importer`
   `{"mode":"none"}`, and `db.leastPrivilege: true` with, optionally, `db.database` and `db.login` as `sql-setup`
   recorded them. Anything else — a server, a credential, encryption, a rotation, orders, an importer, TLS, a firewall
-  rule, options, `assumeIdle` — is `installer_not_allowed`;
+  rule, options, `assumeIdle`, or a field added to the spec later — is `installer_not_allowed` (the spec rebuilt from
+  those fields alone must be the spec);
 - fills the database from the record (`db_admin_required` when `sql-setup` has not run) and runs without an
   administrator, as above;
 - refuses a domain controller (`installer_dc`) and, under the run lock, a box whose `config.yaml` holds an API

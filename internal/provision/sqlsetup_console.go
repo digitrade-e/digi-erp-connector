@@ -19,14 +19,32 @@ type Console interface {
 
 // sqlSetupConsole asks the person, runs SQLSetup and says what happened. Its output is for that person (ASCII text,
 // redacted), not an envelope.
-func sqlSetupConsole(ctx context.Context, env Env) ([]byte, int) {
+func sqlSetupConsole(ctx context.Context, env Env) (out []byte, code int) {
 	con := env.Console
 	if con == nil {
 		return envelope("sql-setup", nil, refuse(CodeSQLSetupConsoleOnly,
 			"run it yourself, as an administrator, in a console on this server",
 			"sql-setup asks for an SQL Server administrator's password at this machine's console, and there is none here"), nil), ExitRefused
 	}
-	say := func(format string, args ...any) { con.Say(string(asciiOnly([]byte(fmt.Sprintf(format, args...))))) }
+	var secrets []string // grows as the run learns them; every line said passes Redact over them
+	say := func(format string, args ...any) {
+		con.Say(string(asciiOnly([]byte(Redact(fmt.Sprintf(format, args...), secrets...)))))
+	}
+	defer func() {
+		if r := recover(); r != nil { // never the panic's text: it can quote what the run held
+			say("Not done: sql-setup stopped on an internal error. Nothing is kept from a run that stopped; run it again, or ask Digitrade.")
+			out, code = nil, ExitRefused
+		}
+	}()
+	// Who can run it, before a password is asked: an elevated console, on a paired server.
+	if _, err := sqlSetupBox(env.Sys.DataDir()); err != nil {
+		var r *Refusal
+		if errors.As(err, &r) {
+			say("Not done (%s): %s", r.Code, r.Message)
+			say("Fix: %s", r.Fix)
+		}
+		return nil, ExitRefused
+	}
 	say("This creates the connector's own SQL Server login, with read rights only.")
 	say("The administrator login you type is used once, here on this server, and is not kept. Digitrade never sees its password.")
 	say("")
@@ -35,7 +53,7 @@ func sqlSetupConsole(ctx context.Context, env Env) ([]byte, int) {
 	if insts, err := env.Sys.SQLInstances(); err == nil && len(insts) > 0 {
 		say("SQL Server instances on this server:")
 		for _, in := range insts {
-			say("  %s", instanceAddress(in))
+			say("  %s%s", instanceAddress(in), instanceNotes(in))
 		}
 		def = instanceAddress(insts[0])
 	}
@@ -88,15 +106,18 @@ func sqlSetupConsole(ctx context.Context, env Env) ([]byte, int) {
 		say("Not done: the answers could not be read (%v).", err)
 		return nil, ExitRefused
 	}
-	secrets := []string{in.AdminPassword}
+	secrets = append(secrets, in.AdminPassword)
 	res, err := SQLSetup(ctx, env, in)
 	in.AdminPassword = ""
+	if res != nil {
+		secrets = append(secrets, res.secrets...)
+	}
 	if err != nil {
 		var r *Refusal
 		if !errors.As(err, &r) {
 			r = &Refusal{Code: "failed", Message: err.Error()}
 		}
-		say("Not done (%s): %s", r.Code, Redact(r.Message, secrets...))
+		say("Not done (%s): %s", r.Code, r.Message)
 		if r.Fix != "" {
 			say("Fix: %s", r.Fix)
 		}
@@ -110,19 +131,36 @@ func sqlSetupConsole(ctx context.Context, env Env) ([]byte, int) {
 	return nil, ExitOK
 }
 
-// instanceAddress is how sql-setup offers an instance: host\name, or host:port for the default instance.
+// instanceAddress is how sql-setup offers an instance: host:port when it has a static port (no SQL Server Browser
+// needed), else host\name for a named instance (the Browser finds its port), else the default instance's port.
 func instanceAddress(in SQLInstance) string {
-	if in.Name != "MSSQLSERVER" {
-		return `127.0.0.1\` + in.Name
-	}
-	port := 1433
 	switch {
 	case in.StaticPort > 0:
-		port = in.StaticPort
+		return "127.0.0.1:" + strconv.Itoa(in.StaticPort)
+	case in.Name != "MSSQLSERVER":
+		return `127.0.0.1\` + in.Name
 	case in.DynamicPort > 0:
-		port = in.DynamicPort
+		return "127.0.0.1:" + strconv.Itoa(in.DynamicPort)
 	}
-	return "127.0.0.1:" + strconv.Itoa(port)
+	return "127.0.0.1:1433"
+}
+
+// instanceNotes says what will stop the connector's login on an instance, before anyone types a password for it.
+func instanceNotes(in SQLInstance) string {
+	var n []string
+	if !in.TCPEnabled {
+		n = append(n, "TCP/IP is off")
+	}
+	if !in.MixedAuth {
+		n = append(n, "SQL logins are off (Windows authentication only)")
+	}
+	if in.StaticPort == 0 && in.Name == "MSSQLSERVER" && in.DynamicPort > 0 {
+		n = append(n, "a dynamic port, which can change at a restart")
+	}
+	if len(n) == 0 {
+		return ""
+	}
+	return "  (" + strings.Join(n, "; ") + ")"
 }
 
 // splitHostPort reads host:port (the port a number); anything else is a host or host\instance with no port.

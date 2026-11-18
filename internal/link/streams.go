@@ -177,6 +177,11 @@ func (l *Link) command(st net.Conn) {
 		if refusal == "" {
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q by %q (key %s)", env.Command, env.ChangeSet, env.By, keyID))
 			stdout, ans.Exit = l.run(env, stdin, cert != nil)
+			if cert != nil && env.Command == "apply" && ans.Exit == 0 {
+				if err := l.cfg.Store.MarkInstallerSetupDone(); err != nil {
+					l.cfg.Log.Error("link: recording that the installer's first setup is done", err)
+				}
+			}
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q ended, exit %d, %d bytes", env.Command, env.ChangeSet, ans.Exit, len(stdout)))
 		}
 	}

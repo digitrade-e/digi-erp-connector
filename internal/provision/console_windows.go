@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -44,7 +45,22 @@ func (c *winConsole) AskSecret(prompt string) (string, error) {
 	if err := windows.SetConsoleMode(c.h, mode&^windows.ENABLE_ECHO_INPUT); err != nil {
 		return "", err
 	}
+	// Ctrl+C while the echo is off: put it back before the process ends, or the console stays blind.
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-interrupted:
+			_ = windows.SetConsoleMode(c.h, mode)
+			fmt.Fprintln(os.Stdout)
+			os.Exit(130)
+		case <-done:
+		}
+	}()
 	defer func() {
+		close(done)
+		signal.Stop(interrupted)
 		_ = windows.SetConsoleMode(c.h, mode)
 		fmt.Fprintln(os.Stdout)
 	}()
