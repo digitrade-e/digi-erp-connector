@@ -32,23 +32,28 @@ type Entry struct {
 	Sha256     string `json:"sha256"`
 	Number     int64  `json:"number"`
 	State      string `json:"state"`
+	Counter    string `json:"counter,omitempty"` // an order's documentRule counter (plan 087); "" = the default
 	Unreadable string `json:"unreadable,omitempty"`
 }
 
 // Snapshot is a box's numbering state at one moment.
 type Snapshot struct {
-	TakenAt      string  `json:"takenAt"`
-	DataDir      string  `json:"dataDir"`
-	SendOrderDir string  `json:"sendOrderDir"`
-	OrderCounter *int64  `json:"orderCounter"` // lastOrderNumber.json: last issued; nil = missing
-	CounterError string  `json:"counterError,omitempty"`
-	Orders       []Entry `json:"orders"` // DataDir\orders\index
-	HistoryMax   int64   `json:"historyMax"`
-	HistoryCount int     `json:"historyCount"` // sendOrderDir\history\<n>
-	ReceiptNext  *int64  `json:"receiptNext"`  // DataDir\receipts\receiptNumber.json; nil = missing
-	ReceiptError string  `json:"receiptError,omitempty"`
-	Receipts     []Entry `json:"receipts"` // DataDir\receipts\index
-	FormatFloor  string  `json:"formatFloor"`
+	TakenAt      string `json:"takenAt"`
+	DataDir      string `json:"dataDir"`
+	SendOrderDir string `json:"sendOrderDir"`
+	OrderCounter *int64 `json:"orderCounter"` // lastOrderNumber.json: last issued; nil = missing
+	CounterError string `json:"counterError,omitempty"`
+	// Counters are plan 087's own counter stores, DataDir\counters\<key>.json
+	// {"last": N}; nil value = unreadable (CounterErrors says why).
+	Counters      map[string]*int64 `json:"counters,omitempty"`
+	CounterErrors map[string]string `json:"counterErrors,omitempty"`
+	Orders        []Entry           `json:"orders"` // DataDir\orders\index
+	HistoryMax    int64             `json:"historyMax"`
+	HistoryCount  int               `json:"historyCount"` // sendOrderDir\history\<n>
+	ReceiptNext   *int64            `json:"receiptNext"`  // DataDir\receipts\receiptNumber.json; nil = missing
+	ReceiptError  string            `json:"receiptError,omitempty"`
+	Receipts      []Entry           `json:"receipts"` // DataDir\receipts\index
+	FormatFloor   string            `json:"formatFloor"`
 }
 
 // Take reads the box. A missing file or folder is a fresh box, not an error.
@@ -57,6 +62,9 @@ func Take(dataDir, sendOrderDir string) (Snapshot, error) {
 	var err error
 	s.OrderCounter, s.CounterError = readNumber(filepath.Join(sendOrderDir, "lastOrderNumber.json"), "lastOrderNumber")
 	if s.Orders, err = readIndex(filepath.Join(dataDir, "orders", "index")); err != nil {
+		return s, err
+	}
+	if s.Counters, s.CounterErrors, err = readCounters(filepath.Join(dataDir, "counters")); err != nil {
 		return s, err
 	}
 	if s.HistoryMax, s.HistoryCount, err = readHistory(filepath.Join(sendOrderDir, "history")); err != nil {
@@ -113,15 +121,49 @@ func readIndex(dir string) ([]Entry, error) {
 		var v struct {
 			Number int64  `json:"number"`
 			State  string `json:"state"`
+			Rule   *struct {
+				Counter string `json:"counter"`
+			} `json:"rule"`
 		}
 		if err := json.Unmarshal(b, &v); err != nil || v.Number < 1 {
 			e.Unreadable = "not an index entry"
 		} else {
 			e.Number, e.State = v.Number, v.State
+			if v.Rule != nil {
+				e.Counter = v.Rule.Counter
+			}
 		}
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+func readCounters(dir string) (map[string]*int64, map[string]string, error) {
+	files, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	counters, errs := map[string]*int64{}, map[string]string{}
+	for _, f := range files {
+		key, ok := strings.CutSuffix(f.Name(), ".json")
+		if f.IsDir() || !ok {
+			continue
+		}
+		n, why := readNumber(filepath.Join(dir, f.Name()), "last")
+		counters[key] = n
+		if why != "" {
+			errs[key] = why
+		} else if n == nil {
+			errs[key] = "missing"
+		}
+	}
+	if len(errs) == 0 {
+		errs = nil
+	}
+	return counters, errs, nil
 }
 
 func readHistory(dir string) (highest int64, count int, err error) {
@@ -158,13 +200,46 @@ func Check(before, after Snapshot) []string {
 	case before.OrderCounter != nil && *after.OrderCounter < *before.OrderCounter:
 		add("order counter went backwards: %d → %d", *before.OrderCounter, *after.OrderCounter)
 	}
+	// With plan 087's counters, numbers of other ranges share the index and
+	// sendOrderDir\history: lastOrderNumber.json is held only against the
+	// orders without a rule, and the history only when there is one range.
+	ruled := len(after.Counters) > 0
+	for _, e := range after.Orders {
+		ruled = ruled || e.Counter != ""
+	}
 	if after.OrderCounter != nil {
-		highest := after.HistoryMax
+		var highest int64
+		if !ruled {
+			highest = after.HistoryMax
+		}
 		for _, e := range after.Orders {
-			highest = max(highest, e.Number)
+			if e.Counter == "" {
+				highest = max(highest, e.Number)
+			}
 		}
 		if *after.OrderCounter < highest {
 			add("order counter %d is below the highest issued number %d (index or history): a number could be issued twice", *after.OrderCounter, highest)
+		}
+	}
+	for key, was := range before.Counters {
+		now, ok := after.Counters[key]
+		switch {
+		case !ok:
+			add("counter %s (DataDir\\counters\\%s.json) is missing", key, key)
+		case after.CounterErrors[key] != "":
+			add("counter %s unreadable: %s", key, after.CounterErrors[key])
+		case was != nil && now != nil && *now < *was:
+			add("counter %s went backwards: %d → %d", key, *was, *now)
+		}
+	}
+	for key, now := range after.Counters {
+		if now == nil {
+			continue
+		}
+		for _, e := range after.Orders {
+			if e.Counter == key && e.Number > *now {
+				add("counter %s is at %d, below order %d it issued (%s)", key, *now, e.Number, e.File)
+			}
 		}
 	}
 

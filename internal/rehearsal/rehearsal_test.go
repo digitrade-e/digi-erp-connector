@@ -106,6 +106,57 @@ func TestCheck_Findings(t *testing.T) {
 	}
 }
 
+// Plan 087: a test counter's orders (rule.counter) live in another range; the
+// production counter is not "below" them. The named counters are checked on
+// their own.
+func TestCheck_NamedCounters(t *testing.T) {
+	setup := func(t *testing.T) box {
+		b := newBox(t)
+		b.write(t, filepath.Join(b.data, "counters", "test.json"), `{"last": 9000001}`)
+		b.write(t, filepath.Join(b.data, "orders", "index", "t.json"), `{"key":"t","number":9000001,"state":"written","rule":{"counter":"test"}}`)
+		b.history(t, 9000001)
+		return b
+	}
+	b := setup(t)
+	s := take(t, b)
+	if s.Counters["test"] == nil || *s.Counters["test"] != 9000001 {
+		t.Fatalf("counters = %+v", s.Counters)
+	}
+	if f := Check(s, s); len(f) != 0 {
+		t.Fatalf("findings on a healthy two-range box: %v", f)
+	}
+	// A configured counter whose history folder has no index entry (e.g. the
+	// entry was moved aside): the production counter is still not "below" it.
+	os.Remove(filepath.Join(b.data, "orders", "index", "t.json"))
+	if s := take(t, b); len(Check(s, s)) != 0 {
+		t.Fatalf("findings with a counter's history and no ruled entry: %v", Check(s, s))
+	}
+	for _, c := range []struct {
+		name   string
+		change func(t *testing.T, b box)
+		want   string
+	}{
+		{"backwards", func(t *testing.T, b box) {
+			b.write(t, filepath.Join(b.data, "counters", "test.json"), `{"last": 9000000}`)
+		}, "counter test went backwards"},
+		{"missing", func(t *testing.T, b box) { os.Remove(filepath.Join(b.data, "counters", "test.json")) }, "counter test (DataDir"},
+		{"unreadable", func(t *testing.T, b box) { b.write(t, filepath.Join(b.data, "counters", "test.json"), `{`) }, "counter test unreadable"},
+		{"below its order", func(t *testing.T, b box) {
+			b.write(t, filepath.Join(b.data, "orders", "index", "u.json"), `{"key":"u","number":9000002,"state":"written","rule":{"counter":"test"}}`)
+		}, "below order 9000002"},
+		{"default below a rule-less order", func(t *testing.T, b box) { b.order(t, "c", 101, "written") }, "below the highest issued number 101"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := setup(t)
+			before := take(t, b)
+			c.change(t, b)
+			if f := strings.Join(Check(before, take(t, b)), "\n"); !strings.Contains(f, c.want) {
+				t.Fatalf("findings %q lack %q", f, c.want)
+			}
+		})
+	}
+}
+
 // What a healthy rehearsal does: a test order sent between snapshots, an
 // entry's state moving on, the floor raised. None of it is a finding.
 func TestCheck_HealthyChanges(t *testing.T) {
