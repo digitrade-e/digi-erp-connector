@@ -1,14 +1,20 @@
 package link
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"github.com/digitrade-e/digi-erp-connector/pkg/linkproto"
 )
@@ -509,4 +515,35 @@ func (f failingSet) Set(k string, v []byte) error {
 		return errors.New("the secret store refused")
 	}
 	return f.Secrets.Set(k, v)
+}
+
+// A relay that will not take an installer's code (plan 090) is not asked again every few seconds: the code is final
+// for this build or this installer, so the box waits as for an expired code.
+func TestARefusedInstallerCodeWaitsLikeAnExpiredOne(t *testing.T) {
+	for _, code := range []string{linkproto.CodeInstallerBuildTooOld, linkproto.CodeInstallerRevoked} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			ctx := context.Background()
+			ch, _ := linkproto.NewChallenge(rand.Reader, "relay-1")
+			_ = wsjson.Write(ctx, c, ch)
+			var h linkproto.Hello
+			_ = wsjson.Read(ctx, c, &h)
+			_ = wsjson.Write(ctx, c, linkproto.Welcome{V: linkproto.Version, Code: code, Relay: "relay-1"})
+			_ = c.CloseNow()
+		}))
+		store := &Store{Dir: t.TempDir(), Secrets: &memSecrets{}}
+		keys, _, _ := store.Keys(func() (linkproto.BoxKeys, error) { return linkproto.NewBoxKeys(rand.Reader) })
+		l := New(Config{Store: store, Keys: keys, Log: &testLog{}})
+		_, wait, err := l.connect(context.Background(), State{PairCode: "ABCDE-FGHJK", Relay: "ws" + strings.TrimPrefix(srv.URL, "http")})
+		srv.Close()
+		if err == nil || wait != 10*time.Minute {
+			t.Errorf("%s: wait %v, err %v", code, wait, err)
+		}
+		if st, _ := store.LoadState(); st.Box != "" {
+			t.Errorf("%s: the box saved an id", code)
+		}
+	}
 }

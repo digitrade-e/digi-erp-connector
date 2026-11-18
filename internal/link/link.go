@@ -420,7 +420,8 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 					w.Box, l.cfg.Keys.Public().Fingerprint(), madeBy))
 			}
 			return nil, l.cfg.PendingRetry, errPending
-		case linkproto.CodeBoxKeyChanged, linkproto.CodeBoxUnknown, linkproto.CodePairExpired, linkproto.CodeBadPairCode, "box_disabled":
+		case linkproto.CodeBoxKeyChanged, linkproto.CodeBoxUnknown, linkproto.CodePairExpired, linkproto.CodeBadPairCode, "box_disabled",
+			linkproto.CodeInstallerBuildTooOld, linkproto.CodeInstallerRevoked: // plan 090: final for that code
 			return nil, 10 * time.Minute, fmt.Errorf("the relay refused this box: %q", w.Code)
 		}
 		return nil, 0, fmt.Errorf("the relay refused: %q", w.Code)
