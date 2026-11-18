@@ -314,3 +314,33 @@ func nonNilHeader(h *OrderHeader) *OrderHeader {
 	}
 	return h
 }
+
+// LegacyRecordLength is one legacy DOC line without its LF (DIG-1304: the
+// byte-compare harness checks real legacy files against it).
+const LegacyRecordLength = legacyRecordLength
+
+// LegacyField is one written field of the legacy layout as it sits in a DOC
+// line: its PRM line number and title, the 0-based offset of its first byte
+// and its width. The byte after it is the separator space.
+type LegacyField struct {
+	Line   int
+	Title  string
+	Offset int
+	Width  int
+}
+
+// LegacyLayout is the written fields of the legacy layout in line order, with
+// their offsets: what internal/imovcompare reads a legacy line by (DIG-1304).
+// A fresh slice every call.
+func LegacyLayout() []LegacyField {
+	out := make([]LegacyField, 0, len(legacyFields))
+	offset := 0
+	for _, f := range legacyFields {
+		if f.width == 0 {
+			continue
+		}
+		out = append(out, LegacyField{Line: f.line, Title: f.title, Offset: offset, Width: f.width})
+		offset += f.width + 1
+	}
+	return out
+}
