@@ -141,3 +141,20 @@ func TestCompare_StructuralProblems(t *testing.T) {
 		})
 	}
 }
+
+// Show lists a legacy file's fields per record, decoded: what the operator
+// re-keys an order from.
+func TestShow(t *testing.T) {
+	s, err := Show(legacyGolden(t, "order.doc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"record 1 of 2", "record 2 of 2", "field 22 (מפתח פריט - 22): SKU-2002", "field 37 (הערות - 37): הערה ללקוח"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("show lacks %q:\n%s", want, s)
+		}
+	}
+	if _, err := Show([]byte("short\n")); err == nil || !strings.Contains(err.Error(), "not the legacy layout") {
+		t.Fatalf("a non-legacy file: %v", err)
+	}
+}

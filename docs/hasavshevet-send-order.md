@@ -215,7 +215,8 @@ byte:
   `%.2f` rounds the binary value; and its `iconv //TRANSLIT` spells some
   symbols out (`©` → `(C)`) where the connector writes `?` — Hebrew, ASCII and
   Windows-1255's own punctuation are identical. A byte-compare with real legacy
-  orders (plan 075 P1-6) should expect those.
+  orders (plan 075 P1-6) should expect those: the harness and its procedure are
+  [order-cutover-proof.md](order-cutover-proof.md) (`cmd/imovein-compare`).
 - A number the narrower fields would change is refused with `400
   VALIDATION_ERROR` naming the field (`vatPercent`, `discount`,
   `details[i].quantity|originalPrice|discount`) before a number is reserved,

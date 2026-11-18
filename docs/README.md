@@ -17,6 +17,7 @@
 | run the database and the ERP folder on different servers | [deployment-topologies.md](deployment-topologies.md) |
 | understand price/stock per ERP | [price-and-stock.md](price-and-stock.md) |
 | send orders into Hasavshevet | [hasavshevet-send-order.md](hasavshevet-send-order.md) |
+| prove a release before a client's first live order (byte-compare with the legacy, upgrade/downgrade rehearsal) | [order-cutover-proof.md](order-cutover-proof.md) |
 | write card-payment receipts into Hasavshevet | [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md) |
 | set up or debug the API credentials | [authentication.md](authentication.md) |
 | review the security posture | [security.md](security.md) |
@@ -34,6 +35,7 @@
 - [saved-queries.md](saved-queries.md) — the data-access model: CRUD, parameter binding, execution limits, trust model
 - [price-and-stock.md](price-and-stock.md) — `POST /api/priceAndStockHandler` per ERP
 - [hasavshevet-send-order.md](hasavshevet-send-order.md) — the order pipeline and the IMOVEIN file format
+- [order-cutover-proof.md](order-cutover-proof.md) — DIG-1304: `imovein-compare` (real legacy files vs the connector, byte for byte) and `connector-rehearsal` (counter and index across an upgrade or downgrade)
 - [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md) — `POST /api/sendReceipt`: the KUPAIN receipt, numbering and its seed, idempotency, recovery, import models, open questions
 
 **Understanding and changing it**

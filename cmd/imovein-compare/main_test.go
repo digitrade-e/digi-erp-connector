@@ -28,6 +28,8 @@ func TestRun_ExitCodes(t *testing.T) {
 		{"bad allow", []string{"diff", "-allow", "x", order, order}, 2, ""},
 		{"missing file", []string{"diff", order, "/nonexistent"}, 2, ""},
 		{"empty manifest", []string{"run", empty}, 2, ""},
+		{"show", []string{"show", order}, 0, "record 2 of 2"},
+		{"show official", []string{"show", filepath.Join(golden, "..", "imovein", "order-ils.doc")}, 2, ""},
 		{"unknown", []string{"render"}, 2, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {

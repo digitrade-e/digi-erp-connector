@@ -36,6 +36,11 @@ cmd/
                           receipt-seed (docs/provisioning.md)
   cutover-seed/         ← operator tool: seed config/secret/queries for a
                           replacement install (not part of the service)
+  imovein-compare/      ← DIG-1304 operator tool: a real legacy IMOVEIN vs the
+                          connector's, byte for byte (internal/imovcompare;
+                          docs/order-cutover-proof.md; never released)
+  connector-rehearsal/  ← DIG-1304 operator tool: counter/index/receipt store
+                          across an upgrade or downgrade (internal/rehearsal)
 
 internal/
   api/

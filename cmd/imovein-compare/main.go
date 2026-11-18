@@ -4,12 +4,14 @@
 //
 //	imovein-compare diff [-allow 9,10,36] <legacy.doc> <connector.doc>
 //	imovein-compare run [-out <dir>] <manifest.json>
+//	imovein-compare show <legacy.doc>
 //
 // diff compares two files already written (e.g. by a connector on GROOPY).
 // run renders each case's sendOrder body through the connector's own route
 // and writer, offline, and compares it with the case's legacy file.
 // Exit 0: every comparison matches; 1: something differs; 2: usage or input
-// error. The procedure: docs/order-cutover-proof.md. Real legacy files hold
+// error. show lists a legacy file's fields per record, decoded: what an order
+// is re-keyed from. The procedure: docs/order-cutover-proof.md. Real legacy files hold
 // customer data: keep them, and this tool's output, out of the repository.
 package main
 
@@ -30,6 +32,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 const usage = `usage:
   imovein-compare diff [-allow 9,10,36] <legacy.doc> <connector.doc>
   imovein-compare run [-out <dir>] <manifest.json>
+  imovein-compare show <legacy.doc>
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -84,6 +87,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if !rep.OK() {
 			return 1
 		}
+		return 0
+	case "show":
+		if len(args) != 2 {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		doc, err := os.ReadFile(args[1])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		s, err := imovcompare.Show(doc)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		fmt.Fprint(stdout, s)
 		return 0
 	}
 	fmt.Fprint(stderr, usage)

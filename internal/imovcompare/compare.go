@@ -16,6 +16,7 @@ package imovcompare
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -182,4 +183,21 @@ func decode(b []byte) string {
 		return fmt.Sprintf("%x", b)
 	}
 	return string(s)
+}
+
+// Show lists every written field of every record of a legacy DOC, decoded,
+// one per line; an error when the file is not the legacy shape.
+func Show(doc []byte) (string, error) {
+	recs, problems := records(doc)
+	if len(problems) > 0 {
+		return "", errors.New(strings.Join(problems, "; "))
+	}
+	var b strings.Builder
+	for i, r := range recs {
+		fmt.Fprintf(&b, "record %d of %d\n", i+1, len(recs))
+		for _, f := range hasavshevet.LegacyLayout() {
+			fmt.Fprintf(&b, "  field %d (%s): %s\n", f.Line, f.Title, decode(r[f.Offset:f.Offset+f.Width]))
+		}
+	}
+	return b.String(), nil
 }
