@@ -317,7 +317,8 @@ authentication cannot run it: the connector does not support integrated authenti
 ### `apply` without an administrator
 
 `"db": {"host", "database", "leastPrivilege": true, "login"?}` with **no `user` and no `password`** keeps the login
-this box knows (the one `sql-setup` made; a `login` left out is the record's, not `erp_connector_read`) and opens
+this box knows (the one `sql-setup` made; a `login` left out is the record's when the host, port and database are
+the record's, else `erp_connector_read`) and opens
 nothing as an administrator: the procedures are not checked (the
 step says sql-setup set them up), `rotateLogin` is refused (a new password needs an administrator). A box that knows
 no password that logs in as that login is `db_admin_required`, with nothing written.

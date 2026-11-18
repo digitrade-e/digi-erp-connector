@@ -45,9 +45,15 @@ func (s *Store) InstallerSetupDone() (bool, error) {
 	return true, errors.New("link: the installer setup marker does not parse")
 }
 
-// MarkInstallerSetupDone records that an installer's first setup succeeded.
+// MarkInstallerSetupDone records that an installer's first setup ran (written before it runs).
 func (s *Store) MarkInstallerSetupDone() error {
 	return s.Secrets.Set(secretInstallerSetup, []byte("done"))
+}
+
+// ReopenInstallerSetup takes the mark back after an installer's apply failed: the installer may run it again (the
+// API-credential checks still stand).
+func (s *Store) ReopenInstallerSetup() error {
+	return s.Secrets.Set(secretInstallerSetup, []byte("no"))
 }
 
 // Installer is the installer this box is bound to; "" when none. An unreadable binding is an error, never "none":

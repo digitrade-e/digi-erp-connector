@@ -82,6 +82,7 @@ type fakeRunner struct {
 	mu    sync.Mutex
 	calls [][]string
 	stdin [][]byte
+	exit  int // what every run exits with
 }
 
 func (r *fakeRunner) Run(_ context.Context, argv []string, stdin []byte, _ int) ([]byte, int, error) {
@@ -89,7 +90,7 @@ func (r *fakeRunner) Run(_ context.Context, argv []string, stdin []byte, _ int) 
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, argv)
 	r.stdin = append(r.stdin, stdin)
-	return []byte(`{"command":"` + argv[0] + `","ok":true}`), 0, nil
+	return []byte(`{"command":"` + argv[0] + `","ok":true}`), r.exit, nil
 }
 
 func (r *fakeRunner) count() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.calls) }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -155,7 +156,7 @@ func SQLSetup(ctx context.Context, env Env, in SQLSetupInput) (*SQLSetupResult, 
 		return res, err
 	}
 	if inService && (!strings.EqualFold(cur.DB.Host, d.Host) || cur.DB.Port != d.Port || !strings.EqualFold(cur.DB.Database, d.Database)) {
-		return res, refuse(CodeSQLSetupInService, "type the server and database the connector uses ("+cur.DB.Host+", "+cur.DB.Database+"), or ask Digitrade to move it",
+		return res, refuse(CodeSQLSetupInService, "type the server and database the connector uses ("+serverAddress(cur.DB.Host, cur.DB.Port)+", "+cur.DB.Database+"), or ask Digitrade to move it",
 			"the connector already logs in as %s to another server or database", login)
 	}
 	if r := checkDBHost(ctx, env, d.Host); r != nil {
@@ -388,4 +389,13 @@ func (s *Spec) fillFromSQLSetup(rec SQLSetupRecord) *Refusal {
 	s.DB = DBSpec{Host: rec.Host, Port: rec.Port, Database: rec.Database, Login: rec.Login, LeastPrivilege: true,
 		Encrypt: &enc, TrustServerCertificate: &trust}
 	return nil
+}
+
+// serverAddress is how sql-setup's console takes a server back: host:port when there is a port, else the host (or
+// host\instance).
+func serverAddress(host string, port int) string {
+	if port > 0 && !strings.Contains(host, `\`) {
+		return host + ":" + strconv.Itoa(port)
+	}
+	return host
 }

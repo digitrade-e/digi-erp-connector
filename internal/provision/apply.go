@@ -139,8 +139,9 @@ func applyAs(ctx context.Context, env Env, s Spec, check, installer bool) (*Appl
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
 	if s.DB.Mode == "" && s.DB.adminless() && s.DB.Login == "" {
 		// No administrator and no login named: the login sql-setup made, not DefaultLogin (plan 090 review).
-		if rec, ok, _ := ReadSQLSetup(env.Sys.DataDir()); ok {
-			s.DB.Login = rec.Login
+		if rec, ok, _ := ReadSQLSetup(env.Sys.DataDir()); ok && strings.EqualFold(rec.Host, strings.TrimSpace(s.DB.Host)) &&
+			rec.Port == s.DB.Port && strings.EqualFold(rec.Database, strings.TrimSpace(s.DB.Database)) {
+			s.DB.Login = rec.Login // only for the server and database sql-setup set up
 		}
 	}
 	if r := s.ValidateFor(LinkMode(env.Sys.DataDir()), SystemDirs()); r != nil {

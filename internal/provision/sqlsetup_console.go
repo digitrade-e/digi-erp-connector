@@ -37,7 +37,8 @@ func sqlSetupConsole(ctx context.Context, env Env) (out []byte, code int) {
 		}
 	}()
 	// Who can run it, before a password is asked: an elevated console, on a paired server.
-	if _, err := sqlSetupBox(env.Sys.DataDir()); err != nil {
+	login, err := sqlSetupBox(env.Sys.DataDir())
+	if err != nil {
 		var r *Refusal
 		if errors.As(err, &r) {
 			say("Not done (%s): %s", r.Code, r.Message)
@@ -56,6 +57,11 @@ func sqlSetupConsole(ctx context.Context, env Env) (out []byte, code int) {
 			say("  %s%s", instanceAddress(in), instanceNotes(in))
 		}
 		def = instanceAddress(insts[0])
+	}
+	// On a box in service the only answer sql-setup takes is the connector's own server: offer that.
+	if cur, inService, err := connectorUses(env.Sys.DataDir(), login); err == nil && inService {
+		def = serverAddress(cur.DB.Host, cur.DB.Port)
+		say("The connector already uses %s on %s, database %s: a run now only puts the procedures back.", login, def, cur.DB.Database)
 	}
 	ask := func(prompt, dflt string) (string, error) {
 		p := prompt
@@ -85,7 +91,8 @@ func sqlSetupConsole(ctx context.Context, env Env) (out []byte, code int) {
 	}
 
 	var in SQLSetupInput
-	server, err := ask(`SQL Server (host\instance, or host:port)`, def)
+	var server string
+	server, err = ask(`SQL Server (host\instance, or host:port)`, def)
 	if err == nil {
 		in.Host, in.Port = splitHostPort(server)
 		in.Database, err = ask("Database (the Hashavshevet company's)", "")

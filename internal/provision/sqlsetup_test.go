@@ -555,3 +555,48 @@ func TestSQLSetupOffersWhatWorks(t *testing.T) {
 		}
 	}
 }
+
+// The record's login is the default only for the server and database sql-setup set up.
+func TestATeamApplyForAnotherDatabaseDoesNotTakeSQLSetupsLogin(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	env := testEnv(sys, fdb)
+	if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); err != nil {
+		t.Fatal(err)
+	}
+	s := installerSpec()
+	s.ERP = "hasavshevet"
+	s.DB = DBSpec{Host: `127.0.0.1\WIZSOFT`, Database: "erp_2027", LeastPrivilege: true}
+	_, err := Apply(context.Background(), env, s)
+	var r *Refusal
+	if !errors.As(err, &r) || r.Code != CodeDBAdminRequired || !strings.Contains(r.Message, DefaultLogin) {
+		t.Fatalf("%v", err)
+	}
+}
+
+// On a box in service the console offers the connector's own server, the one answer sql-setup takes there.
+func TestSQLSetupAtTheConsoleOfABoxInService(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	env := testEnv(sys, fdb)
+	if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyAsInstaller(context.Background(), env, installerSpec(), false); err != nil {
+		t.Fatal(err)
+	}
+	sys.instances[0].StaticPort = 1500 // the instance list alone would offer 127.0.0.1:1500
+	con := &fakeConsole{answers: []string{"", "erp_db", "sa", testSaPass, ""}}
+	env.Console = con
+	if _, code := Run(context.Background(), env, []string{"sql-setup"}, strings.NewReader("")); code != ExitOK {
+		t.Fatalf("exit %d, said:\n%s", code, strings.Join(con.said, "\n"))
+	}
+	all := strings.Join(con.said, "\n")
+	if !strings.Contains(all, "already uses "+testBoxLogin) || !strings.Contains(all, ": kept.") {
+		t.Fatalf("said:\n%s", all)
+	}
+	if !strings.Contains(con.asked[0], `[127.0.0.1\WIZSOFT]`) {
+		t.Fatalf("offered %q, not the connector's own server", con.asked[0])
+	}
+	if got := serverAddress("10.0.0.5", 1500); got != "10.0.0.5:1500" {
+		t.Errorf("serverAddress: %q", got)
+	}
+}

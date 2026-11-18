@@ -443,6 +443,19 @@ func TestAnInstallersFirstSetupHappensOnce(t *testing.T) {
 	if done, _ := b.store.InstallerSetupDone(); done {
 		t.Fatal("a check marked the setup done")
 	}
+	// a failed apply takes the mark back: the installer may try again
+	b.runner.mu.Lock()
+	b.runner.exit = 1
+	b.runner.mu.Unlock()
+	if got := apply("apply"); got != "" {
+		t.Fatalf("a failing apply was refused: %q", got)
+	}
+	if done, _ := b.store.InstallerSetupDone(); done {
+		t.Fatal("a failed apply left the setup marked done")
+	}
+	b.runner.mu.Lock()
+	b.runner.exit = 0
+	b.runner.mu.Unlock()
 	if got := apply("apply"); got != "" {
 		t.Fatalf("the first setup: %q", got)
 	}
@@ -466,10 +479,34 @@ func TestAnInstallersFirstSetupHappensOnce(t *testing.T) {
 	if done, _ := b.store.InstallerSetupDone(); done {
 		t.Fatal("a new pairing kept the old setup marker")
 	}
+	// a mark that cannot be written stops the apply before it runs
+	if err := b.store.BindInstaller("inst-dana"); err != nil {
+		t.Fatal(err)
+	}
+	real := b.store.Secrets
+	b.store.Secrets = failingSet{real, secretInstallerSetup}
+	before := b.runner.count()
+	if got := apply("apply"); got != "state_unreadable" || b.runner.count() != before {
+		t.Fatalf("an unwritable mark: refusal %q, %d run(s)", got, b.runner.count()-before)
+	}
+	b.store.Secrets = real
 	if err := b.store.Secrets.Set(secretInstallerSetup, []byte("garbage")); err != nil {
 		t.Fatal(err)
 	}
 	if done, err := b.store.InstallerSetupDone(); !done || err == nil {
 		t.Fatal("an unreadable marker did not count as done")
 	}
+}
+
+// failingSet refuses to write one key, as a broken DPAPI store would.
+type failingSet struct {
+	Secrets
+	key string
+}
+
+func (f failingSet) Set(k string, v []byte) error {
+	if k == f.key {
+		return errors.New("the secret store refused")
+	}
+	return f.Secrets.Set(k, v)
 }
