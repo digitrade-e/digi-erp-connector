@@ -72,18 +72,29 @@ var installerReads = map[string]bool{
 	"discover":    true,
 }
 
-// checkInstaller is what an installer's verified command must also pass; "" for a team command. The binding comes
-// first, so an installer learns nothing about a box that is not its own.
-func (l *Link) checkInstaller(cert *linkproto.InstallerCert, env linkproto.Envelope, stdin []byte) string {
-	if cert == nil {
-		return ""
-	}
+// installerBinding refuses an installer on a box not bound to it; "" when it is. verify calls it right after the
+// signature, before any other refusal, so an installer learns nothing about a box that is not its own (not even that
+// the client turned commands off).
+func (l *Link) installerBinding(cert *linkproto.InstallerCert) string {
 	bound, err := l.cfg.Store.Installer()
 	switch {
 	case err != nil:
 		return "state_unreadable"
 	case bound == "" || bound != cert.ID:
 		return linkproto.CodeInstallerNotBound
+	}
+	return ""
+}
+
+// checkInstaller is what an installer's verified command must also pass once its stdin arrived; "" for a team command.
+func (l *Link) checkInstaller(cert *linkproto.InstallerCert, env linkproto.Envelope, stdin []byte) string {
+	if cert == nil {
+		return ""
+	}
+	if r := l.installerBinding(cert); r != "" {
+		return r
+	}
+	switch {
 	case !l.cfg.DomainRoleKnown:
 		return linkproto.CodeInstallerRoleUnknown
 	case l.cfg.DomainRole >= 4:

@@ -241,6 +241,11 @@ func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, key
 	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil { // an installer's: its certifier's
 		l.cfg.Log.Error("link: recording the key epoch", err)
 	}
+	if cert != nil {
+		if r := l.installerBinding(cert); r != "" {
+			return env, keyID, cert, digest, r // before admin_off and the rest: nothing about another's box
+		}
+	}
 	if !state.AdminOn() {
 		return env, keyID, cert, digest, "admin_off" // the client's off switch (link.yaml admin: false)
 	}

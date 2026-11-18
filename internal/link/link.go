@@ -393,9 +393,10 @@ func (l *Link) connect(ctx context.Context, st State) (*conn, time.Duration, err
 		switch w.Code {
 		case linkproto.CodePending:
 			if hello.PairCode != "" && linkproto.ValidBoxID(w.Box) {
-				// Who made the code (plan 090 D2), recorded before the box id: a box whose binding was not written
-				// keeps its code, and a binding never outlives the pairing it came from. An id that is no installer's
-				// binds none: such a box obeys the team only.
+				// Who made the code (plan 090 D2), recorded before the box id, so a binding never outlives the pairing
+				// it came from. If it cannot be written the pairing fails closed: the relay has spent the code, so the box
+				// needs a new one (as when the box id cannot be saved). An id that is no installer's binds none: such a
+				// box obeys the team only.
 				installer := w.Installer
 				if installer != "" && !linkproto.ValidInstallerID(installer) {
 					l.cfg.Log.Warn("link: the relay named an installer id of the wrong shape; no installer may command this box")

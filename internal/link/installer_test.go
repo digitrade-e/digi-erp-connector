@@ -297,3 +297,36 @@ func TestEmptyInput(t *testing.T) {
 		}
 	}
 }
+
+// An installer learns nothing about a box that is not its own: installer_not_bound comes right after the signature,
+// before the client's off switch or the command's own checks. Its own box still answers those.
+func TestAnInstallerLearnsNothingAboutABoxThatIsNotItsOwn(t *testing.T) {
+	teamPriv, kr := team(t, 1)
+	dana := newInstaller(t, teamPriv, "team-1", "inst-dana", 30*24*time.Hour)
+	for _, c := range []struct {
+		name, madeBy, command string
+		adminOff              bool
+		want                  string
+	}{
+		{"another's box, commands off", "inst-omer", "state", true, linkproto.CodeInstallerNotBound},
+		{"another's box, a command outside the set", "inst-omer", "powershell", false, linkproto.CodeInstallerNotBound},
+		{"its own box, commands off", "inst-dana", "state", true, "admin_off"},
+		{"its own box, a command outside the set", "inst-dana", "powershell", false, linkproto.CodeCommandUnknown},
+	} {
+		r := newRelay(t)
+		b, rc := installerPairedBox(t, r, "acme-erp", c.madeBy, kr, nil)
+		if c.adminOff {
+			st, _ := b.store.LoadState()
+			off := false
+			st.Admin = &off
+			if err := b.store.SaveState(st); err != nil {
+				t.Fatal(err)
+			}
+		}
+		raw, _ := dana.envelope("acme-erp", c.command, nil, nil, false)
+		_, sa := send(t, rc, raw, nil)
+		if got := refusalOf(sa); got != c.want {
+			t.Errorf("%s: refusal %q, want %q", c.name, got, c.want)
+		}
+	}
+}
