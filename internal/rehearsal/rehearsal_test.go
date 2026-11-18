@@ -90,6 +90,7 @@ func TestCheck_Findings(t *testing.T) {
 		}, "receipt"},
 		{"receipt index lost", func(t *testing.T, b box) { os.Remove(filepath.Join(b.data, "receipts", "index", "k1.json")) }, "lost"},
 		{"format floor lowered", func(t *testing.T, b box) { b.write(t, filepath.Join(b.data, "format-floor"), "1.0.29\n") }, "format-floor"},
+		{"history folder lost", func(t *testing.T, b box) { os.RemoveAll(filepath.Join(b.send, "history", "99")) }, "history lost"},
 		{"unreadable entry", func(t *testing.T, b box) { b.write(t, filepath.Join(b.data, "orders", "index", "a.json"), "{") }, "unreadable"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
