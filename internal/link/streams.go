@@ -176,7 +176,7 @@ func (l *Link) command(st net.Conn) {
 		}
 		if refusal == "" {
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q by %q (key %s)", env.Command, env.ChangeSet, env.By, keyID))
-			stdout, ans.Exit = l.run(env, stdin)
+			stdout, ans.Exit = l.run(env, stdin, cert != nil)
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q ended, exit %d, %d bytes", env.Command, env.ChangeSet, ans.Exit, len(stdout)))
 		}
 	}
@@ -306,11 +306,14 @@ func (l *Link) argv(env linkproto.Envelope) ([]string, error) {
 	return Argv(env)
 }
 
-func (l *Link) run(env linkproto.Envelope, stdin []byte) ([]byte, int) {
+func (l *Link) run(env linkproto.Envelope, stdin []byte, installer bool) ([]byte, int) {
 	if self, ok := selfCommands[env.Command]; ok {
 		return self(l, env, stdin)
 	}
 	argv, _ := Argv(env) // checked already
+	if installer && installerWrites[env.Command] {
+		argv = append(argv, "--installer") // provision's installer rules (plan 090 D3); never from the envelope
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), CommandDeadline)
 	defer cancel()
 	out, exit, err := l.cfg.Runner.Run(ctx, argv, stdin, linkproto.MaxPayload)

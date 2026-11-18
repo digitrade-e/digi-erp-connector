@@ -80,9 +80,15 @@ What an installer may do is fixed in this release, not in the certificate:
   records it (`secrets\link_installer.bin`, DPAPI) before it records the box id, every time. A box paired from a code
   the team made, or paired before this release, is bound to no installer and refuses every installer
   (`installer_not_bound`). Pairing again means uninstalling, which gives a new box id and needs a new code.
-- **Only reads, with no input:** `version`, `hashes`, `link-status`, `state`, `verify`, and `discover` without a
-  database (`installer_input_refused` for any input, sealed or not; `installer_not_allowed` for any other command).
-  `discover` without input opens no database, so an installer's key cannot test passwords against a SQL Server.
+- **Reads, with no input:** `version`, `hashes`, `link-status`, `state`, `verify`, and `discover` without a database
+  (`installer_input_refused` for any input, sealed or not). `discover` without input opens no database, so an
+  installer's key cannot test passwords against a SQL Server.
+- **The first setup, once:** `apply-check` and `apply`, sealed, only while `config.yaml` holds no API credential
+  (`installer_box_configured`; a `config.yaml` that cannot be read counts as one). The link runs them as
+  `apply … --installer`: a short list of fields, the database `sql-setup` recorded, no SQL administrator
+  ([provisioning.md § An installer's first setup](provisioning.md#an-installers-first-setup-apply---installer)).
+  The client's IT runs `sql-setup` at the server's console first; it is never a link command.
+- **Nothing else** (`installer_not_allowed`).
 - **Never on a domain controller** (`installer_dc`), and never where Windows did not report the server's role
   (`installer_role_unknown`): the team sets those up.
 

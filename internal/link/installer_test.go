@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -166,7 +167,7 @@ func TestAnInstallerCannotWriteOrSendInput(t *testing.T) {
 		sealed  bool
 		want    string
 	}{
-		{"apply, sealed as it must be", "apply", nil, sealedApply, true, linkproto.CodeInstallerNotAllowed},
+		{"apply on a box whose credential cannot be read (counts as set up)", "apply", nil, sealedApply, true, CodeInstallerConfigured},
 		{"counters", "counters", nil, []byte(`{}`), false, linkproto.CodeInstallerNotAllowed},
 		{"options", "options", nil, []byte(`{}`), false, linkproto.CodeInstallerNotAllowed},
 		{"restore", "restore", []string{"cs-20261118-0001"}, nil, false, linkproto.CodeInstallerNotAllowed},
@@ -328,5 +329,97 @@ func TestAnInstallerLearnsNothingAboutABoxThatIsNotItsOwn(t *testing.T) {
 		if got := refusalOf(sa); got != c.want {
 			t.Errorf("%s: refusal %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// The first setup (plan 090 D3, connector part B): an installer's apply and apply-check run on its own fresh box only,
+// with --installer added by the link, never by the envelope.
+func TestAnInstallerSetsUpItsFreshBox(t *testing.T) {
+	teamPriv, kr := team(t, 1)
+	dana := newInstaller(t, teamPriv, "team-1", "inst-dana", 30*24*time.Hour)
+	fresh := func(c *Config) { c.APICredentialSet = func() (bool, error) { return false, nil } }
+	r := newRelay(t)
+	b, rc := installerPairedBox(t, r, "acme-erp", "inst-dana", kr, fresh)
+	plain := []byte(`{"version":1,"changeSet":"cs-acme-0001","apiListen":"127.0.0.1:8082","db":{"leastPrivilege":true},"auth":{"username":"digi-hub","password":"x"}}`)
+	for _, c := range []struct{ command, argv string }{
+		{"apply-check", "apply --check --spec - --installer"},
+		{"apply", "apply --spec - --installer"},
+	} {
+		sealed, _ := linkproto.Seal(b.keys.Public().Seal, plain)
+		before := b.runner.count()
+		raw, e := dana.envelope("acme-erp", c.command, nil, sealed, true)
+		stdout, sa := send(t, rc, raw, sealed)
+		a, err := linkproto.VerifyAnswer(b.keys.Public(), sa, "acme-erp", e.Nonce, digestOf(raw), stdout)
+		if err != nil || a.Refusal != "" {
+			t.Fatalf("%s: answer %+v, %v", c.command, a, err)
+		}
+		if b.runner.count() != before+1 || strings.Join(b.runner.calls[before], " ") != c.argv {
+			t.Fatalf("%s: provision ran %v", c.command, b.runner.calls[before:])
+		}
+		if string(b.runner.stdin[before]) != string(plain) {
+			t.Fatalf("%s: provision did not get the opened spec", c.command)
+		}
+	}
+	// the team's apply on the same box runs without the installer's rules
+	sealed, _ := linkproto.Seal(b.keys.Public().Seal, plain)
+	now := time.Now()
+	e := linkproto.Envelope{Box: "acme-erp", Command: "apply", StdinSHA256: linkproto.SHA256Hex(sealed), Sealed: true,
+		Nonce: linkproto.RandomNonce(16), IssuedAt: now.Unix(), ExpiresAt: now.Add(4 * time.Minute).Unix()}
+	ts, _ := linkproto.SignEnvelope(teamPriv, "team-1", e)
+	raw, _ := json.Marshal(ts)
+	before := b.runner.count()
+	if _, sa := send(t, rc, raw, sealed); refusalOf(sa) != "" {
+		t.Fatalf("the team's apply: %q", refusalOf(sa))
+	}
+	if got := strings.Join(b.runner.calls[before], " "); got != "apply --spec -" {
+		t.Fatalf("the team's apply ran %q", got)
+	}
+}
+
+func TestAnInstallerCannotSetUpABoxThatIsSetUp(t *testing.T) {
+	teamPriv, kr := team(t, 1)
+	dana := newInstaller(t, teamPriv, "team-1", "inst-dana", 30*24*time.Hour)
+	for _, c := range []struct {
+		name   string
+		madeBy string
+		tune   func(*Config)
+		sealed bool
+		want   string
+	}{
+		{"a credential in config.yaml", "inst-dana", func(c *Config) { c.APICredentialSet = func() (bool, error) { return true, nil } }, true, CodeInstallerConfigured},
+		{"config.yaml unreadable", "inst-dana", func(c *Config) {
+			c.APICredentialSet = func() (bool, error) { return false, errors.New("parse config") }
+		}, true, CodeInstallerConfigured},
+		{"its fresh box, a domain controller", "inst-dana", func(c *Config) {
+			c.APICredentialSet = func() (bool, error) { return false, nil }
+			c.DomainRole = 5
+		}, true, linkproto.CodeInstallerDC},
+		{"another installer's fresh box", "inst-omer", func(c *Config) { c.APICredentialSet = func() (bool, error) { return false, nil } }, true, linkproto.CodeInstallerNotBound},
+		{"its fresh box, the spec in clear", "inst-dana", func(c *Config) { c.APICredentialSet = func() (bool, error) { return false, nil } }, false, CodeInputNotSealed},
+	} {
+		r := newRelay(t)
+		b, rc := installerPairedBox(t, r, "acme-erp", c.madeBy, kr, c.tune)
+		in := []byte(`{"version":1}`)
+		if c.sealed {
+			in, _ = linkproto.Seal(b.keys.Public().Seal, in)
+		}
+		raw, _ := dana.envelope("acme-erp", "apply", nil, in, c.sealed)
+		_, sa := send(t, rc, raw, in)
+		if got := refusalOf(sa); got != c.want {
+			t.Errorf("%s: refusal %q, want %q", c.name, got, c.want)
+		}
+		if b.runner.count() != 0 {
+			t.Errorf("%s: provision ran", c.name)
+		}
+	}
+}
+
+// sql-setup is typed at the server's console by the client's IT (plan 090 D5): no signed command reaches it.
+func TestSQLSetupIsNeverALinkCommand(t *testing.T) {
+	if _, ok := commands["sql-setup"]; ok {
+		t.Fatal("sql-setup is in the link's command set: the administrator's password would cross the relay")
+	}
+	if _, err := Argv(linkproto.Envelope{Command: "sql-setup"}); refusalCode(err) != linkproto.CodeCommandUnknown {
+		t.Fatalf("Argv(sql-setup): %v", err)
 	}
 }

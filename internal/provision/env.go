@@ -260,6 +260,9 @@ type Env struct {
 	// service (review m7: daemonAt). NewEnv's reads the service's process and the TCP table; nil checks nothing
 	// (tests that do not model the TCP table).
 	DaemonAt func(addr string) error
+	// Console is the person at this machine's keyboard, for sql-setup alone (plan 090 D5); nil when the input is not an
+	// interactive console.
+	Console Console
 }
 
 // staleGrace: the daemon writes config.yaml itself just after its first start
@@ -295,6 +298,7 @@ func NewEnv(sys System) Env {
 			return net.DefaultResolver.LookupIP(ctx, "ip", host)
 		},
 		DaemonAt: func(addr string) error { return daemonAt(sys, addr) },
+		Console:  newConsole(),
 	}
 }
 

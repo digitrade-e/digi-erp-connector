@@ -33,6 +33,7 @@ same way in an elevated PowerShell. The code is
 | `inflight [--check] --spec -` | `{"version":1,"changeSet","kind":"orders"\|"receipts","historyId"\|"number","expect":"reserved"\|"retryable","resolve":"fail"\|"done"}` (+ `assumeIdle`?; the check needs only `kind` and the key) | Resolves ONE unfinished order or receipt index entry as failed or done (plan 087 review R6, v1.0.32, below) | that entry; `DataDir\format-floor` (a receipt resolved as failed) |
 | `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`? — accepted, unused since v1.0.32 —, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
+| `sql-setup` | **typed at this server's console**, never stdin | The client's IT types an SQL Server administrator once; the connector's own least-privilege login and the Hasavshevet procedures are made with it, and nothing of the administrator is kept (plan 090, below). Refused over WinRM, the link or a pipe | the SQL login, its password (DPAPI), `provision\sql-setup.json` |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
 | `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
@@ -271,6 +272,61 @@ order queue, the login opened), the change set's pre-image of `config.yaml` and 
 login's own key never goes back), then the login, the secret, `config.yaml`, the restart and the proof **including
 `/api/health`**: a connector that answers but not its database after the change is `port_proof_failed`, and the
 pre-image goes back. Nothing to change writes nothing and proves the running daemon.
+
+## `sql-setup`: the client's SQL administrator, typed on the server (plan 090)
+
+The connector's least-privilege login needs an administrator once, to create it and install Hashavshevet's
+procedures. `sql-setup` lets the client's IT type that administrator **at this server's console**, so its password
+never leaves the server: not in a ticket, a phone call to Digitrade, a secret store, or across the link.
+
+```powershell
+# elevated PowerShell on the server, after setup.exe paired it with Digitrade
+& 'C:\Program Files\digi-erp-connector\digi-erp-connector-provision.exe' sql-setup
+```
+
+It asks: the SQL Server (the instances on this machine are offered: `127.0.0.1\<instance>`, or `host:port` for a
+default instance or another server on the LAN), the Hashavshevet company database, the administrator's login
+(sysadmin, or securityadmin with db_owner on that database), its password **with the echo off**, and whether the
+connection must be encrypted. Then, under the run lock, every check before a write (a paired box, the names, the
+server on this machine or its LAN — `db_host_public` otherwise —, the administrator logs in):
+
+1. the procedures (`EnsureProcedures`);
+2. the login `erp_connector_<box id, - as _>` — this box's own: **kept** when the box knows a password it logs in with
+   (a second run), else **created**, or **given a new password** when it exists; its password is born here and kept
+   with DPAPI (`login_<name>`) before SQL Server hears it; the grants are put back either way;
+3. a log-in as the login, to prove it;
+4. the record `provision\sql-setup.json` **last**: `{v, erp, host, port?, database, login, encrypt?,
+   trustServerCertificate?, at}` — never a password. A run that stopped half-way leaves none; run it again.
+
+It writes no `config.yaml` and no DB secret: `apply` does, without any administrator (next). `state` shows it as
+`sqlSetup: {state: done|absent|unreadable, host, database, login, at}`, read from the record alone. Refusals:
+`sql_setup_needs_link` (not paired), `sql_setup_console_only` (no console: WinRM, the link, a pipe), and apply's
+(`spec_invalid`, `db_unreachable`, `procedures_failed`, `least_privilege_failed`, `db_host_public`). Its output is
+for the person, in ASCII, redacted (a driver's error that quotes the password shows `[redacted]`). Windows-only SQL
+authentication cannot run it: the connector does not support integrated authentication.
+
+### `apply` without an administrator
+
+`"db": {"host", "database", "leastPrivilege": true, "login"?}` with **no `user` and no `password`** keeps the login
+this box knows (the one `sql-setup` made) and opens nothing as an administrator: the procedures are not checked (the
+step says sql-setup set them up), `rotateLogin` is refused (a new password needs an administrator). A box that knows
+no password that logs in as that login is `db_admin_required`, with nothing written.
+
+### An installer's first setup (`apply --installer`)
+
+A command signed by an installer's key (plan 090; [link.md § Installers](link.md#installers-digitrade-plan-090))
+reaches `apply` / `apply --check` only on a box bound to that installer, and only while `config.yaml` holds no API
+credential. The link adds `--installer` (last, never from the envelope), and `apply` then:
+
+- takes only `version`, `changeSet`, `erp` (`hasavshevet`), `apiListen`, `auth`, `service`, `expect`, `importer`
+  `{"mode":"none"}`, and `db.leastPrivilege: true` with, optionally, `db.database` and `db.login` as `sql-setup`
+  recorded them. Anything else — a server, a credential, encryption, a rotation, orders, an importer, TLS, a firewall
+  rule, options, `assumeIdle` — is `installer_not_allowed`;
+- fills the database from the record (`db_admin_required` when `sql-setup` has not run) and runs without an
+  administrator, as above;
+- refuses a domain controller (`installer_dc`) and, under the run lock, a box whose `config.yaml` holds an API
+  credential by then (`installer_box_configured`). The first setup that succeeds sets one: every later write is the
+  team's.
 
 ## A box without a database (`"db": {"mode": "none"}`)
 
@@ -862,4 +918,5 @@ Get-Content spec.json | .\digi-erp-connector-provision.exe apply --spec -
 .\digi-erp-connector-provision.exe verify
 ```
 
-Delete `spec.json` afterwards: it holds the client's database password.
+Delete `spec.json` afterwards: it holds the client's database password. Better: `sql-setup` first (above), then a spec
+with no `db.user` and `db.password` at all.

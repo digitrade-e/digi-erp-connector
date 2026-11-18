@@ -71,7 +71,19 @@ type StateResult struct {
 	TLS       *StateTLS      `json:"tls,omitempty"`
 	Link      StateLink      `json:"link"`
 	Disk      StateDisk      `json:"disk"`
-	Errors    []string       `json:"errors,omitempty"`
+	// SQLSetup is sql-setup's record (plan 090 D5): done once the client's IT ran it to the end on this server. Read
+	// from the record alone, never a secret.
+	SQLSetup StateSQLSetup `json:"sqlSetup"`
+	Errors   []string      `json:"errors,omitempty"`
+}
+
+// StateSQLSetup is what sql-setup left: the database and the login it made, never a password.
+type StateSQLSetup struct {
+	State    string `json:"state"` // done | absent | unreadable
+	Host     string `json:"host,omitempty"`
+	Database string `json:"database,omitempty"`
+	Login    string `json:"login,omitempty"`
+	At       string `json:"at,omitempty"`
 }
 
 // StateWritableFolder is one folder others can write to (config.WriteFolder):
@@ -383,6 +395,7 @@ func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
 		res.TLS = tlsState(cfg.TLS.CertFile, env.Now())
 	}
 	res.Link = linkState(dir)
+	res.SQLSetup = sqlSetupState(dir)
 	res.Disk = StateDisk{Path: dir}
 	if free, total, err := diskSpace(dir); err != nil {
 		res.Disk.Error = err.Error()
@@ -814,4 +827,15 @@ func decodeOptional(stdin io.Reader, v any) *Refusal {
 		return nil
 	}
 	return decodeInput(bytes.NewReader(b), v)
+}
+
+func sqlSetupState(dir string) StateSQLSetup {
+	rec, ok, err := ReadSQLSetup(dir)
+	switch {
+	case err != nil:
+		return StateSQLSetup{State: "unreadable"}
+	case !ok:
+		return StateSQLSetup{State: "absent"}
+	}
+	return StateSQLSetup{State: "done", Host: rec.Host, Database: rec.Database, Login: rec.Login, At: rec.At}
 }

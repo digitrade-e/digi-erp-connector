@@ -373,6 +373,7 @@ type fakeDB struct {
 	opened     []string // user names
 	loginCalls int
 	databases  []DatabaseFact
+	failProcs  bool // EnsureProcedures is refused, as for a login without CREATE PROCEDURE
 }
 
 // login is the server's password for a least-privilege login, and whether
@@ -416,6 +417,9 @@ func (c fakeConn) Close() error               { return nil }
 func (c fakeConn) EnsureProcedures(context.Context) ([]hasavshevet.ProcedureResult, error) {
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
+	if c.db.failProcs {
+		return nil, errors.New("CREATE PROCEDURE permission denied in database erp_db")
+	}
 	made := !c.db.procsMade
 	c.db.procsMade = true
 	return []hasavshevet.ProcedureResult{{Name: "GPRICE_Bulk", Created: made}, {Name: "GetOnHandStockForSkus", Created: made}}, nil

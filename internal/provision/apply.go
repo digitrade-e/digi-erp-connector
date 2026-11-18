@@ -132,11 +132,15 @@ func ApplyCheck(ctx context.Context, env Env, s Spec) (*ApplyResult, error) {
 }
 
 func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, error) {
+	return applyAs(ctx, env, s, check, false)
+}
+
+func applyAs(ctx context.Context, env Env, s Spec, check, installer bool) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
 	if r := s.ValidateFor(LinkMode(env.Sys.DataDir()), SystemDirs()); r != nil {
 		return res, r
 	}
-	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check}
+	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check, installer: installer}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -177,6 +181,9 @@ type applier struct {
 	dir   string
 	res   *ApplyResult
 	check bool // apply --check: stop before the first write
+	// installer: an installer's first setup (ApplyAsInstaller, plan 090 D3): refused, under the run lock, on a box
+	// whose config.yaml holds an API credential.
+	installer bool
 	// folderChecked are the folders a command checked as one it adds, moves
 	// or newly makes typed or bound (plan 087 review R1a), by folderKey: the
 	// others are only reported (reportWritableFolders).
@@ -231,6 +238,10 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.readCurrent(); err != nil {
 		return err
 	}
+	if a.installer && (strings.TrimSpace(a.cur.Auth.Username) != "" || a.cur.Auth.Password != "") {
+		return refuse(CodeInstallerConfigured, "ask the team: the box is set up, and from now on it is theirs",
+			"config.yaml holds an API credential: an installer sets up a fresh box only")
+	}
 	dbUser := strings.TrimSpace(a.s.DB.User)
 	if a.s.DB.LeastPrivilege {
 		dbUser = a.s.DB.login()
@@ -262,10 +273,18 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
 	}
-	var admin Database // nil on a box without a database: nothing is opened
-	if a.s.DB.None() {
+	var admin Database // nil on a box without a database, and with no administrator: nothing is opened as one
+	switch {
+	case a.s.DB.None():
 		a.loginPlan = loginNone
-	} else {
+	case a.s.DB.adminless(): // plan 090 D5: the login sql-setup made, kept; nothing needs DDL
+		if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
+			return r
+		}
+		if err := a.planLogin(ctx, nil); err != nil {
+			return adminRequired(err, a.s.DB.login())
+		}
+	default:
 		if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
 			return r
 		}
@@ -704,7 +723,11 @@ func (a *applier) procedures(ctx context.Context, admin Database) error {
 		return nil
 	}
 	if admin == nil {
-		a.step("procedures", false, "not checked: no administrator was given")
+		detail := "not checked: no administrator was given"
+		if rec, ok, _ := ReadSQLSetup(a.dir); ok && a.s.DB.adminless() {
+			detail = "not checked: sql-setup set them up (" + rec.At + ")"
+		}
+		a.step("procedures", false, detail)
 		return nil
 	}
 	results, err := admin.EnsureProcedures(ctx)

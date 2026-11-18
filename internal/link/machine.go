@@ -99,11 +99,27 @@ func (m Machine) Config() (Config, error) {
 	}
 	return Config{
 		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain,
-		DomainRole: role, DomainRoleKnown: roleKnown,
+		DomainRole: role, DomainRoleKnown: roleKnown, APICredentialSet: m.apiCredentialSet,
 		Daemon: watch, Proxy: proxy, Upgrade: UpgradeConfig{DataDir: m.DataDir, Protect: m.Protect},
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,
 	}, nil
+}
+
+// apiCredentialSet reads config.yaml for an API credential (plan 090 D3). No file is none; a file that cannot be read
+// or parsed counts as one, so an installer is refused rather than let in on a doubt.
+func (m Machine) apiCredentialSet() (bool, error) {
+	if m.LoadDaemon == nil {
+		return true, errors.New("link: config.yaml cannot be read here")
+	}
+	cfg, err := m.LoadDaemon()
+	if errors.Is(err, config.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	return strings.TrimSpace(cfg.Auth.Username) != "" || cfg.Auth.Password != "", nil
 }
 
 // Pair stores a pairing code for the service to redeem and returns the

@@ -39,6 +39,9 @@ type Config struct {
 	// DomainRoleKnown says Windows reported DomainRole itself. When it could not, DomainRole is a guess that is never a
 	// domain controller (MachineFacts), so installers are refused (plan 090 D3: installer_role_unknown).
 	DomainRoleKnown bool
+	// APICredentialSet says whether the daemon's config.yaml holds an API credential (plan 090 D3): an installer's
+	// writes count only on a box that holds none. nil, or an error, counts as set.
+	APICredentialSet func() (bool, error)
 
 	// APIAddr is the daemon's local address (127.0.0.1:<apiListen port>);
 	// APITLS when the daemon serves TLS there.

@@ -62,7 +62,8 @@ func (s *Store) BindInstaller(id string) error {
 
 // installerReads are the commands an installer may send a box bound to it: reads that change nothing. Each takes an
 // empty input, so none can carry a credential: discover then reads no database, and cannot be turned into a password
-// test against the client's SQL servers (plan 090 review).
+// test against the client's SQL servers (plan 090 review). They stay open after the first setup, so the installer can
+// verify it; the relay ends them when the team adopts the box.
 var installerReads = map[string]bool{
 	"version":     true,
 	CommandHashes: true,
@@ -71,6 +72,19 @@ var installerReads = map[string]bool{
 	"verify":      true,
 	"discover":    true,
 }
+
+// installerWrites are the first setup (plan 090 D3, connector part B): apply and its check, only while config.yaml
+// holds no API credential — the first apply that succeeds sets one, and every later write is the team's. Their input
+// is sealed (MustBeSealed), and provision runs them with --installer: a short list of fields, the database sql-setup
+// recorded, no administrator (provision.ApplyAsInstaller), refused again under its run lock on a box that has a
+// credential by then.
+var installerWrites = map[string]bool{
+	"apply-check": true,
+	"apply":       true,
+}
+
+// CodeInstallerConfigured refuses an installer's write on a box that holds an API credential (set up already).
+const CodeInstallerConfigured = "installer_box_configured"
 
 // installerBinding refuses an installer on a box not bound to it; "" when it is. verify calls it right after the
 // signature, before any other refusal, so an installer learns nothing about a box that is not its own (not even that
@@ -99,12 +113,27 @@ func (l *Link) checkInstaller(cert *linkproto.InstallerCert, env linkproto.Envel
 		return linkproto.CodeInstallerRoleUnknown
 	case l.cfg.DomainRole >= 4:
 		return linkproto.CodeInstallerDC
+	case installerWrites[env.Command]:
+		if !env.Sealed { // checkInput refused it already (MustBeSealed); kept so this gate stands on its own
+			return CodeInputNotSealed
+		}
+		if set, err := l.apiCredentialSet(); err != nil || set {
+			return CodeInstallerConfigured
+		}
+		return ""
 	case !installerReads[env.Command]:
 		return linkproto.CodeInstallerNotAllowed
 	case env.Sealed || !emptyInput(stdin):
 		return linkproto.CodeInstallerInput
 	}
 	return ""
+}
+
+func (l *Link) apiCredentialSet() (bool, error) {
+	if l.cfg.APICredentialSet == nil {
+		return true, nil
+	}
+	return l.cfg.APICredentialSet()
 }
 
 // emptyInput: nothing, white space, or an empty JSON object.
