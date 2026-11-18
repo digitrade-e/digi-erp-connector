@@ -213,7 +213,9 @@ func Check(before, after Snapshot) []string {
 			highest = after.HistoryMax
 		}
 		for _, e := range after.Orders {
-			if e.Counter == "" {
+			// A rule naming a counter with no store of its own names the
+			// adopted one: lastOrderNumber.json (plan 087).
+			if _, own := after.Counters[e.Counter]; e.Counter == "" || !own {
 				highest = max(highest, e.Number)
 			}
 		}

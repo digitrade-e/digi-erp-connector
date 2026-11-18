@@ -126,6 +126,9 @@ func LoadManifest(path string) (Manifest, error) {
 		if c.Name == "" || c.Request == "" || c.Legacy == "" {
 			return m, fmt.Errorf("case %d: name, request and legacy are required", i+1)
 		}
+		if c.Name == "." || c.Name == ".." || strings.ContainsAny(c.Name, `/\:`) {
+			return m, fmt.Errorf("case %q: a name is a plain word (it names the kept file)", c.Name)
+		}
 		if seen[c.Name] {
 			return m, fmt.Errorf("case %q twice", c.Name)
 		}

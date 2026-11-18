@@ -112,6 +112,7 @@ func TestRunManifest_BadManifest(t *testing.T) {
 		"no cases":     {"cases": []any{}},
 		"duplicate":    {"cases": []map[string]any{{"name": "a", "request": "x", "legacy": "y"}, {"name": "a", "request": "x", "legacy": "y"}}},
 		"missing path": {"cases": []map[string]any{{"name": "a", "legacy": "y"}}},
+		"path in name": {"cases": []map[string]any{{"name": "../x", "request": "x", "legacy": "y"}}},
 		"bad allow":    {"allow": []int{14}, "cases": []map[string]any{{"name": "a", "request": "x", "legacy": "y"}}},
 	} {
 		t.Run(name, func(t *testing.T) {

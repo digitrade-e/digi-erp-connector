@@ -145,6 +145,9 @@ func TestCheck_NamedCounters(t *testing.T) {
 			b.write(t, filepath.Join(b.data, "orders", "index", "u.json"), `{"key":"u","number":9000002,"state":"written","rule":{"counter":"test"}}`)
 		}, "below order 9000002"},
 		{"default below a rule-less order", func(t *testing.T, b box) { b.order(t, "c", 101, "written") }, "below the highest issued number 101"},
+		{"adopted counter below its ruled order", func(t *testing.T, b box) {
+			b.write(t, filepath.Join(b.data, "orders", "index", "v.json"), `{"key":"v","number":101,"state":"written","rule":{"counter":"b2b"}}`)
+		}, "below the highest issued number 101"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := setup(t)

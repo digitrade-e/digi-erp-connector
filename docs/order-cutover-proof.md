@@ -120,10 +120,12 @@ Exit 0 means every case matches, 1 means something differs, 2 means the manifest
 For files that a running connector wrote, on the local stack (step 1.2.3) or on GROOPY, compare them directly:
 
 ```bash
-go run ./cmd/imovein-compare diff legacy/IMOVEIN_123456.doc pickup/IMOVEIN_<m>.doc -allow 3
+go run ./cmd/imovein-compare diff -allow 3 legacy/IMOVEIN_123456.doc pickup/IMOVEIN_<m>.doc
 ```
 
-Field 3 differs there by design, because the connector numbered the order from its own counter.
+Flags go before the two files. Field 3 differs there by design, because the connector numbered the order from its own
+counter. So does field 8 when the body carries no `asmahta2`: the connector then writes the order number there too.
+In that case use `-allow 3,8`.
 
 ### 1.5 Reading the report
 
@@ -256,6 +258,7 @@ past every number it holds at the next start. The backup copy of the counter is 
      receipt waits for the order (at most 20 s). `503 RECEIPT_WRITER_BUSY` would mean that the order held the lock
      longer than that.
 
-  Steps 3, 4 and 7 of §2 show the receipt store and index unchanged across the upgrade and the downgrade.
+  The checks at steps 3, 6 and 8 of §2 show the receipt store and index unchanged across the upgrades and the
+  downgrade.
 - The receipts on BFL's write node stay dormant (outbound endpoint 14 `alive = false`) until cutover day. The release
   for orders is a release for receipts too.

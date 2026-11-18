@@ -97,10 +97,10 @@ func Render(ctx context.Context, body []byte, number int64, account json.RawMess
 		JobID string `json:"jobId"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &accepted); err != nil {
-		return Rendered{}, fmt.Errorf("202 body: %w", err)
+		return Rendered{Log: log.lines()}, fmt.Errorf("202 body: %w", err)
 	}
 	if accepted.JobID != strconv.FormatInt(number, 10) {
-		return Rendered{}, fmt.Errorf("the order took number %s, not %d", accepted.JobID, number)
+		return Rendered{Log: log.lines()}, fmt.Errorf("the order took number %s, not %d", accepted.JobID, number)
 	}
 
 	deadline := time.Now().Add(renderTimeout)
@@ -117,7 +117,7 @@ func Render(ctx context.Context, body []byte, number int64, account json.RawMess
 		}
 		select {
 		case <-ctx.Done():
-			return Rendered{}, ctx.Err()
+			return Rendered{Log: log.lines()}, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
