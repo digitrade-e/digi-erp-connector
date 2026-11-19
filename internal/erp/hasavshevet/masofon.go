@@ -54,8 +54,19 @@ type MasofonINI struct {
 	// DataPaths is [general] DataPath<import type>, keyed by the import type
 	// ("6", "118", …): the folder of a data or PRM file written without one.
 	DataPaths map[string]string
+	// ImportWithErrors is [general] ImportWithErrors as written: Masofon2's
+	// general checkbox "יבוא (חלקי) על אף שגיאות" (partial import despite
+	// errors), for every profile. "YES" (any case) imports a file's good lines
+	// and drops the refused ones.
+	ImportWithErrors string
 	// StockAvoidDouble is [stock] AvoidDouble, the default of arg 14.
 	StockAvoidDouble string
+}
+
+// PartialImportOn reports whether Masofon imports a file's good lines when
+// others are refused (the scripts upper-case the value and test YES).
+func (ini MasofonINI) PartialImportOn() bool {
+	return strings.EqualFold(strings.TrimSpace(ini.ImportWithErrors), "YES")
 }
 
 // ReadMasofonINI reads and parses dir\masofon.ini (Windows-1255).
@@ -101,6 +112,8 @@ func ParseMasofonINI(raw []byte) (MasofonINI, error) {
 			switch {
 			case strings.EqualFold(key, "ErrDataPath"):
 				ini.ErrDataPath = value
+			case strings.EqualFold(key, "ImportWithErrors"):
+				ini.ImportWithErrors = value
 			case len(key) > len("DataPath") && strings.EqualFold(key[:len("DataPath")], "DataPath"):
 				ini.DataPaths[key[len("DataPath"):]] = value
 			}
@@ -192,6 +205,7 @@ const (
 	MasofonDuplicateOff    = "masofon_duplicate_guard_off"
 	MasofonSharedInput     = "masofon_shared_input"
 	MasofonDashInPath      = "masofon_dash_in_path"
+	MasofonPartialImportOn = "masofon_partial_import_on"
 )
 
 // MasofonFinding is one finding about the connector's Masofon profile.
@@ -217,6 +231,12 @@ func CheckMasofonProfile(ini MasofonINI, bat, dataFile, prmFile string) []Masofo
 			add(MasofonDashInPath, true, "use a folder and file names without '-'",
 				"%s contains '-': has.exe splits the import command on '-', so the path would be cut", p)
 		}
+	}
+	// A general setting, for every profile: whatever the profile, an order
+	// with one refused line would reach the books without it.
+	if ini.PartialImportOn() {
+		add(MasofonPartialImportOn, true, "untick Masofon2's general setting 'יבוא (חלקי) על אף שגיאות' ([general] ImportWithErrors), unless the tenant wants orders imported without their refused lines",
+			"masofon.ini [general] ImportWithErrors is %q: an order with a refused line is imported without that line (the order check reports it partial)", ini.ImportWithErrors)
 	}
 	cmds, ok := ini.Profile(bat)
 	if !ok {

@@ -178,7 +178,9 @@ Driver errors go to the log only. `hasImportTimeoutSeconds` is opt-in (0 = no ca
 the run started that has it (folder: `hasRunLogDir`, else `ErrDataPath`), the unfinished `<bat>.err` of a stopped run,
 and `DataImpExpLogs\WizImportError*.log` lines of the run's window (a double click is refused only there). A refusal
 is almost never in ImportLog. `importOutcome` gives the one verdict (`outcome`: imported / duplicate (`Stock.063`) /
-refused / retry / not_run / unknown); only `refused` is moved aside. A run killed at the timeout leaves
+refused / retry / not_run / unknown, and `partial` when Masofon2's `[general] ImportWithErrors=YES` imported the good
+lines and dropped the refused ones â `ImportLog` logs it `partial`, the log ends "×××§ ×××¨×©××××ª ×× × ×§×× ×××¦×××"); only
+`refused` is moved aside. A run killed at the timeout leaves
 `<bat>.IsWorking` (the next run would be refused): removed only when created since that run started. Never read a `.PRJ` (it holds a DB password). `hasMoveRefusedOrders` and `hasOrderPrecheck`
 are **opt-in** (tenant decisions: whether the ERP may retry a refused order, whether orders are refused up front);
 the pre-check runs only for a new order inside `validateNew`, never for a repeat, and fails open on a DB error.

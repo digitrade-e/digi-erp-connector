@@ -36,8 +36,13 @@ const (
 	// OrderImportLoggedNoDocument: the run ended Success, but no document in its
 	// range carries the order number.
 	OrderImportLoggedNoDocument = "logged_no_document"
+	// OrderImportPartial: the run imported the file partially — Masofon2's
+	// "partial import despite errors" ([general] ImportWithErrors=YES) took the
+	// good lines and dropped the refused ones; the document (stockIds) lacks
+	// them.
+	OrderImportPartial = "partial"
 	// OrderImportFailed: a run for this order's file was logged with another
-	// status (Failed; partial for a run a user started by hand).
+	// status (Failed).
 	OrderImportFailed = "failed"
 	// OrderImportNotLogged: no run for this order's file was logged. A refused
 	// Masofon run is not always logged: its .err log under the profile's
@@ -57,6 +62,10 @@ const (
 	// OrderOutcomeDuplicate: refused as already imported (Stock.063): the
 	// order is in Hashavshevet; do not send it again.
 	OrderOutcomeDuplicate = "duplicate"
+	// OrderOutcomePartial: imported WITHOUT the refused lines (runLog.refusals
+	// name them): Masofon2's "partial import despite errors" is on. The
+	// document exists; never resend the whole order.
+	OrderOutcomePartial = "partial"
 	// OrderOutcomeRefused: refused; runLog.refusals say why.
 	OrderOutcomeRefused = "refused"
 	// OrderOutcomeRetry: refused for a reason that passes (another station
@@ -262,12 +271,24 @@ func checkImport(ctx context.Context, r importLogReader, mark int64, ourFile, ba
 	if b := strings.TrimSpace(bat); b != "" && profile != "" && !strings.EqualFold(profile, filepath.Base(b)) {
 		check.Detail = fmt.Sprintf("run logged under profile %q, not this connector's %q: another integration reads this file", profile, filepath.Base(b))
 	}
-	if !strings.EqualFold(status, "Success") {
+	// "partial": Masofon2's "partial import despite errors" took the good
+	// lines (MLAYIN.HDS logs the run "partial"); the document exists without
+	// the refused lines, so it is looked up like a success.
+	partial := strings.EqualFold(status, "partial")
+	if !strings.EqualFold(status, "Success") && !partial {
 		check.Result = OrderImportFailed
 		return check, nil
 	}
+	found := OrderImportImported
+	if partial {
+		found = OrderImportPartial
+		check.Detail = joinDetail(check.Detail, "imported partially: the refused lines were dropped (Masofon2 'partial import despite errors' is on)")
+	}
 	if !hasRange {
 		check.Result = OrderImportLoggedNoDocument
+		if partial {
+			check.Result = OrderImportPartial
+		}
 		check.Detail = joinDetail(check.Detail, "the run logged no Stock range")
 		return check, nil
 	}
@@ -279,10 +300,13 @@ func checkImport(ctx context.Context, r importLogReader, mark int64, ourFile, ba
 	}
 	if len(hits) == 0 {
 		check.Result = OrderImportLoggedNoDocument
+		if partial {
+			check.Result = OrderImportPartial
+		}
 		check.Detail = joinDetail(check.Detail, fmt.Sprintf("no document in Stock %d-%d carries the order number", first, last))
 		return check, nil
 	}
-	check.Result = OrderImportImported
+	check.Result = found
 	for _, h := range hits {
 		check.StockIDs = append(check.StockIDs, h.ID)
 	}
@@ -345,9 +369,13 @@ func importOutcome(c *ImportCheck) string {
 	switch c.Result {
 	case OrderImportImported, OrderImportLoggedNoDocument:
 		return OrderOutcomeImported
+	case OrderImportPartial:
+		return OrderOutcomePartial
 	}
 	if rl := c.RunLog; rl != nil {
 		switch rl.Section {
+		case RunLogPartial:
+			return OrderOutcomePartial
 		case RunLogImported:
 			if c.Result == OrderImportFailed {
 				return OrderOutcomeRefused // ImportLog logged the file Failed
@@ -365,6 +393,8 @@ func importOutcome(c *ImportCheck) string {
 			switch {
 			case rl.Transient:
 				return OrderOutcomeRetry
+			case strings.Contains(rl.Summary, partialImportLine):
+				return OrderOutcomePartial
 			case rl.NoInput:
 				return OrderOutcomeNotRun
 			case rl.File != "" && !rl.OK && !rl.Live && len(rl.Errors) > 0:

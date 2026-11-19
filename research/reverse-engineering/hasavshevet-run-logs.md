@@ -188,3 +188,15 @@ since the file was written, and for its `ImportLog` row; report through the same
 - Run choice: two logs since start, our file only in the older one; a log from before start.
 - Outcome table: each row of P13, including `ImportLog` Success with an `err` log (→ `imported`).
 - `hasRunLogDir` validation (absolute, exists) and fallback order.
+
+## 5. Follow-up — partial import (P16)
+
+Masofon2's general settings have a checkbox "יבוא (חלקי) על אף שגיאות" (partial import despite errors), stored as
+`masofon.ini` **`[general] ImportWithErrors`** and applying to **every** profile (Masofon2 reads and saves it through
+WizIni's `IIni::get_Value` / `put_Value`; the import scripts upper-case it and test `YES`). Ticked, a file with a
+refused line imports its good lines: `ImportLog` logs the run **`partial`**, the file's section ends
+"חלק מהרשומות לא נקלט בהצלחה", and the order reaches the books **without** the refused lines.
+
+Implemented: `discover` reports the defect `masofon_partial_import_on`; the order check looks the document up like a
+success and answers `result: partial`, `outcome: partial`, with the dropped lines in `runLog.refusals`; such an order
+is never moved aside (its good lines are in the books; a resend of the whole order would duplicate them).
