@@ -36,8 +36,10 @@ import (
 // read says so in its own error and the rest goes on. No secret is in it: config.yaml's are only "set"/"missing" in
 // discover, and here not even that; link.yaml's proxy loses its user and password.
 
-// StateInput is `state --spec -`'s stdin: nothing yet ({}).
-type StateInput struct{}
+// StateInput is `state --spec -`'s stdin: {} or, for one order's import check in full, {"orderNumber": N}.
+type StateInput struct {
+	OrderNumber int64 `json:"orderNumber,omitempty"`
+}
 
 // StateResult is what state answers.
 type StateResult struct {
@@ -46,6 +48,9 @@ type StateResult struct {
 	Daemon   StateDaemon   `json:"daemon"`
 	Config   *StateConfig  `json:"config"`
 	Orders   StateOrders   `json:"orders"`
+	// Imports (v1.0.38) are the orders' import checks: counts by outcome, the newest not imported, and with
+	// orderNumber that order's whole check (state_imports.go). Absent when the box keeps none and none was asked.
+	Imports  *StateImports `json:"imports,omitempty"`
 	Receipts StateReceipts `json:"receipts"`
 	Pickup   *StatePickup  `json:"pickup,omitempty"`
 	// Counters (plan 087) are every counter the daemon would build from
@@ -322,7 +327,10 @@ type StateDisk struct {
 const maxIndexFiles = 200_000
 
 // State answers the state command.
-func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
+func State(ctx context.Context, env Env, in StateInput) (*StateResult, error) {
+	if in.OrderNumber < 0 {
+		return nil, refuse(CodeSpecInvalid, "orderNumber is an order number, 1 or more (or left out)", "orderNumber %d", in.OrderNumber)
+	}
 	sys := env.Sys
 	dir := sys.DataDir()
 	res := &StateResult{Version: buildinfo.Version}
@@ -363,6 +371,9 @@ func State(ctx context.Context, env Env, _ StateInput) (*StateResult, error) {
 
 	res.Daemon = askDaemon(ctx, env, cfg, res.Services.Daemon)
 	res.Orders = orderState(dir, cfg)
+	if imp := stateImports(dir, in.OrderNumber); imp.Stored > 0 || in.OrderNumber > 0 || imp.Error != "" {
+		res.Imports = imp
+	}
 	res.Receipts = receiptState(dir, cfg)
 	if cfg != nil && strings.TrimSpace(cfg.SendOrderPickupDir) != "" {
 		res.Pickup = pickupState(cfg.SendOrderPickupDir)

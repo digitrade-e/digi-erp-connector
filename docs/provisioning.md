@@ -34,8 +34,8 @@ same way in an elevated PowerShell. The code is
 | `folder-acl [--check] --spec -` | `{"version":1,"changeSet","op":"lockdown","folders":["<key>"\|"sendOrderDir"\|"pickup"\|"sendReceiptDir",…]}` or `{…,"op":"restore","folder","preimage":"<sha256>"}` (+ `acceptUnreadable`? — accepted, unused since v1.0.32 —, `assumeIdle`?, `expect`?) | Locks a document folder down — only SYSTEM, Administrators and the trusted writers write — or puts back what a lock-down recorded (plan 087 review R1c, below) | the folder's and its entries' owner and DACL; `DataDir\folder-acl\<sha256>.json` |
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
-| `logs --spec -` | `{"source":"server\|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
-| `state [--spec -]` | `{}` or nothing | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
+| `logs --spec -` | `{"source":"server|link|ui|events-daemon|events-link|masofon|masofon-errors","since"?,"maxLines"?,"grep"?}` | The tail of one log|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
+| `state [--spec -]` | `{}`, nothing, or `{"orderNumber":N}` (v1.0.38) | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
@@ -120,7 +120,7 @@ against what the connector writes (`<sendOrderDir>\IMOVEIN.doc` / `IMOVEIN.prm`)
 | `masofon_import_type` | defect / note | not type 6 (stock documents); type 118 (drafts, not issued) is a note |
 | `masofon_shared_input` | defect | another profile reads the connector's file or folder: the two race, and the importer writes temp files into that folder |
 | `masofon_dash_in_path` | defect | the file or PRM path holds `-`: has.exe splits the command on `-` |
-| `masofon_partial_import_on` | defect | `[general] ImportWithErrors=YES` (Masofon2's general checkbox "×××× (×××§×) ×¢× ××£ ×©×××××ª", for every profile): an order with a refused line is imported without that line â the tenant's choice, reported `partial` by the order check |
+| `masofon_partial_import_on` | defect | `[general] ImportWithErrors=YES` (Masofon2's general checkbox "יבוא (חלקי) על אף שגיאות", for every profile): an order with a refused line is imported without that line — the tenant's choice, reported `partial` by the order check |
 | `masofon_duplicate_guard_off` | note | `DISQUALIFICATIONOFDUPLICATION` is not `YES`: Hashavshevet does not refuse a resend (the tenant's choice) |
 | `masofon_ini_unreadable` | note | `masofon.ini` was not found or not read |
 | `masofon_run_log_dir_unreadable` | note | no run-log folder (no `ErrDataPath`, no `hasRunLogDir`) or the service cannot read it: an order's import check cannot say why it was refused |
@@ -757,8 +757,30 @@ goes whole — sqlcmd's `-P`, a URL's password (up to the last `@`), DPAPI blobs
 shown at all (it would reach the redaction in pieces). Lines are cut at 4 KiB; at most 64 MiB is read backwards per
 answer.
 
+**`logs`' Masofon sources** (v1.0.38; `research/reverse-engineering/hasavshevet-run-logs.md`) read what
+Hashavshevet's importer wrote about the connector's **own** BAT (`hasBatFile`), where `config.yaml` and `masofon.ini`
+say — never a path the caller names; without a Masofon BAT they are `log_unreadable`:
+
+- `masofon` — the BAT's run logs (`<bat>.ok|err.DMY-….LOG`, timed by their names, the newest 200, then a run's
+  unfinished `<bat>.err`) in `hasRunLogDir`, else `masofon.ini`'s `ErrDataPath`. Each line comes as
+  `<file name>| <line>`, timed by its run; another BAT's logs in the same folder are never read.
+- `masofon-errors` — `<has.exe folder>\DataImpExpLogs\WizImportError*.log`, the importer's system errors and the
+  refusals it logs only there (a second run of the BAT, a reduce); a line tagged with another profile (`#<bat>#`) is
+  left out.
+
+The files are the ERP's (Windows-1255), outside the data directory: each is read only when it is a regular file (no
+link is followed), its last 1 MiB; every line is redacted and measured like the connector's own, and `files` lists
+their full paths — where Hashavshevet keeps them. The lines are the ERP's text, shaped by the orders' own values:
+`untrusted`, data to show.
+
+**`state`'s `imports`** (v1.0.38) are the orders' import checks the daemon stored (`DataDir\orders\imports\<n>.json`,
+the same as `GET /api/sendOrder/{jobId}`'s `import`): `stored`, `byOutcome` over the newest 2000, `recent` — the
+newest 20 not imported, with their outcome, result, time and refusal codes — and, with `{"orderNumber":N}`, `order`,
+that order's whole check (its `runLog.refusals` included), or `orderMissing` saying why it has none. `untrusted`: a
+check's run-log lines are the ERP's text.
+
 **`state`'s `link.autoUpgrade`** (v1.0.31, plan 088) is managed auto-update: `link.yaml`'s `autoUpgrade` switch as it
-reads now, and the link's last view from `link\autoupgrade.json` — the policies it holds, what decides (and a target a
+reads now, and the link's last view from `| `{"source":"server|link|ui|events-daemon|events-link|masofon|masofon-errors","since"?,"maxLines"?,"grep"?}` | The tail of one logautoupgrade.json` — the policies it holds, what decides (and a target a
 later hold brakes), the next window and check — with the last automatic upgrade's outcome, health and rollback read
 afresh from its result ([link.md § Managed auto-update](link.md#managed-auto-update-plan-088-v1031)). Downgrading by
 hand: never below `DataDir\format-floor` either — it names the oldest release that reads every file format the builds

@@ -27,7 +27,8 @@ import (
 // LogsInput is `logs --spec -`'s stdin.
 type LogsInput struct {
 	// Source is server (the daemon's server.log), link (link.log), ui (the GUI's ui.log), events-daemon or
-	// events-link (the Application Event Log of either service; Windows only).
+	// events-link (the Application Event Log of either service; Windows only), masofon (the run logs of the
+	// connector's Masofon BAT) or masofon-errors (the importer's WizImportError logs) — logs_masofon.go.
 	Source string `json:"source"`
 	// Since keeps lines at or after this time (RFC 3339). A line without a time of its own (a continuation) has the
 	// time of the line above it.
@@ -48,7 +49,8 @@ type LogsResult struct {
 	Lines     []string `json:"lines"`
 	// Truncated: older lines that would match were left out — by maxLines, the answer's size cap or the scan cap.
 	Truncated bool `json:"truncated"`
-	// Files are the files read, oldest first, relative to the data directory (empty for the Event Log).
+	// Files are the files read, oldest first, relative to the data directory (empty for the Event Log); for the
+	// Masofon sources, their full paths on the box: where Hashavshevet keeps them.
 	Files []string `json:"files,omitempty"`
 
 	secrets []string // the box's own secrets, for the envelope's redaction too
@@ -136,6 +138,13 @@ func Logs(env Env, in LogsInput) (*LogsResult, error) {
 		res.Lines = sel.oldestFirst()
 		return res, nil
 	}
+	if isMasofonSource(in.Source) {
+		if err := masofonLogs(env, in, since, &sel, res); err != nil {
+			return nil, err
+		}
+		res.Lines = sel.oldestFirst()
+		return res, nil
+	}
 	files := logSources[in.Source](dir)
 	var scanned int64
 	capped := false
@@ -164,8 +173,8 @@ func (in LogsInput) validate() *Refusal {
 	_, file := logSources[in.Source]
 	_, event := eventSources[in.Source]
 	switch {
-	case !file && !event:
-		return refuse(CodeSpecInvalid, "source is one of server, link, ui, events-daemon, events-link", "unknown source %q", in.Source)
+	case !file && !event && !isMasofonSource(in.Source):
+		return refuse(CodeSpecInvalid, "source is one of server, link, ui, events-daemon, events-link, masofon, masofon-errors", "unknown source %q", in.Source)
 	case in.MaxLines < 0 || in.MaxLines > MaxLogLines:
 		return refuse(CodeSpecInvalid, fmt.Sprintf("maxLines is 1 to %d (0 or left out: %d)", MaxLogLines, DefaultLogLines),
 			"maxLines %d is out of range", in.MaxLines)
