@@ -38,7 +38,10 @@ func NewSendOrderStatusHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 			resp.Import = &dto.OrderImportCheck{
 				Result: c.Result, Detail: c.Detail, Profile: c.Profile, LogStatus: c.LogStatus,
 				StockIDs: c.StockIDs, DocumentID: c.DocumentID, StockStatus: c.StockStatus,
-				MatchedBy: c.MatchedBy, TimedOut: c.TimedOut, CheckedAt: c.CheckedAt,
+				MatchedBy: c.MatchedBy, TimedOut: c.TimedOut, CheckedAt: c.CheckedAt, MovedTo: c.MovedTo,
+			}
+			if rl := c.RunLog; rl != nil {
+				resp.Import.RunLog = &dto.OrderImportRunLog{File: rl.File, OK: rl.OK, NoInput: rl.NoInput, Summary: rl.Summary, Errors: rl.Errors}
 			}
 		}
 		respond.JSON(w, http.StatusOK, resp)

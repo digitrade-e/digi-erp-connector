@@ -763,6 +763,13 @@ func (q *OrderQueue) validateNew(req OrderRequest) error {
 		}
 		return err
 	}
+	// hasOrderPrecheck (precheck.go): only a new order reaches here; a
+	// repeat of a known historyId was answered from the index.
+	if q.sender != nil && q.sender.cfg.HasOrderPrecheck {
+		if err := q.sender.precheckOrder(req); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

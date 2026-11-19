@@ -331,3 +331,26 @@ func TestOrderQueue_ImportCheckSurvivesARestart(t *testing.T) {
 		t.Fatalf("status after restart = %+v (found %v); want done with the failed import check", got, ok)
 	}
 }
+
+func TestValidateOrders_RefusedAndPrecheckSwitches(t *testing.T) {
+	dir := t.TempDir()
+	ok := []config.Config{
+		{ERP: config.ERPHasavshevet, SendOrderDir: dir, HasBatFile: `C:\Hash7\digi.bat`, HasMoveRefusedOrders: true},
+		{ERP: config.ERPHasavshevet, SendOrderDir: dir, HasOrderPrecheck: true, DB: config.DBConfig{Database: "company_db"}},
+	}
+	for i, c := range ok {
+		if err := c.ValidateOrders(); err != nil {
+			t.Errorf("ok[%d] refused: %v", i, err)
+		}
+	}
+	bad := []config.Config{
+		{ERP: config.ERPHasavshevet, SendOrderDir: dir, HasMoveRefusedOrders: true},                                                                                             // no importer
+		{ERP: config.ERPHasavshevet, SendOrderDir: dir, HasOrderPrecheck: true},                                                                                                 // no database
+		{ERP: config.ERPHasavshevet, SendOrderDir: dir, SendOrderPickupDir: t.TempDir(), SendOrderFormat: "legacy", HasExePath: `C:\Hash7\has.exe`, HasMoveRefusedOrders: true}, // model (a)
+	}
+	for i, c := range bad {
+		if err := c.ValidateOrders(); err == nil {
+			t.Errorf("bad[%d] accepted", i)
+		}
+	}
+}

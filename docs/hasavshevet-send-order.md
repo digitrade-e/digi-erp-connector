@@ -621,6 +621,30 @@ The check is a **report**: it never changes the order's `status`, its index
 entry or a resend's behaviour. Model (a) and typed folders run no importer and
 get no check (yet).
 
+**The run's own log (`runLog`).** Every Masofon run leaves
+`<bat>.ok|err.DMY-dd.mm.yy.HMS-hh.mm.ss.LOG` in `masofon.ini`'s `ErrDataPath`
+(`.ok` only when a command ran and nothing failed). With `hasBatFile`, the newest
+log of the BAT written since the importer started is attached: `ok`, `noInput`
+(the run found no input file — the profile reads another file), `summary` (its
+last line) and up to 20 error lines (`value | message | row`; messages carry
+Hashavshevet's `Stock.NNN` codes). A refused run is not always in `ImportLog`;
+the log then decides: an error log → `failed`, `noInput` → `not_logged` with a
+pointer to `discover`'s `masofon_data_file_mismatch`. Error lines also go to
+`server.log`.
+
+**A refused file stays and is retried.** Hashavshevet renames an imported file
+`….MASOFON2.BAK` and leaves a refused one in place, so every later run of the
+profile tries it again. With `hasMoveRefusedOrders` (opt-in) a `failed` order's
+`IMOVEIN.doc` is moved to `sendOrderDir\refused\IMOVEIN_<n>.doc` (`movedTo`);
+the history copy stays. Off, the file stays until the next order overwrites it.
+
+**Pre-check (`hasOrderPrecheck`, opt-in).** One refused line fails the
+importer's whole file. With the switch on, a NEW order is checked against the
+company database before it gets a number — the document code (translated
+through `DocumentsDefV6`), the account, every item — and what Hashavshevet
+would refuse is a `400 VALIDATION_ERROR` naming the field. Repeats are never
+checked; a database that cannot be read lets the order through.
+
 ---
 
 ## Observability

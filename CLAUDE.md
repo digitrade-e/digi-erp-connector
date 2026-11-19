@@ -171,6 +171,11 @@ the importer's exit code carries nothing (Masofon's BAT ends with a bare `EXIT`)
 `DataDir\orders\imports\<n>.json`, never in the index entry (old builds strict-decode it), never changing `status`.
 Driver errors go to the log only. `hasImportTimeoutSeconds` is opt-in (0 = no cap); a cap kills the **process tree**
 (`treeCancel`, System32 taskkill by full path) — killing cmd.exe alone leaves has.exe reading the shared IMOVEIN.doc.
+`masofon.go`: the BAT's profile is the `[commands]` line named after the BAT (split on `-`), checked by `discover`
+(`masofon_*` codes) and read for `ErrDataPath`, whose `<bat>.ok|err.…LOG` is attached as `runLog` (a refused run is
+not always in ImportLog). Never read a `.PRJ` (it holds a DB password). `hasMoveRefusedOrders` and `hasOrderPrecheck`
+are **opt-in** (tenant decisions: whether the ERP may retry a refused order, whether orders are refused up front);
+the pre-check runs only for a new order inside `validateNew`, never for a repeat, and fails open on a DB error.
 
 **Named counters and typed folders (plan 087, DIG-1563; `docs/hasavshevet-send-order.md` § documentRule, `docs/provisioning.md` § counters / § documents):**
 - A documentRule carries **keys only** (folder, counter) — never a path or a file name (LocalSystem writes; the importer decides the name). The box's `documents` block says what a key means; it is written **only** by the signed provision commands `counters` / `documents` (digi-mcp), never by an API route — the data-path credential is the B2B shop's too. Never add a write route for counters or folders.

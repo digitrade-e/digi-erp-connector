@@ -16,6 +16,7 @@ import (
 
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
 	"github.com/digitrade-e/digi-erp-connector/internal/db"
+	"github.com/digitrade-e/digi-erp-connector/internal/erp/hasavshevet"
 	"github.com/digitrade-e/digi-erp-connector/internal/platform/autostart"
 	"github.com/digitrade-e/digi-erp-connector/internal/queries"
 )
@@ -58,10 +59,13 @@ type Facts struct {
 	// ImporterWriters names, per candidate or configured importer, who
 	// besides the administrators can change it; absent when nobody can.
 	ImporterWriters map[string][]string `json:"importerWriters,omitempty"`
-	Defects         []Finding           `json:"defects"`
-	Notes           []Finding           `json:"notes"`
-	Suggested       Suggestion          `json:"suggested"`
-	Errors          []string            `json:"errors,omitempty"`
+	// Masofon is the connector's Masofon profile as masofon.ini defines it
+	// (model (b) with hasBatFile); absent otherwise.
+	Masofon   *MasofonFacts `json:"masofon,omitempty"`
+	Defects   []Finding     `json:"defects"`
+	Notes     []Finding     `json:"notes"`
+	Suggested Suggestion    `json:"suggested"`
+	Errors    []string      `json:"errors,omitempty"`
 }
 
 // SQLFacts are the SQL Server instances on this machine.
@@ -135,6 +139,41 @@ type NetworkFacts struct {
 	Listening        []Listener       `json:"listening"`
 	FirewallProfiles FirewallProfiles `json:"firewallProfiles"`
 	FirewallRule     *FirewallRule    `json:"firewallRule,omitempty"`
+}
+
+// MasofonFacts is what masofon.ini says about the connector's BAT: its
+// commands (company, import type, data file, PRM, user, duplicate guard) and
+// where every run leaves its log. The .PRJ files beside it hold a database
+// password: discover never reads them.
+type MasofonFacts struct {
+	INI         string                       `json:"ini"`
+	Profile     string                       `json:"profile"`
+	Commands    []hasavshevet.MasofonCommand `json:"commands,omitempty"`
+	ErrDataPath string                       `json:"errDataPath,omitempty"`
+	Error       string                       `json:"error,omitempty"`
+}
+
+// masofonFacts reads masofon.ini beside the BAT (else beside has.exe) and
+// checks the BAT's profile against what the connector writes (model (b):
+// sendOrderDir\IMOVEIN.doc and IMOVEIN.prm).
+func masofonFacts(cfg *config.Config) (*MasofonFacts, []hasavshevet.MasofonFinding) {
+	bat := strings.TrimSpace(cfg.HasBatFile)
+	if bat == "" || cfg.OrdersPickup() || strings.TrimSpace(cfg.SendOrderDir) == "" {
+		return nil, nil
+	}
+	ini, path, err := hasavshevet.ReadMasofonINI(filepath.Dir(bat))
+	if err != nil && strings.TrimSpace(cfg.HasExePath) != "" {
+		ini, path, err = hasavshevet.ReadMasofonINI(filepath.Dir(cfg.HasExePath))
+	}
+	mf := &MasofonFacts{INI: path, Profile: filepath.Base(bat)}
+	if err != nil {
+		mf.Error = err.Error()
+		return mf, nil
+	}
+	mf.Commands, _ = ini.Profile(bat)
+	mf.ErrDataPath = ini.ErrDataPath
+	dir := strings.TrimSpace(cfg.SendOrderDir)
+	return mf, hasavshevet.CheckMasofonProfile(ini, bat, filepath.Join(dir, "IMOVEIN.doc"), filepath.Join(dir, "IMOVEIN.prm"))
 }
 
 // Finding is a defect or a note, with what to do.
@@ -336,6 +375,23 @@ func Discover(ctx context.Context, env Env, in DiscoverInput) (*Facts, error) {
 			strings.TrimSpace(cfg.HasExePath) == "" && strings.TrimSpace(cfg.HasBatFile) == "" {
 			defect(DefectNoImporter, "name has.exe and its parameter file, or the BAT (importerCandidates)",
 				"orders are written to %s but nothing imports them into Hasavshevet", cfg.SendOrderDir)
+		}
+		// The BAT's Masofon profile (research P2): a profile that reads
+		// another file imports nothing of the connector's, without an error.
+		if cfg.ERP == config.ERPHasavshevet {
+			var findings []hasavshevet.MasofonFinding
+			f.Masofon, findings = masofonFacts(cfg)
+			if f.Masofon != nil && f.Masofon.Error != "" {
+				note("masofon_ini_unreadable", "check that masofon.ini is beside the BAT or has.exe",
+					"masofon.ini could not be read (%s): the BAT's import profile is unknown", f.Masofon.Error)
+			}
+			for _, m := range findings {
+				if m.Defect {
+					defect(m.Code, m.Fix, "%s", m.Message)
+				} else {
+					note(m.Code, m.Fix, "%s", m.Message)
+				}
+			}
 		}
 		for _, p := range []string{cfg.HasExePath, cfg.HasBatFile} {
 			if who := f.ImporterWriters[p]; len(who) > 0 {

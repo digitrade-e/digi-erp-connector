@@ -69,6 +69,11 @@ type ImportCheck struct {
 	// MatchedBy is the column the order number was found in: docNumber, or
 	// reference when the document type replaced DocNumber on issue.
 	MatchedBy string `json:"matchedBy,omitempty"`
+	// RunLog is the Masofon run's own log (P3): <bat>.ok|err.…LOG in the
+	// profile's ErrDataPath, with its error lines and summary.
+	RunLog *RunLog `json:"runLog,omitempty"`
+	// MovedTo is where a refused IMOVEIN.doc was moved (hasMoveRefusedOrders).
+	MovedTo string `json:"movedTo,omitempty"`
 	// TimedOut: the importer was stopped at hasImportTimeoutSeconds.
 	TimedOut  bool   `json:"timedOut,omitempty"`
 	CheckedAt string `json:"checkedAt"`
