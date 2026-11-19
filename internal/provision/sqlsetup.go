@@ -375,7 +375,9 @@ func (s Spec) installerRules() *Refusal {
 
 // fillFromSQLSetup completes an installer's spec from the record: the server, the database, the login and its
 // encryption settings. A database or login that differs from the record is refused, not replaced.
-func (s *Spec) fillFromSQLSetup(rec SQLSetupRecord) *Refusal { return s.fillFromRecord(rec, CodeInstallerNotAllowed) }
+func (s *Spec) fillFromSQLSetup(rec SQLSetupRecord) *Refusal {
+	return s.fillFromRecord(rec, CodeInstallerNotAllowed)
+}
 
 // fillFromRecord is fillFromSQLSetup with the refusal's code: an installer's (installer_not_allowed) or the team's
 // apply that names no server (spec_invalid, plan 090 D7). An ERP other than the record's is refused too.
