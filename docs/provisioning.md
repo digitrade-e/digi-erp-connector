@@ -26,7 +26,7 @@ same way in an elevated PowerShell. The code is
 | `service [--check] --spec -` | `{"version":1,"changeSet","dependOn"?:[…],"recovery"?:true}` | The daemon service's SQL Server dependencies and recovery actions only; no restart (below) | the service |
 | `firewall-remove [--check] --spec -` | `{"version":1,"changeSet","names":[…]}` | Removes inbound rules this tool made (the connector's group); allowed behind the link (below) | the firewall |
 | `receipts [--check] --spec -` | `{"version":1,"changeSet","sendReceiptDir"?,"hasReceiptBatFile"?,"hasReceiptParamFile"?,"receiptCardNames"?,"allowWritable"?,"assumeIdle"?,"expect"?}` | The receipt settings only (below) | `config.yaml` |
-| `orders [--check] --spec -` | `{"version":1,"changeSet","sendOrderDir"?,"importer"?,"sendOrderPickupDir"?,"sendOrderFormat"?,"assumeIdle"?,"expect"?}` | The order settings only, model (a) included (below) | `config.yaml`, the order counter |
+| `orders [--check] --spec -` | `{"version":1,"changeSet","sendOrderDir"?,"importer"?,"sendOrderPickupDir"?,"sendOrderFormat"?,"hasImportTimeoutSeconds"?,"hasMoveRefusedOrders"?,"hasOrderPrecheck"?,"hasRunLogDir"?,"assumeIdle"?,"expect"?}` | The order settings only, model (a) included (below) | `config.yaml`, the order counter |
 | `receipt-seed <N>` | none | Creates the receipt number store with N as the next receipt (write-if-absent; below) | `receipts\receiptNumber.json` |
 | `counters [--check] --spec -` | `{"version":1,"changeSet","op":"create\|range\|start-from\|retire","key",…}` | Named counters (plan 087): create one (or adopt today's order counter / receipt store in place), set its range, move it forward, retire it (below) | `config.yaml`; a counter's store (never back) |
 | `documents [--check] --spec -` | `{"version":1,"changeSet","folders"?:{"<key>":{…}\|null},"receipts"?:{"folder"?,"counter"?},"assumeIdle"?,"expect"?}` | Typed folders a documentRule names, and the receipts' folder and counter (plan 087, below) | `config.yaml` |
@@ -356,6 +356,12 @@ restart only on change, the proof with the box's own credential, the rollback). 
   to (`folder_writable`, plan 087 review M1; a top-level `allowWritable` accepts them over WinRM — the importer keeps
   `importer.allowWritable`). Behind the link: `apply`'s importer rules, folders outside the system folders, never
   `allowWritable`.
+  The order importer's run and check, each left out kept: `hasImportTimeoutSeconds` (0 = no cap, or 30–3600),
+  `hasMoveRefusedOrders`, `hasOrderPrecheck` (opt-in switches, tenant decisions) and `hasRunLogDir` (Masofon2's
+  error-log folder, absolute, `""` = `masofon.ini`'s `ErrDataPath`; outside the system folders behind the link) —
+  refused, like the daemon, without an importer, with a pickup folder, or the pre-check without `db.database`
+  (`config_refused`). `--check` names them `orderImport`; `discover` reports their current values under
+  `connector.config`.
 
 **The scope of `folder_writable`** (review R1a): `orders`, `receipts` and `documents` refuse only a folder the
 command *adds, moves* (a new path), or newly makes typed or bound. Every other folder the box writes documents into

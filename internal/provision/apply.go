@@ -889,6 +889,8 @@ func configDiff(cur, tgt config.Config) string {
 	add("sendOrderDir", cur.SendOrderDir != tgt.SendOrderDir)
 	add("importer", cur.HasExePath != tgt.HasExePath || cur.HasParamFile != tgt.HasParamFile || cur.HasBatFile != tgt.HasBatFile)
 	add("orderModel", cur.SendOrderPickupDir != tgt.SendOrderPickupDir || cur.SendOrderFormat != tgt.SendOrderFormat)
+	add("orderImport", cur.HasImportTimeoutSeconds != tgt.HasImportTimeoutSeconds || cur.HasMoveRefusedOrders != tgt.HasMoveRefusedOrders ||
+		cur.HasOrderPrecheck != tgt.HasOrderPrecheck || cur.HasRunLogDir != tgt.HasRunLogDir)
 	add("receipts", cur.SendReceiptDir != tgt.SendReceiptDir || cur.HasReceiptBatFile != tgt.HasReceiptBatFile ||
 		cur.HasReceiptParamFile != tgt.HasReceiptParamFile || !maps.Equal(cur.ReceiptCardNames.Issuer, tgt.ReceiptCardNames.Issuer) ||
 		!maps.Equal(cur.ReceiptCardNames.Brand, tgt.ReceiptCardNames.Brand))

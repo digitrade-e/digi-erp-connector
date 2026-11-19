@@ -102,3 +102,23 @@ func TestDiscover_MasofonRunLogDir(t *testing.T) {
 		t.Errorf("override: notes %v, facts %+v; want %s and runLogDir %s", got, mf, MasofonRunLogDirOverride, logs)
 	}
 }
+
+// discover reads the order importer's settings back (digi-mcp's "was"),
+// with the receipt importer's files.
+func TestDiscover_ReportsOrderImportSettings(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	cfg := handInstallConfig(orders)
+	cfg.HasBatFile = filepath.Join(orders, "digi.bat")
+	cfg.HasImportTimeoutSeconds, cfg.HasMoveRefusedOrders, cfg.HasOrderPrecheck, cfg.HasRunLogDir = 900, true, true, filepath.Join(orders, "logs")
+	cfg.HasReceiptBatFile = filepath.Join(orders, "kupa.bat")
+	writeConfig(t, sys.dir, cfg)
+	f, err := Discover(context.Background(), testEnv(sys, fdb), DiscoverInput{})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	c := f.Connector.Config
+	if c == nil || c.HasImportTimeoutSeconds != 900 || !c.HasMoveRefusedOrders || !c.HasOrderPrecheck || c.HasRunLogDir != cfg.HasRunLogDir ||
+		c.HasReceiptBatFile != cfg.HasReceiptBatFile {
+		t.Fatalf("config facts = %+v", c)
+	}
+}
