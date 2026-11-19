@@ -150,7 +150,10 @@ type MasofonFacts struct {
 	Profile     string                       `json:"profile"`
 	Commands    []hasavshevet.MasofonCommand `json:"commands,omitempty"`
 	ErrDataPath string                       `json:"errDataPath,omitempty"`
-	Error       string                       `json:"error,omitempty"`
+	// RunLogDir is the folder the connector reads run logs from:
+	// hasRunLogDir when set, else ErrDataPath.
+	RunLogDir string `json:"runLogDir,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // masofonFacts reads masofon.ini beside the BAT (else beside has.exe) and
@@ -166,14 +169,48 @@ func masofonFacts(cfg *config.Config) (*MasofonFacts, []hasavshevet.MasofonFindi
 		ini, path, err = hasavshevet.ReadMasofonINI(filepath.Dir(cfg.HasExePath))
 	}
 	mf := &MasofonFacts{INI: path, Profile: filepath.Base(bat)}
+	runLogs := runLogFindings(cfg, mf)
 	if err != nil {
 		mf.Error = err.Error()
-		return mf, nil
+		return mf, runLogs
 	}
 	mf.Commands, _ = ini.Profile(bat)
 	mf.ErrDataPath = ini.ErrDataPath
 	dir := strings.TrimSpace(cfg.SendOrderDir)
-	return mf, hasavshevet.CheckMasofonProfile(ini, bat, filepath.Join(dir, "IMOVEIN.doc"), filepath.Join(dir, "IMOVEIN.prm"))
+	return mf, append(hasavshevet.CheckMasofonProfile(ini, bat, filepath.Join(dir, "IMOVEIN.doc"), filepath.Join(dir, "IMOVEIN.prm")), runLogs...)
+}
+
+// Run-log folder notes (research/reverse-engineering/hasavshevet-run-logs.md P9).
+const (
+	MasofonRunLogDirUnreadable = "masofon_run_log_dir_unreadable"
+	MasofonRunLogDirOverride   = "masofon_run_log_dir_override"
+)
+
+// runLogFindings resolves the folder the order check reads run logs from
+// (hasRunLogDir, else masofon.ini's ErrDataPath) into mf.RunLogDir, and
+// notes when it cannot be read or when the setting overrides the INI.
+// Notes, not defects: orders are imported either way, only their check
+// loses the run's own report.
+func runLogFindings(cfg *config.Config, mf *MasofonFacts) []hasavshevet.MasofonFinding {
+	d := hasavshevet.ResolveRunLogDirs(*cfg)
+	mf.RunLogDir = d.LogDir
+	var out []hasavshevet.MasofonFinding
+	if d.LogDir == "" {
+		return append(out, hasavshevet.MasofonFinding{Code: MasofonRunLogDirUnreadable,
+			Message: "no run-log folder: masofon.ini gives no ErrDataPath (or cannot be read) and hasRunLogDir is not set; an order's check cannot say why it was refused",
+			Fix:     "set hasRunLogDir to Masofon2's error-log folder"})
+	}
+	if _, err := os.ReadDir(d.LogDir); err != nil {
+		out = append(out, hasavshevet.MasofonFinding{Code: MasofonRunLogDirUnreadable,
+			Message: fmt.Sprintf("the run-log folder %s cannot be read (%v): an order's check cannot say why it was refused", d.LogDir, err),
+			Fix:     "give the service account read access to it, or set hasRunLogDir to the folder Masofon2 writes"})
+	}
+	if o := strings.TrimSpace(cfg.HasRunLogDir); o != "" && d.ErrDataPath != "" && !strings.EqualFold(filepath.Clean(o), filepath.Clean(d.ErrDataPath)) {
+		out = append(out, hasavshevet.MasofonFinding{Code: MasofonRunLogDirOverride,
+			Message: fmt.Sprintf("hasRunLogDir %s is used, not masofon.ini's ErrDataPath %s", o, d.ErrDataPath),
+			Fix:     "clear hasRunLogDir if Masofon2's error-log folder is the right one"})
+	}
+	return out
 }
 
 // Finding is a defect or a note, with what to do.

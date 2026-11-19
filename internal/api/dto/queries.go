@@ -68,6 +68,11 @@ type SendOrderStatusResponse struct {
 // OrderImportCheck is the import confirmation of one order. result is one of
 // imported, logged_no_document, failed, not_logged, unchecked.
 type OrderImportCheck struct {
+	// Outcome is the one verdict to act on: imported | duplicate (already in
+	// Hashavshevet, do not resend) | refused (runLog.refusals) | retry (refused
+	// for a passing reason, not imported) | not_run (the profile reads another
+	// file) | unknown. Absent on checks stored by an older connector.
+	Outcome     string  `json:"outcome,omitempty"`
 	Result      string  `json:"result"`
 	Detail      string  `json:"detail,omitempty"`
 	Profile     string  `json:"profile,omitempty"`
@@ -87,14 +92,38 @@ type OrderImportCheck struct {
 // OrderImportRunLog is a Masofon run log: ok or error, no input file, the
 // run's last line, and up to 20 error lines (value | message | row).
 type OrderImportRunLog struct {
-	File    string   `json:"file"`
-	OK      bool     `json:"ok"`
-	NoInput bool     `json:"noInput,omitempty"`
-	Summary string   `json:"summary,omitempty"`
-	Errors  []string `json:"errors,omitempty"`
+	File string `json:"file"`
+	// OK is the log's name (.ok / .err): the whole run's, not this order's.
+	OK bool `json:"ok"`
+	// Live: the run was stopped before it finished its log; this is the
+	// unfinished <bat>.err.
+	Live bool `json:"live,omitempty"`
+	// Section is what the log says about this order's own file: imported |
+	// refused | duplicate | retry | no_input; absent when the log has no
+	// file sections and was read whole.
+	Section  string                  `json:"section,omitempty"`
+	NoInput  bool                    `json:"noInput,omitempty"`
+	Summary  string                  `json:"summary,omitempty"`
+	Errors   []string                `json:"errors,omitempty"`
+	Refusals []OrderImportRunRefusal `json:"refusals,omitempty"`
 	// Transient: refused for a passing reason (another station issuing, a
-	// second run, a deadlock); the profile's next run imports the file again.
+	// second run, a deadlock): this run did not import the file.
 	Transient bool `json:"transient,omitempty"`
+	// SystemError: the run reported a system error; SystemErrors are the
+	// importer error log's lines written during the run (up to 20).
+	SystemError  bool     `json:"systemError,omitempty"`
+	SystemErrors []string `json:"systemErrors,omitempty"`
+	// OtherFiles counts other files' sections in the same log (not shown).
+	OtherFiles int `json:"otherFiles,omitempty"`
+}
+
+// OrderImportRunRefusal is one refusal of the order's file: the value
+// refused, Hashavshevet's code (Stock.NNN) and message, and the file's row.
+type OrderImportRunRefusal struct {
+	Value   string `json:"value,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message"`
+	Row     int    `json:"row,omitempty"`
 }
 
 // SendOrderQueueResponse counts the orders accepted and not yet written

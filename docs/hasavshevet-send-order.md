@@ -612,7 +612,7 @@ answered as `import` by `GET /api/sendOrder/{jobId}`, also after a restart:
 | `imported` | A run for this file ended Success and created the document: `stockIds`, `documentId` (the company's own type — the code sent in line 4 is translated per company), `stockStatus` (1 issued, 0 not issued), `matchedBy` (`docNumber` / `reference`) |
 | `logged_no_document` | Success, but no document in the run's range carries the number |
 | `failed` | A run for this file was logged with another status (`logStatus`) |
-| `not_logged` | No run for this file was logged after the mark. A refused Masofon run is not always logged — its `<bat>.err.….LOG` in the profile's `ErrDataPath` says why; also the sign of a Masofon profile whose data file is not the connector's |
+| `not_logged` | No run for this file was logged after the mark. A refused Masofon run is almost never logged — the run's own log says why (`runLog`, below); also the sign of a Masofon profile whose data file is not the connector's |
 | `unchecked` | No database, no `ImportLog`, or a read failed (`detail`; the driver's text goes to `server.log` only) |
 
 `profile` names the BAT that logged the run; a `detail` warns when it is not
@@ -621,22 +621,70 @@ The check is a **report**: it never changes the order's `status`, its index
 entry or a resend's behaviour. Model (a) and typed folders run no importer and
 get no check (yet).
 
-**The run's own log (`runLog`).** Every Masofon run leaves
-`<bat>.ok|err.DMY-dd.mm.yy.HMS-hh.mm.ss.LOG` in `masofon.ini`'s `ErrDataPath`
-(`.ok` only when a command ran and nothing failed). With `hasBatFile`, the newest
-log of the BAT written since the importer started is attached: `ok`, `noInput`
-(the run found no input file — the profile reads another file), `summary` (its
-last line) and up to 20 error lines (`value | message | row`; messages carry
-Hashavshevet's `Stock.NNN` codes). A refused run is not always in `ImportLog`;
-the log then decides: an error log → `failed`, `noInput` → `not_logged` with a
-pointer to `discover`'s `masofon_data_file_mismatch`. Error lines also go to
-`server.log`.
+**`outcome`: the one verdict to act on.** Decided from `ImportLog` and the
+order's own section of the run's log (below), in this order:
+
+| `outcome` | When | What to do |
+|---|---|---|
+| `imported` | `ImportLog` Success (with or without the document found), or the order's section says imported | done |
+| `duplicate` | the section's only refusals are `Stock.063` "this document number was already imported" | already in Hashavshevet: do not send again |
+| `refused` | the section has refusal lines, or `ImportLog` logged the file Failed | show `runLog.refusals` (`code`, `message`, `row`, `value`); fix and send again |
+| `retry` | refused for a reason that passes: another station issuing (`Inv` semaphore), a second run of the BAT ("double click"), a reduce, a deadlock | not imported by this run; the file stays (never moved) |
+| `not_run` | the command that reads the order's file found no file | setup: the profile reads another file (`discover`: `masofon_data_file_mismatch`) |
+| `unknown` | nothing says: no database and no log, a run stopped at the timeout, a log folder that cannot be read | check the order in Hashavshevet |
+
+A check stored by an older connector gets its `outcome` when it is read back.
+
+**The run's own log (`runLog`).** While a Masofon run works it writes
+`<ErrDataPath>\<bat>.err`; when it ends it stamps it
+`<bat>.ok|err.DMY-dd.mm.yy.HMS-hh.mm.ss.LOG` (`.ok` only when a command ran
+and **nothing in the whole run** failed). Inside, each command of the profile
+has a block and each file it read a **section**: the file's path, then
+"…הסתיימה בהצלחה" or one line per refusal (`value <TAB> Stock.NNN message <TAB>
+row`); `<pattern> : File Not Found(SetDsn)` when the command found nothing. A
+wildcard profile reads many files in one run, so one log holds several
+orders' results, and `.ok` / `.err` is the run's, not the order's — most
+`.err` logs only say "no input file", and an `.err` can follow an order that
+imported. So the connector:
+
+1. reads the log folder from `hasRunLogDir` when set, else `masofon.ini`'s
+   `[general] ErrDataPath` (beside the BAT, else beside `has.exe`), on every
+   order;
+2. takes, of the BAT's logs written since the importer started, the **earliest
+   with a section for `<sendOrderDir>\IMOVEIN.doc`** — the run that read it; a
+   later run of the same BAT (a scheduler) is not mistaken for it. A log with no
+   section at all (an older layout) is read whole, as before;
+3. reports only that section: `section` (`imported` / `refused` / `duplicate`
+   / `retry` / `no_input`), `refusals`, `errors` (`value | message | row`),
+   `summary`; `otherFiles` counts the other files' sections, whose contents are
+   never returned; `ok` is the log's name;
+4. when no finished log has the order's file, reads the unfinished
+   `<bat>.err` of a stopped run (`live`);
+5. unless the order imported, adds up to 20 lines of
+   `<has.exe folder>\DataImpExpLogs\WizImportError*.log` time-stamped during
+   the run and tagged with this BAT (or untagged) as `systemErrors`
+   (`systemError` when the log points there). A second run of the BAT is
+   refused there, before any run log is opened: such a line makes the outcome
+   `retry`.
+
+`ImportLog` decides `result` when it has the file; otherwise the section does:
+refused / duplicate / retry → `failed`, no input → `not_logged` with a pointer
+to `masofon_data_file_mismatch`. Error lines also go to `server.log`.
 
 **A refused file stays and is retried.** Hashavshevet renames an imported file
 `….MASOFON2.BAK` and leaves a refused one in place, so every later run of the
-profile tries it again. With `hasMoveRefusedOrders` (opt-in) a `failed` order's
-`IMOVEIN.doc` is moved to `sendOrderDir\refused\IMOVEIN_<n>.doc` (`movedTo`);
-the history copy stays. Off, the file stays until the next order overwrites it.
+profile tries it again. With `hasMoveRefusedOrders` (opt-in) an order whose
+`outcome` is `refused` has its `IMOVEIN.doc` moved to
+`sendOrderDir\refused\IMOVEIN_<n>.doc` (`movedTo`); never `retry`, `duplicate`
+or `unknown`, and never because of another file's section. The history copy
+stays. Off, the file stays until the next order overwrites it.
+
+**A run stopped at the timeout.** `has.exe` copies the BAT to
+`<bat>.IsWorking` in the BAT's folder when a run starts and deletes it when
+the run ends; a second run that finds it is refused as a "double click". A run
+killed at `hasImportTimeoutSeconds` cannot delete it, so the connector removes
+it — only when it was created since that run started — and says so in
+`detail`.
 
 **Pre-check (`hasOrderPrecheck`, opt-in).** One refused line fails the
 importer's whole file. With the switch on, a NEW order is checked against the
