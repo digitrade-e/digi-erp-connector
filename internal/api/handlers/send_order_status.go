@@ -34,6 +34,13 @@ func NewSendOrderStatusHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 			// Generic message only — raw processing errors may embed SQL or paths.
 			resp.Error = "order processing failed"
 		}
+		if c := result.Import; c != nil {
+			resp.Import = &dto.OrderImportCheck{
+				Result: c.Result, Detail: c.Detail, Profile: c.Profile, LogStatus: c.LogStatus,
+				StockIDs: c.StockIDs, DocumentID: c.DocumentID, StockStatus: c.StockStatus,
+				MatchedBy: c.MatchedBy, TimedOut: c.TimedOut, CheckedAt: c.CheckedAt,
+			}
+		}
 		respond.JSON(w, http.StatusOK, resp)
 	}
 }

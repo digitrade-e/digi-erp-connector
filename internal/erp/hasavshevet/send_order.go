@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,6 +101,10 @@ type OrderResult struct {
 	OrderNumber  int64
 	WrittenFiles []string
 	Account      AccountInfo
+	// Import is what Hashavshevet's import log says about this order's run
+	// (import_check.go); nil when no importer ran (model (a), typed folders,
+	// no importer configured).
+	Import *ImportCheck
 }
 
 // AccountInfo holds customer data needed for PDF generation.
@@ -142,7 +147,28 @@ type Sender struct {
 	// written: the importer must not be one others can change (plan 087
 	// review T1; the daemon's guard). A refusal leaves the order retryable.
 	importerCheck func() error
+	// importLog is a test seam for Hashavshevet's import log; nil = read the
+	// configured database (importLogReader()).
+	importLog importLogReader
 }
+
+// importLogReader is the import log the confirmation reads: the test seam,
+// else the configured database; nil when there is none (no connection, no
+// or an unsafe database name).
+func (s *Sender) importLogReader() importLogReader {
+	if s.importLog != nil {
+		return s.importLog
+	}
+	dbName := strings.TrimSpace(s.cfg.DB.Database)
+	if s.db == nil || dbName == "" || !IsSafeDBName(dbName) {
+		return nil
+	}
+	return sqlImportLog{db: s.db, dbName: dbName}
+}
+
+// importLogTimeout bounds each read of the import log: the confirmation must
+// never hold the worker (and the import lock) for long.
+const importLogTimeout = 15 * time.Second
 
 // NewSender creates a Sender. db and numberStore must be non-nil.
 func NewSender(db *sql.DB, cfg config.Config, numberStore *OrderNumberStore, log logger.LoggerService) *Sender {
@@ -317,28 +343,91 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 	// HasBatFile (Masofon-generated BAT launcher) takes precedence over HasExePath.
 	// The single-worker queue guarantees the previous import is finished before
 	// the next order's files are written and the importer is invoked again.
-	switch {
-	case strings.TrimSpace(s.cfg.HasBatFile) != "":
-		start := time.Now()
-		exitCode, output, execErr := s.batRunner()(ctx, s.cfg.HasBatFile)
-		s.log.Info(fmt.Sprintf("digi.bat exit=%d durationMs=%d output=%q orderNumber=%d",
-			exitCode, time.Since(start).Milliseconds(), output, orderNum))
-		if execErr != nil || exitCode != 0 {
-			s.log.Error(fmt.Sprintf("digi.bat failed orderNumber=%d exit=%d", orderNum, exitCode), execErr)
+	//
+	// The exit code carries nothing (Masofon's BAT ends with a bare EXIT): the
+	// run is confirmed from Hashavshevet's import log instead (import_check.go),
+	// reported on the result and never changing the order's outcome.
+	// hasImportTimeoutSeconds, when set, caps the run and kills its process
+	// tree when it passes.
+	bat, hasExe := strings.TrimSpace(s.cfg.HasBatFile), strings.TrimSpace(s.cfg.HasExePath)
+	var check *ImportCheck
+	if bat != "" || hasExe != "" {
+		logReader := s.importLogReader()
+		var mark int64
+		markErr := errors.New("no database to read the import log from")
+		if logReader != nil {
+			mctx, cancel := context.WithTimeout(ctx, importLogTimeout)
+			mark, markErr = logReader.mark(mctx)
+			cancel()
+			if markErr != nil {
+				s.log.Warn(fmt.Sprintf("import log not readable before the import orderNumber=%d: %v; the import will not be confirmed", orderNum, markErr))
+			}
 		}
-	case strings.TrimSpace(s.cfg.HasExePath) != "":
-		start := time.Now()
-		exitCode, output, execErr := s.hasExeRunner()(ctx, s.cfg.HasExePath, s.cfg.HasParamFile, dir)
-		s.log.Info(fmt.Sprintf("has.exe exit=%d durationMs=%d output=%q orderNumber=%d",
-			exitCode, time.Since(start).Milliseconds(), output, orderNum))
-		if execErr != nil {
-			// Log but do not fail: files are written; import can be retried.
-			s.log.Error(fmt.Sprintf("has.exe failed orderNumber=%d", orderNum), execErr)
+
+		runCtx, cancelRun := ctx, context.CancelFunc(func() {})
+		if t := s.cfg.OrderImportTimeout(); t > 0 {
+			runCtx, cancelRun = context.WithTimeout(ctx, t)
 		}
+		start := time.Now()
+		if bat != "" {
+			exitCode, output, execErr := s.batRunner()(runCtx, bat)
+			s.log.Info(fmt.Sprintf("digi.bat exit=%d durationMs=%d output=%q orderNumber=%d",
+				exitCode, time.Since(start).Milliseconds(), output, orderNum))
+			if execErr != nil || exitCode != 0 {
+				s.log.Error(fmt.Sprintf("digi.bat failed orderNumber=%d exit=%d", orderNum, exitCode), execErr)
+			}
+		} else {
+			exitCode, output, execErr := s.hasExeRunner()(runCtx, hasExe, s.cfg.HasParamFile, dir)
+			s.log.Info(fmt.Sprintf("has.exe exit=%d durationMs=%d output=%q orderNumber=%d",
+				exitCode, time.Since(start).Milliseconds(), output, orderNum))
+			if execErr != nil {
+				// Log but do not fail: files are written; import can be retried.
+				s.log.Error(fmt.Sprintf("has.exe failed orderNumber=%d", orderNum), execErr)
+			}
+		}
+		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
+		cancelRun()
+		if timedOut {
+			s.log.Error(fmt.Sprintf("order importer stopped at hasImportTimeoutSeconds=%d orderNumber=%d: its process tree was killed; confirm the order in Hashavshevet before resending it",
+				s.cfg.HasImportTimeoutSeconds, orderNum), nil)
+		}
+
+		check = s.confirmImport(ctx, logReader, mark, markErr, filepath.Join(dir, "IMOVEIN.doc"), bat, orderNum, req.Asmahta2)
+		check.TimedOut = timedOut
+		s.log.Info(fmt.Sprintf("import check orderNumber=%d result=%s logStatus=%q profile=%q stockIds=%v matchedBy=%q detail=%q",
+			orderNum, check.Result, check.LogStatus, check.Profile, check.StockIDs, check.MatchedBy, check.Detail))
 	}
 
 	s.log.Success(fmt.Sprintf("order complete orderNumber=%d files=%v", orderNum, writtenFiles))
-	return orderResult(orderNum, writtenFiles, account), nil
+	res := orderResult(orderNum, writtenFiles, account)
+	res.Import = check
+	return res, nil
+}
+
+// confirmImport reads the import log rows written since mark (taken before the
+// importer started) and looks for the order's document. markErr != nil means
+// the log could not be read before the run: the check is unchecked.
+func (s *Sender) confirmImport(ctx context.Context, r importLogReader, mark int64, markErr error, ourFile, bat string, orderNum int64, asmahta2 string) *ImportCheck {
+	if r == nil || markErr != nil {
+		detail := "no database to read the import log from"
+		if r != nil {
+			detail = "import log not readable before the import: " + sqlErrorClass(markErr)
+		}
+		return &ImportCheck{Result: OrderImportUnchecked, Detail: detail, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
+	}
+	reference := orderNum // line 8 is the order number unless asmahta2 is sent
+	if a := strings.TrimSpace(asmahta2); a != "" {
+		if n, err := strconv.ParseInt(a, 10, 64); err == nil {
+			reference = n
+		}
+	}
+	cctx, cancel := context.WithTimeout(ctx, importLogTimeout)
+	defer cancel()
+	check, err := checkImport(cctx, r, mark, ourFile, bat, orderNum, reference)
+	if err != nil {
+		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: %v", orderNum, err))
+	}
+	return &check
 }
 
 func orderResult(orderNum int64, writtenFiles []string, account accountInfo) *OrderResult {
@@ -359,12 +448,18 @@ func (s *Sender) batRunner() func(context.Context, string) (int, string, error) 
 	if s.runBat != nil {
 		return s.runBat
 	}
+	if s.cfg.OrderImportTimeout() > 0 {
+		return runBatFileTree // a timeout must kill has.exe too
+	}
 	return runBatFile
 }
 
 func (s *Sender) hasExeRunner() func(context.Context, string, string, string) (int, string, error) {
 	if s.runHasExe != nil {
 		return s.runHasExe
+	}
+	if s.cfg.OrderImportTimeout() > 0 {
+		return runImporterTree
 	}
 	return runImporter
 }

@@ -163,6 +163,16 @@ type Config struct {
 	// The BAT is executed from its own directory so relative paths inside it
 	// (e.g. -p"digi.bat") resolve correctly.
 	HasBatFile string `yaml:"hasBatFile"`
+	// HasImportTimeoutSeconds caps one run of the order importer (hasBatFile
+	// or hasExePath): when it passes, the importer's whole process tree is
+	// killed (cmd.exe and has.exe) and the next order can go. 0 (the default)
+	// = no cap, today's behaviour: a run that never ends — a message box under
+	// the service account — then blocks every later order and receipt. When
+	// set, 30–3600. Killing has.exe can interrupt an import mid-way: pick a
+	// value well above the box's slowest run and confirm the order in
+	// Hashavshevet (the order status's import check) before resending it.
+	// research/reverse-engineering/hasavshevet-importer.md P5.
+	HasImportTimeoutSeconds int `yaml:"hasImportTimeoutSeconds,omitempty"`
 	// SendOrderPickupDir switches orders to model (a) (DIG-1297): each order is
 	// published as ONE file, IMOVEIN_<n>.doc (TMP_IMOVEIN_<n>.doc for a
 	// return), into this folder, where the ERP's own scheduler imports it — on
@@ -246,6 +256,20 @@ func (c Config) OrderFormat() string {
 	return OrderFormatOfficial
 }
 
+// Bounds of hasImportTimeoutSeconds when it is set (0 = no cap).
+const (
+	MinImportTimeoutSeconds = 30
+	MaxImportTimeoutSeconds = 3600
+)
+
+// OrderImportTimeout is the cap on one run of the order importer; 0 = none.
+func (c Config) OrderImportTimeout() time.Duration {
+	if c.HasImportTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.HasImportTimeoutSeconds) * time.Second
+}
+
 // OrdersPickup reports whether orders are written for a scheduler to pick up
 // (model (a)): orders configured and a sendOrderPickupDir.
 func (c Config) OrdersPickup() bool {
@@ -282,6 +306,10 @@ func (c Config) validateOrderKeys() error {
 	default:
 		return fmt.Errorf("sendOrderFormat %q is not a layout this connector writes: use %q or %q",
 			strings.TrimSpace(c.SendOrderFormat), OrderFormatOfficial, OrderFormatLegacy)
+	}
+	if t := c.HasImportTimeoutSeconds; t != 0 && (t < MinImportTimeoutSeconds || t > MaxImportTimeoutSeconds) {
+		return fmt.Errorf("hasImportTimeoutSeconds %d is out of range: 0 (no cap) or %d-%d",
+			t, MinImportTimeoutSeconds, MaxImportTimeoutSeconds)
 	}
 	pickup := strings.TrimSpace(c.SendOrderPickupDir)
 	if pickup == "" {

@@ -58,6 +58,26 @@ type SendOrderStatusResponse struct {
 	OrderNumber  int64    `json:"orderNumber"`
 	WrittenFiles []string `json:"writtenFiles,omitempty"`
 	Error        string   `json:"error,omitempty"`
+	// Import is what Hashavshevet's own import log says about the order's
+	// importer run (research/reverse-engineering/hasavshevet-importer.md P1).
+	// Absent when no importer ran, or on a connector older than this field.
+	// A report: it never changes status.
+	Import *OrderImportCheck `json:"import,omitempty"`
+}
+
+// OrderImportCheck is the import confirmation of one order. result is one of
+// imported, logged_no_document, failed, not_logged, unchecked.
+type OrderImportCheck struct {
+	Result      string  `json:"result"`
+	Detail      string  `json:"detail,omitempty"`
+	Profile     string  `json:"profile,omitempty"`
+	LogStatus   string  `json:"logStatus,omitempty"`
+	StockIDs    []int64 `json:"stockIds,omitempty"`
+	DocumentID  int64   `json:"documentId,omitempty"`
+	StockStatus *int64  `json:"stockStatus,omitempty"`
+	MatchedBy   string  `json:"matchedBy,omitempty"`
+	TimedOut    bool    `json:"timedOut,omitempty"`
+	CheckedAt   string  `json:"checkedAt"`
 }
 
 // SendOrderQueueResponse counts the orders accepted and not yet written

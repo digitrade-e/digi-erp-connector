@@ -164,6 +164,14 @@ Full details: `docs/authentication.md`. The contract is pinned by `internal/api/
 
 **Single-worker constraint:** never make the order queue concurrent — IMOVEIN files are shared.
 
+**Import confirmation and importer timeout** (`import_check.go`; `docs/hasavshevet-send-order.md` § Import confirmation):
+the importer's exit code carries nothing (Masofon's BAT ends with a bare `EXIT`); a model (b) run is confirmed from
+`dbo.ImportLog` (mark before, rows after, our `IMOVEIN.doc`, then `Stock` in the logged range by `DocNumber` or
+`Reference`), read-only, parameterised, ≤ 15 s per read. The check is a **report**: kept in
+`DataDir\orders\imports\<n>.json`, never in the index entry (old builds strict-decode it), never changing `status`.
+Driver errors go to the log only. `hasImportTimeoutSeconds` is opt-in (0 = no cap); a cap kills the **process tree**
+(`treeCancel`, System32 taskkill by full path) — killing cmd.exe alone leaves has.exe reading the shared IMOVEIN.doc.
+
 **Named counters and typed folders (plan 087, DIG-1563; `docs/hasavshevet-send-order.md` § documentRule, `docs/provisioning.md` § counters / § documents):**
 - A documentRule carries **keys only** (folder, counter) — never a path or a file name (LocalSystem writes; the importer decides the name). The box's `documents` block says what a key means; it is written **only** by the signed provision commands `counters` / `documents` (digi-mcp), never by an API route — the data-path credential is the B2B shop's too. Never add a write route for counters or folders.
 - Today's `lastOrderNumber.json` and `receiptNumber.json` are adopted **in place** (`store:`), one kind at a time (a kind with no configured counter keeps today's store under its implicit key `orders`/`receipts`); others live in `DataDir\counters\<key>.json` `{"last":N}` and fail closed. With counters configured a missing `lastOrderNumber.json` is `ErrCounterMissing`, never 1. One meaning everywhere: **last issued**.

@@ -19,6 +19,16 @@ func runBatFile(_ context.Context, _ string) (int, string, error) {
 	return 0, "BAT execution skipped (non-Windows build)", nil
 }
 
+// runBatFileTree and runImporterTree (the timed order runners) are no-ops
+// off Windows, like runBatFile and runImporter.
+func runBatFileTree(ctx context.Context, batPath string) (int, string, error) {
+	return runBatFile(ctx, batPath)
+}
+
+func runImporterTree(ctx context.Context, hasExePath, paramFile, workDir string) (int, string, error) {
+	return runImporter(ctx, hasExePath, paramFile, workDir)
+}
+
 // errReceiptImportNotOnWindows is what the receipt runners answer off
 // Windows. It is an error, not a quiet exit 0: the writer records the import
 // as failed with this reason, never as "ok" for a receipt nobody imported.
