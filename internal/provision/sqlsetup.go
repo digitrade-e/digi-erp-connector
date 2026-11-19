@@ -375,14 +375,21 @@ func (s Spec) installerRules() *Refusal {
 
 // fillFromSQLSetup completes an installer's spec from the record: the server, the database, the login and its
 // encryption settings. A database or login that differs from the record is refused, not replaced.
-func (s *Spec) fillFromSQLSetup(rec SQLSetupRecord) *Refusal {
+func (s *Spec) fillFromSQLSetup(rec SQLSetupRecord) *Refusal { return s.fillFromRecord(rec, CodeInstallerNotAllowed) }
+
+// fillFromRecord is fillFromSQLSetup with the refusal's code: an installer's (installer_not_allowed) or the team's
+// apply that names no server (spec_invalid, plan 090 D7). An ERP other than the record's is refused too.
+func (s *Spec) fillFromRecord(rec SQLSetupRecord, code string) *Refusal {
 	if s.DB.Database != "" && s.DB.Database != rec.Database {
-		return refuse(CodeInstallerNotAllowed, "send the database sql-setup recorded ("+rec.Database+"), or leave it out",
+		return refuse(code, "send the database sql-setup recorded ("+rec.Database+"), or leave it out",
 			"db.database %q is not the one sql-setup set up", s.DB.Database)
 	}
 	if s.DB.Login != "" && s.DB.Login != rec.Login {
-		return refuse(CodeInstallerNotAllowed, "send the login sql-setup made ("+rec.Login+"), or leave it out",
+		return refuse(code, "send the login sql-setup made ("+rec.Login+"), or leave it out",
 			"db.login %q is not the one sql-setup made", s.DB.Login)
+	}
+	if s.ERP != "" && !strings.EqualFold(s.ERP, string(rec.ERP)) {
+		return refuse(code, "send the ERP sql-setup set up ("+string(rec.ERP)+"), or leave it out", "erp %q is not the one sql-setup set up", s.ERP)
 	}
 	s.ERP = rec.ERP
 	enc, trust := rec.Encrypt, rec.TrustServerCertificate

@@ -323,6 +323,12 @@ nothing as an administrator: the procedures are not checked (the
 step says sql-setup set them up), `rotateLogin` is refused (a new password needs an administrator). A box that knows
 no password that logs in as that login is `db_admin_required`, with nothing written.
 
+`"db": {"leastPrivilege": true}` with **no `host` either** (plan 090 D7) takes everything from the record: the
+server, its port, the database, the login and its encryption settings, which `state` does not show, so the team could
+not name them right. A `database`, `login` or `erp` that differs from the record is `spec_invalid`, never replaced.
+With no record it is `db_admin_required`. That is how the team sets up a box the client's IT prepared with `sql-setup`
+(a domain controller an installer handed over, or a box the team paired) with no administrator and no `secrets push`.
+
 ### An installer's first setup (`apply --installer`)
 
 A command signed by an installer's key (plan 090; [link.md § Installers](link.md#installers-digitrade-plan-090))

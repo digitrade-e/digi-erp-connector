@@ -137,6 +137,22 @@ func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, erro
 
 func applyAs(ctx context.Context, env Env, s Spec, check, installer bool) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
+	if !installer && s.DB.Mode == "" && s.DB.adminless() && strings.TrimSpace(s.DB.Host) == "" {
+		// plan 090 D5/D7: the team's apply on a box sql-setup prepared may name no server at all — the record's server,
+		// port, database, login and encryption, as an installer's first setup takes them (state shows no port and no
+		// encryption, so the team could not name them right). No record: an administrator is needed.
+		rec, ok, err := ReadSQLSetup(env.Sys.DataDir())
+		switch {
+		case err != nil:
+			return res, refuse(CodeDBAdminRequired, "have the client's IT run sql-setup on this server again", "%v", err)
+		case !ok:
+			return res, refuse(CodeDBAdminRequired, "have the client's IT run sql-setup on this server first, or name the server with an administrator",
+				"the spec names no server and sql-setup has not been run on this server")
+		}
+		if r := s.fillFromRecord(rec, CodeSpecInvalid); r != nil {
+			return res, r
+		}
+	}
 	if s.DB.Mode == "" && s.DB.adminless() && s.DB.Login == "" {
 		// No administrator and no login named: the login sql-setup made, not DefaultLogin (plan 090 review).
 		if rec, ok, _ := ReadSQLSetup(env.Sys.DataDir()); ok && strings.EqualFold(rec.Host, strings.TrimSpace(s.DB.Host)) &&

@@ -600,3 +600,45 @@ func TestSQLSetupAtTheConsoleOfABoxInService(t *testing.T) {
 		t.Errorf("serverAddress: %q", got)
 	}
 }
+
+// plan 090 D7: the team's apply on a box sql-setup prepared names no server at all — the record's, with its port and
+// encryption (which state does not show) — so a domain controller, or a box the team paired, needs no secrets push.
+func TestATeamApplyThatNamesNoServerTakesTheRecord(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	env := testEnv(sys, fdb)
+	s := installerSpec()
+	s.ERP = "hasavshevet"
+	s.DB = DBSpec{LeastPrivilege: true} // no server, no database, no login, no administrator
+	if _, err := Apply(context.Background(), env, s); refusalCode(err) != CodeDBAdminRequired {
+		t.Fatalf("before sql-setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sys.dir, configFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused apply wrote config.yaml")
+	}
+	if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(context.Background(), env, s); err != nil {
+		t.Fatalf("after sql-setup: %v", err)
+	}
+	cfg, _ := readConfig(t, sys.dir)
+	if cfg.DB.User != testBoxLogin || cfg.DB.Host != `127.0.0.1\WIZSOFT` || cfg.DB.Database != "erp_db" {
+		t.Fatalf("config.yaml %+v", cfg.DB)
+	}
+	// what differs from the record is refused, not replaced
+	for name, db := range map[string]DBSpec{
+		"another database": {LeastPrivilege: true, Database: "other_db"},
+		"another login":    {LeastPrivilege: true, Login: "erp_connector_other"},
+	} {
+		s2 := s
+		s2.DB = db
+		if _, err := Apply(context.Background(), env, s2); refusalCode(err) != CodeSpecInvalid {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	s3 := s
+	s3.ERP = "sap"
+	if _, err := Apply(context.Background(), env, s3); refusalCode(err) != CodeSpecInvalid {
+		t.Errorf("another ERP: %v", err)
+	}
+}
