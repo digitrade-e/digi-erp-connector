@@ -264,6 +264,21 @@ type RunLog struct {
 	NoInput bool     `json:"noInput,omitempty"`
 	Summary string   `json:"summary,omitempty"`
 	Errors  []string `json:"errors,omitempty"`
+	// Transient: the run was refused for a reason that passes — another
+	// station issuing or editing definitions (the "Inv" semaphore), a second
+	// run of the same BAT, a database being reduced, a deadlock. The next run
+	// of the profile imports the same file: never move it aside.
+	Transient bool `json:"transient,omitempty"`
+}
+
+// transientRunLogMarkers are the texts of refusals that pass by themselves
+// (MLAYIN.HDS / FAST_IMP.HDS; research/reverse-engineering hds/).
+var transientRunLogMarkers = []string{
+	"תחנה אחרת מעדכנת קובץ הגדרות או מפיקה", // another station is updating definitions or issuing (Semap "Inv")
+	"הקלקה כפולה",      // a second run of the same BAT (<bat>.IsWorking)
+	"קיצוץ בתחנה אחרת", // another station is reducing the database
+	"deadlock",
+	"Semap FAIL",
 }
 
 const (
@@ -328,6 +343,13 @@ func readRunLog(path, bat string) (*RunLog, error) {
 		return nil, err
 	}
 	rl := &RunLog{File: path, OK: strings.HasPrefix(strings.ToLower(filepath.Base(path)), strings.ToLower(bat)+".ok.")}
+	lower := strings.ToLower(string(text))
+	for _, m := range transientRunLogMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			rl.Transient = true
+			break
+		}
+	}
 	for _, line := range strings.Split(strings.ReplaceAll(string(text), "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(runLogStamp.ReplaceAllString(line, ""))
 		switch {

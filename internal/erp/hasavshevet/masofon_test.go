@@ -251,3 +251,28 @@ func TestSender_RunLogNoInput(t *testing.T) {
 		t.Fatalf("import check = %+v; want not_logged, noInput, nothing moved", c)
 	}
 }
+
+// A refusal that passes (another station issuing holds the "Inv" semaphore)
+// is reported transient and never moved aside: the profile's next run imports
+// the same file.
+func TestSender_TransientRefusalIsNotMoved(t *testing.T) {
+	const semaphoreBody = `[box_1.digi.bat] --->company_db -6 -c:\digi\orders\imovein.doc` + "\n" +
+		"[19/11/26 11:00:01] ERROR תחנה אחרת מעדכנת קובץ הגדרות או מפיקה\n"
+	var logs string
+	s, dir, l := batSenderWithINI(t, true, func(context.Context, string, *Sender, string) (int, string, error) {
+		writeRunLog(t, logs, "digi.bat", "err", time.Now(), semaphoreBody)
+		return 0, "", nil
+	})
+	logs = l
+	res, err := s.processOrderWithNumber(context.Background(), drainTestOrder(1), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.Import
+	if c == nil || c.Result != OrderImportFailed || c.RunLog == nil || !c.RunLog.Transient || c.MovedTo != "" {
+		t.Fatalf("import check = %+v; want failed, transient, not moved", c)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "IMOVEIN.doc")); err != nil {
+		t.Errorf("the file was moved: %v", err)
+	}
+}

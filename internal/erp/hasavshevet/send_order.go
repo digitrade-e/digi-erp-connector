@@ -402,7 +402,9 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 		}
 		s.log.Info(fmt.Sprintf("import check orderNumber=%d result=%s logStatus=%q profile=%q stockIds=%v matchedBy=%q detail=%q",
 			orderNum, check.Result, check.LogStatus, check.Profile, check.StockIDs, check.MatchedBy, check.Detail))
-		if s.cfg.HasMoveRefusedOrders && check.Result == OrderImportFailed {
+		// A passing refusal (RunLog.Transient) is retried by the profile's
+		// next run: never moved aside.
+		if s.cfg.HasMoveRefusedOrders && check.Result == OrderImportFailed && (check.RunLog == nil || !check.RunLog.Transient) {
 			s.moveRefused(check, dir, orderNum)
 		}
 	}
@@ -447,6 +449,9 @@ func (s *Sender) attachRunLog(check *ImportCheck, bat string, start time.Time, o
 	case !rl.OK:
 		check.Result = OrderImportFailed
 		check.Detail = joinDetail(check.Detail, "the Masofon run log is an error log: see runLog")
+	}
+	if rl.Transient && check.Result != OrderImportImported {
+		check.Detail = joinDetail(check.Detail, "refused for a passing reason (another station issuing, a second run, a deadlock): the profile's next run imports the file again")
 	}
 }
 

@@ -92,6 +92,9 @@ type OrderImportRunLog struct {
 	NoInput bool     `json:"noInput,omitempty"`
 	Summary string   `json:"summary,omitempty"`
 	Errors  []string `json:"errors,omitempty"`
+	// Transient: refused for a passing reason (another station issuing, a
+	// second run, a deadlock); the profile's next run imports the file again.
+	Transient bool `json:"transient,omitempty"`
 }
 
 // SendOrderQueueResponse counts the orders accepted and not yet written
