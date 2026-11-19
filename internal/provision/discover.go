@@ -110,12 +110,21 @@ type ConfigFacts struct {
 	HasParamFile       string    `json:"hasParamFile,omitempty"`
 	HasBatFile         string    `json:"hasBatFile,omitempty"`
 	SendReceiptDir     string    `json:"sendReceiptDir,omitempty"`
+	// The receipt importer the receipts command sets (paths only).
+	HasReceiptBatFile   string `json:"hasReceiptBatFile,omitempty"`
+	HasReceiptParamFile string `json:"hasReceiptParamFile,omitempty"`
 	// SendOrderPickupDir and SendOrderFormat are the order model and layout
 	// (DIG-1297). The spec does not set them (an apply keeps them); they are
 	// reported so a plan sees a box that relies on them — a build older than
 	// DIG-1297 ignores both and would write orders nobody imports.
 	SendOrderPickupDir string `json:"sendOrderPickupDir,omitempty"`
 	SendOrderFormat    string `json:"sendOrderFormat,omitempty"`
+	// The order importer's settings the orders command sets, as config.yaml
+	// holds them now (0 / false / "" = off), so a plan shows "was -> becomes".
+	HasImportTimeoutSeconds int    `json:"hasImportTimeoutSeconds"`
+	HasMoveRefusedOrders    bool   `json:"hasMoveRefusedOrders"`
+	HasOrderPrecheck        bool   `json:"hasOrderPrecheck"`
+	HasRunLogDir            string `json:"hasRunLogDir,omitempty"`
 	// Options are the values OptionsSpec sets, as config.yaml holds them now,
 	// so a plan can show "was -> becomes" (plan 068 §13.5.1, contract 0).
 	Options *OptionsFacts `json:"options"`
@@ -490,6 +499,13 @@ func configFacts(cfg config.Config, raw []byte) *ConfigFacts {
 		SendOrderPickupDir: cfg.SendOrderPickupDir,
 		SendOrderFormat:    cfg.SendOrderFormat,
 		Options:            optionsFacts(cfg),
+
+		HasReceiptBatFile:       cfg.HasReceiptBatFile,
+		HasReceiptParamFile:     cfg.HasReceiptParamFile,
+		HasImportTimeoutSeconds: cfg.HasImportTimeoutSeconds,
+		HasMoveRefusedOrders:    cfg.HasMoveRefusedOrders,
+		HasOrderPrecheck:        cfg.HasOrderPrecheck,
+		HasRunLogDir:            cfg.HasRunLogDir,
 	}
 	if d := strings.TrimSpace(cfg.SendOrderDir); d != "" {
 		if info, err := os.Stat(d); err == nil && info.IsDir() {

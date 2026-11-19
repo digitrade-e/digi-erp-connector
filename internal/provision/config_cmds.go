@@ -3,6 +3,7 @@ package provision
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -60,6 +61,18 @@ type OrdersInput struct {
 	// with a pickup folder.
 	SendOrderPickupDir *string `json:"sendOrderPickupDir,omitempty"`
 	SendOrderFormat    *string `json:"sendOrderFormat,omitempty"`
+	// The order importer's run and its check (research/reverse-engineering
+	// hasavshevet-importer.md P3–P5, hasavshevet-run-logs.md P9), each left out
+	// = the box's value: HasImportTimeoutSeconds 0 (no cap) or 30–3600;
+	// HasMoveRefusedOrders and HasOrderPrecheck the opt-in switches (tenant
+	// decisions); HasRunLogDir Masofon2's error-log folder, absolute, "" =
+	// masofon.ini's ErrDataPath. The connector's own start check refuses what
+	// it would not run on (an importer needed, no pickup folder, a database
+	// for the pre-check).
+	HasImportTimeoutSeconds *int    `json:"hasImportTimeoutSeconds,omitempty"`
+	HasMoveRefusedOrders    *bool   `json:"hasMoveRefusedOrders,omitempty"`
+	HasOrderPrecheck        *bool   `json:"hasOrderPrecheck,omitempty"`
+	HasRunLogDir            *string `json:"hasRunLogDir,omitempty"`
 	// AllowWritable accepts, over WinRM only, a sendOrderDir or pickup folder
 	// that accounts besides the administrators can write to (plan 087 review
 	// M1); the importer keeps importer.allowWritable. Behind the link it is
@@ -157,13 +170,19 @@ func (in OrdersInput) Validate(linked bool, systemDirs []string) *Refusal {
 	if r := validateHeader(in.Version, in.ChangeSet, in.Expect); r != nil {
 		return r
 	}
-	if in.SendOrderDir == nil && in.Importer == nil && in.SendOrderPickupDir == nil && in.SendOrderFormat == nil {
+	if in.SendOrderDir == nil && in.Importer == nil && in.SendOrderPickupDir == nil && in.SendOrderFormat == nil &&
+		in.HasImportTimeoutSeconds == nil && in.HasMoveRefusedOrders == nil && in.HasOrderPrecheck == nil && in.HasRunLogDir == nil {
 		return refuse(CodeSpecInvalid, "name at least one order setting", "the input changes nothing")
 	}
-	for field, p := range map[string]*string{"sendOrderDir": in.SendOrderDir, "sendOrderPickupDir": in.SendOrderPickupDir} {
+	paths := map[string]*string{"sendOrderDir": in.SendOrderDir, "sendOrderPickupDir": in.SendOrderPickupDir, "hasRunLogDir": in.HasRunLogDir}
+	for field, p := range paths {
 		if r := absOrEmpty(field, p, linked); r != nil {
 			return r
 		}
+	}
+	if t := in.HasImportTimeoutSeconds; t != nil && *t != 0 && (*t < config.MinImportTimeoutSeconds || *t > config.MaxImportTimeoutSeconds) {
+		return refuse(CodeSpecInvalid, fmt.Sprintf("use 0 (no cap) or %d-%d", config.MinImportTimeoutSeconds, config.MaxImportTimeoutSeconds),
+			"hasImportTimeoutSeconds %d is out of range", *t)
 	}
 	if f := in.SendOrderFormat; f != nil {
 		switch strings.TrimSpace(*f) {
@@ -176,7 +195,7 @@ func (in OrdersInput) Validate(linked bool, systemDirs []string) *Refusal {
 		if r := refuseAllowWritableLinked(in.AllowWritable); r != nil {
 			return r
 		}
-		for field, p := range map[string]*string{"sendOrderDir": in.SendOrderDir, "sendOrderPickupDir": in.SendOrderPickupDir} {
+		for field, p := range paths {
 			if p != nil && winUnder(*p, systemDirs) {
 				return refuse(CodeSpecInvalid, "name a folder outside the system folders", "%s %s is in a system folder", field, strings.TrimSpace(*p))
 			}
@@ -313,6 +332,16 @@ func ApplyOrders(ctx context.Context, env Env, in OrdersInput, check bool) (*App
 		}
 		setTrimmed(&t.SendOrderPickupDir, in.SendOrderPickupDir)
 		setTrimmed(&t.SendOrderFormat, in.SendOrderFormat)
+		if v := in.HasImportTimeoutSeconds; v != nil {
+			t.HasImportTimeoutSeconds = *v
+		}
+		if v := in.HasMoveRefusedOrders; v != nil {
+			t.HasMoveRefusedOrders = *v
+		}
+		if v := in.HasOrderPrecheck; v != nil {
+			t.HasOrderPrecheck = *v
+		}
+		setTrimmed(&t.HasRunLogDir, in.HasRunLogDir)
 	}
 	err = a.runConfigChange(ctx, set, func() error { return a.checkOrders(in.AllowWritable) })
 	a.settle()

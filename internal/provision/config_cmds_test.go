@@ -249,3 +249,69 @@ func TestRun_ReceiptsAndOrders(t *testing.T) {
 		}
 	}
 }
+
+// The order importer's settings (v1.0.34–v1.0.36: timeout, move refused,
+// pre-check, run-log folder) are set through the orders command, each left
+// out kept, and --check names them.
+func TestApplyOrders_ImportSettings(t *testing.T) {
+	sys, fdb, orders := handInstallBox(t)
+	bat := filepath.Join(orders, "digi.bat")
+	if err := os.WriteFile(bat, []byte("call has.exe\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := handInstallConfig(orders)
+	cfg.HasBatFile = bat
+	writeConfig(t, sys.dir, cfg)
+	env := testEnv(sys, fdb)
+	logs := mkdir(t, "ORDERS_log")
+
+	in := ordersInput(func(in *OrdersInput) {
+		in.HasImportTimeoutSeconds, in.HasMoveRefusedOrders, in.HasOrderPrecheck, in.HasRunLogDir = ptr(600), ptr(true), ptr(true), &logs
+	})
+	chk, err := ApplyOrders(context.Background(), env, in, true)
+	if err != nil || chk.Check == nil || !strings.Contains(chk.Check.Config, "orderImport") {
+		t.Fatalf("--check = %+v, %v; want the change named orderImport", chk.Check, err)
+	}
+	if _, err := ApplyOrders(context.Background(), env, in, false); err != nil {
+		t.Fatalf("ApplyOrders: %v", err)
+	}
+	after, _ := readConfig(t, sys.dir)
+	if after.HasImportTimeoutSeconds != 600 || !after.HasMoveRefusedOrders || !after.HasOrderPrecheck || after.HasRunLogDir != logs ||
+		after.HasBatFile != bat || after.SendOrderDir != orders || after.Auth != cfg.Auth {
+		t.Fatalf("config = %+v", after)
+	}
+
+	// One setting at a time: the rest is kept; "" and false turn them off.
+	in = ordersInput(func(in *OrdersInput) { in.HasRunLogDir, in.HasMoveRefusedOrders = ptr(""), ptr(false) })
+	if _, err := ApplyOrders(context.Background(), env, in, false); err != nil {
+		t.Fatalf("ApplyOrders: %v", err)
+	}
+	after, _ = readConfig(t, sys.dir)
+	if after.HasRunLogDir != "" || after.HasMoveRefusedOrders || after.HasImportTimeoutSeconds != 600 || !after.HasOrderPrecheck {
+		t.Fatalf("config = %+v; want hasRunLogDir and hasMoveRefusedOrders cleared, the rest kept", after)
+	}
+}
+
+func TestApplyOrders_ImportSettingRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		in   OrdersInput
+		code string
+	}{
+		{"a timeout out of range", ordersInput(func(in *OrdersInput) { in.HasImportTimeoutSeconds = ptr(5) }), CodeSpecInvalid},
+		{"a relative run-log folder", ordersInput(func(in *OrdersInput) { in.HasRunLogDir = ptr(`logs`) }), CodeSpecInvalid},
+		// The hand-installed box has no importer: the connector would not start.
+		{"move refused orders without an importer", ordersInput(func(in *OrdersInput) { in.HasMoveRefusedOrders = ptr(true) }), CodeConfigRefused},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sys, fdb, _ := handInstallBox(t)
+			_, before := readConfig(t, sys.dir)
+			res, err := ApplyOrders(context.Background(), testEnv(sys, fdb), tc.in, false)
+			wantRefusal(t, err, tc.code)
+			if _, after := readConfig(t, sys.dir); !bytes.Equal(before, after) || res.Restarted {
+				t.Errorf("work was done before the refusal: %+v", res)
+			}
+		})
+	}
+}
