@@ -179,8 +179,13 @@ the run started that has it (folder: `hasRunLogDir`, else `ErrDataPath`), the un
 and `DataImpExpLogs\WizImportError*.log` lines of the run's window (a double click is refused only there). A refusal
 is almost never in ImportLog. `importOutcome` gives the one verdict (`outcome`: imported / duplicate (`Stock.063`) /
 refused / retry / not_run / unknown, and `partial` when Masofon2's `[general] ImportWithErrors=YES` imported the good
-lines and dropped the refused ones â `ImportLog` logs it `partial`, the log ends "×××§ ×××¨×©××××ª ×× × ×§×× ×××¦×××"); only
-`refused` is moved aside. A run killed at the timeout leaves
+lines and dropped the refused ones — `ImportLog` logs it `partial`, the log ends "חלק מהרשומות לא נקלט בהצלחה"); only
+`refused` is moved aside. Read from afar (v1.0.38, `provision/logs_masofon.go`, `state_imports.go`): `logs` sources
+`masofon` (the connector's own BAT's run logs, where config.yaml / masofon.ini say — never a caller's path, never
+another BAT's) and `masofon-errors` (`DataImpExpLogs\WizImportError*.log`, other profiles' lines dropped), regular files
+only, tail-read, redacted like the connector's logs; `state` `imports` (counts by outcome, recent not imported,
+`orderNumber` → the whole check). There is deliberately no command that reads a path the caller names: the
+connector runs as LocalSystem. A run killed at the timeout leaves
 `<bat>.IsWorking` (the next run would be refused): removed only when created since that run started. Never read a `.PRJ` (it holds a DB password). `hasMoveRefusedOrders` and `hasOrderPrecheck`
 are **opt-in** (tenant decisions: whether the ERP may retry a refused order, whether orders are refused up front);
 the pre-check runs only for a new order inside `validateNew`, never for a repeat, and fails open on a DB error.
