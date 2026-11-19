@@ -51,6 +51,9 @@ type JobResult struct {
 	OrderNumber  int64
 	WrittenFiles []string
 	Err          error
+	// Import is the order's import check (import_check.go); nil when no
+	// importer ran or none was recorded. A report only: Status is unchanged.
+	Import *ImportCheck
 }
 
 type orderJob struct {
@@ -95,6 +98,9 @@ type OrderQueue struct {
 	// index is the historyId → order number index (UseKeyIndex); nil without
 	// one, and then every Submit is a new order.
 	index *orderIndex
+	// importsDir keeps each order's import check (OrderImportsDir; set by
+	// UseKeyIndex); "" = kept in memory only.
+	importsDir string
 	// counters are the order counters (plan 087, UseCounters); nil = the
 	// sender's order counter under the implicit key, today's behaviour.
 	counters *CounterSet
@@ -261,6 +267,7 @@ func (q *OrderQueue) UseKeyIndex(dataDir string) {
 	q.closeMu.Lock()
 	defer q.closeMu.Unlock()
 	q.index = &orderIndex{dir: OrderIndexDir(dataDir)}
+	q.importsDir = OrderImportsDir(dataDir)
 	clear(q.recovered)
 }
 
@@ -480,8 +487,9 @@ func (q *OrderQueue) run(ctx context.Context) {
 				q.log.Error(fmt.Sprintf("order job %s failed", job.id), err)
 				q.setStatus(job.id, JobStatusFailed, job.orderNumber, nil, err)
 			} else {
+				q.recordImportCheck(result)
 				q.log.Success(fmt.Sprintf("order job %s done orderNumber=%d files=%v", job.id, result.OrderNumber, result.WrittenFiles))
-				q.setStatus(job.id, JobStatusDone, result.OrderNumber, result.WrittenFiles, nil)
+				q.setDone(job.id, result)
 			}
 		}
 	}
@@ -754,6 +762,13 @@ func (q *OrderQueue) validateNew(req OrderRequest) error {
 			return &FieldError{Field: "body", Reason: err.Error()}
 		}
 		return err
+	}
+	// hasOrderPrecheck (precheck.go): only a new order reaches here; a
+	// repeat of a known historyId was answered from the index.
+	if q.sender != nil && q.sender.cfg.HasOrderPrecheck {
+		if err := q.sender.precheckOrder(req); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1038,6 +1053,9 @@ func (q *OrderQueue) Status(jobID string) (*JobResult, bool) {
 	if e.State == orderFailed || e.State == orderRetryable {
 		res.Err = errors.New(e.Error)
 	}
+	if e.State == orderWritten && q.importsDir != "" {
+		res.Import = loadImportCheck(q.importsDir, n)
+	}
 	return res, true
 }
 
@@ -1064,6 +1082,32 @@ func (q *OrderQueue) Drain(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// setDone records a written order with its import check in one step, so a
+// poll never reads done without the check the worker already has.
+func (q *OrderQueue) setDone(id string, result *OrderResult) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.jobs[id] = &JobResult{
+		ID:           id,
+		Status:       JobStatusDone,
+		OrderNumber:  result.OrderNumber,
+		WrittenFiles: result.WrittenFiles,
+		Import:       result.Import,
+	}
+}
+
+// recordImportCheck keeps a written order's import check beside the index
+// (OrderImportsDir), so a status answered after a restart still has it. A
+// save that fails is logged and costs only the report.
+func (q *OrderQueue) recordImportCheck(result *OrderResult) {
+	if result == nil || result.Import == nil || q.importsDir == "" {
+		return
+	}
+	if err := saveImportCheck(q.importsDir, result.OrderNumber, result.Import); err != nil {
+		q.log.Warn(fmt.Sprintf("order %d: import check not saved (%v); it is answered until the connector restarts", result.OrderNumber, err))
 	}
 }
 

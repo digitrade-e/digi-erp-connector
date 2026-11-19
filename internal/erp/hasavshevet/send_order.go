@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,6 +101,10 @@ type OrderResult struct {
 	OrderNumber  int64
 	WrittenFiles []string
 	Account      AccountInfo
+	// Import is what Hashavshevet's import log says about this order's run
+	// (import_check.go); nil when no importer ran (model (a), typed folders,
+	// no importer configured).
+	Import *ImportCheck
 }
 
 // AccountInfo holds customer data needed for PDF generation.
@@ -142,7 +147,31 @@ type Sender struct {
 	// written: the importer must not be one others can change (plan 087
 	// review T1; the daemon's guard). A refusal leaves the order retryable.
 	importerCheck func() error
+	// importLog is a test seam for Hashavshevet's import log; nil = read the
+	// configured database (importLogReader()).
+	importLog importLogReader
+	// precheck is a test seam for the order pre-check (precheck.go); nil =
+	// the configured database.
+	precheck precheckReader
 }
+
+// importLogReader is the import log the confirmation reads: the test seam,
+// else the configured database; nil when there is none (no connection, no
+// or an unsafe database name).
+func (s *Sender) importLogReader() importLogReader {
+	if s.importLog != nil {
+		return s.importLog
+	}
+	dbName := strings.TrimSpace(s.cfg.DB.Database)
+	if s.db == nil || dbName == "" || !IsSafeDBName(dbName) {
+		return nil
+	}
+	return sqlImportLog{db: s.db, dbName: dbName}
+}
+
+// importLogTimeout bounds each read of the import log: the confirmation must
+// never hold the worker (and the import lock) for long.
+const importLogTimeout = 15 * time.Second
 
 // NewSender creates a Sender. db and numberStore must be non-nil.
 func NewSender(db *sql.DB, cfg config.Config, numberStore *OrderNumberStore, log logger.LoggerService) *Sender {
@@ -317,28 +346,189 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 	// HasBatFile (Masofon-generated BAT launcher) takes precedence over HasExePath.
 	// The single-worker queue guarantees the previous import is finished before
 	// the next order's files are written and the importer is invoked again.
-	switch {
-	case strings.TrimSpace(s.cfg.HasBatFile) != "":
-		start := time.Now()
-		exitCode, output, execErr := s.batRunner()(ctx, s.cfg.HasBatFile)
-		s.log.Info(fmt.Sprintf("digi.bat exit=%d durationMs=%d output=%q orderNumber=%d",
-			exitCode, time.Since(start).Milliseconds(), output, orderNum))
-		if execErr != nil || exitCode != 0 {
-			s.log.Error(fmt.Sprintf("digi.bat failed orderNumber=%d exit=%d", orderNum, exitCode), execErr)
+	//
+	// The exit code carries nothing (Masofon's BAT ends with a bare EXIT): the
+	// run is confirmed from Hashavshevet's import log instead (import_check.go),
+	// reported on the result and never changing the order's outcome.
+	// hasImportTimeoutSeconds, when set, caps the run and kills its process
+	// tree when it passes.
+	bat, hasExe := strings.TrimSpace(s.cfg.HasBatFile), strings.TrimSpace(s.cfg.HasExePath)
+	var check *ImportCheck
+	if bat != "" || hasExe != "" {
+		logReader := s.importLogReader()
+		var mark int64
+		markErr := errors.New("no database to read the import log from")
+		if logReader != nil {
+			mctx, cancel := context.WithTimeout(ctx, importLogTimeout)
+			mark, markErr = logReader.mark(mctx)
+			cancel()
+			if markErr != nil {
+				s.log.Warn(fmt.Sprintf("import log not readable before the import orderNumber=%d: %v; the import will not be confirmed", orderNum, markErr))
+			}
 		}
-	case strings.TrimSpace(s.cfg.HasExePath) != "":
+
+		runCtx, cancelRun := ctx, context.CancelFunc(func() {})
+		if t := s.cfg.OrderImportTimeout(); t > 0 {
+			runCtx, cancelRun = context.WithTimeout(ctx, t)
+		}
 		start := time.Now()
-		exitCode, output, execErr := s.hasExeRunner()(ctx, s.cfg.HasExePath, s.cfg.HasParamFile, dir)
-		s.log.Info(fmt.Sprintf("has.exe exit=%d durationMs=%d output=%q orderNumber=%d",
-			exitCode, time.Since(start).Milliseconds(), output, orderNum))
-		if execErr != nil {
-			// Log but do not fail: files are written; import can be retried.
-			s.log.Error(fmt.Sprintf("has.exe failed orderNumber=%d", orderNum), execErr)
+		if bat != "" {
+			exitCode, output, execErr := s.batRunner()(runCtx, bat)
+			s.log.Info(fmt.Sprintf("digi.bat exit=%d durationMs=%d output=%q orderNumber=%d",
+				exitCode, time.Since(start).Milliseconds(), output, orderNum))
+			if execErr != nil || exitCode != 0 {
+				s.log.Error(fmt.Sprintf("digi.bat failed orderNumber=%d exit=%d", orderNum, exitCode), execErr)
+			}
+		} else {
+			exitCode, output, execErr := s.hasExeRunner()(runCtx, hasExe, s.cfg.HasParamFile, dir)
+			s.log.Info(fmt.Sprintf("has.exe exit=%d durationMs=%d output=%q orderNumber=%d",
+				exitCode, time.Since(start).Milliseconds(), output, orderNum))
+			if execErr != nil {
+				// Log but do not fail: files are written; import can be retried.
+				s.log.Error(fmt.Sprintf("has.exe failed orderNumber=%d", orderNum), execErr)
+			}
+		}
+		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
+		cancelRun()
+		if timedOut {
+			s.log.Error(fmt.Sprintf("order importer stopped at hasImportTimeoutSeconds=%d orderNumber=%d: its process tree was killed; confirm the order in Hashavshevet before resending it",
+				s.cfg.HasImportTimeoutSeconds, orderNum), nil)
+		}
+
+		check = s.confirmImport(ctx, logReader, mark, markErr, filepath.Join(dir, "IMOVEIN.doc"), bat, orderNum, req.Asmahta2)
+		check.TimedOut = timedOut
+		if bat != "" {
+			s.attachRunLog(check, bat, start, orderNum)
+		}
+		s.log.Info(fmt.Sprintf("import check orderNumber=%d result=%s logStatus=%q profile=%q stockIds=%v matchedBy=%q detail=%q",
+			orderNum, check.Result, check.LogStatus, check.Profile, check.StockIDs, check.MatchedBy, check.Detail))
+		// A passing refusal (RunLog.Transient) is retried by the profile's
+		// next run: never moved aside.
+		if s.cfg.HasMoveRefusedOrders && check.Result == OrderImportFailed && (check.RunLog == nil || !check.RunLog.Transient) {
+			s.moveRefused(check, dir, orderNum)
 		}
 	}
 
 	s.log.Success(fmt.Sprintf("order complete orderNumber=%d files=%v", orderNum, writtenFiles))
-	return orderResult(orderNum, writtenFiles, account), nil
+	res := orderResult(orderNum, writtenFiles, account)
+	res.Import = check
+	return res, nil
+}
+
+// attachRunLog adds the run's own log (masofon.ini's ErrDataPath,
+// <bat>.ok|err.…LOG) to the check (P3) and lets it decide what the import
+// log could not: a refused run is not always in ImportLog.
+func (s *Sender) attachRunLog(check *ImportCheck, bat string, start time.Time, orderNum int64) {
+	iniDir := filepath.Dir(bat)
+	ini, path, err := ReadMasofonINI(iniDir)
+	if err != nil && strings.TrimSpace(s.cfg.HasExePath) != "" {
+		ini, path, err = ReadMasofonINI(filepath.Dir(s.cfg.HasExePath))
+	}
+	if err != nil {
+		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: %s not readable (%v); no run log", orderNum, path, err))
+		return
+	}
+	rl, err := FindRunLog(ini.ErrDataPath, bat, start)
+	if err != nil {
+		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: run log in %q not readable: %v", orderNum, ini.ErrDataPath, err))
+		return
+	}
+	if rl == nil {
+		return
+	}
+	check.RunLog = rl
+	if len(rl.Errors) > 0 {
+		s.log.Warn(fmt.Sprintf("import run log orderNumber=%d %s: %s", orderNum, rl.File, strings.Join(rl.Errors, " || ")))
+	}
+	switch {
+	case check.Result == OrderImportImported || check.Result == OrderImportFailed:
+		// ImportLog already decided; the log is detail.
+	case rl.NoInput:
+		check.Result = OrderImportNotLogged
+		check.Detail = joinDetail(check.Detail, "the Masofon run found no input file: the profile's data file is not this connector's file (discover: masofon_data_file_mismatch)")
+	case !rl.OK:
+		check.Result = OrderImportFailed
+		check.Detail = joinDetail(check.Detail, "the Masofon run log is an error log: see runLog")
+	}
+	if rl.Transient && check.Result != OrderImportImported {
+		check.Detail = joinDetail(check.Detail, "refused for a passing reason (another station issuing, a second run, a deadlock): the profile's next run imports the file again")
+	}
+}
+
+// moveRefused moves a refused IMOVEIN.doc out of sendOrderDir into
+// sendOrderDir\refused\IMOVEIN_<n>.doc (hasMoveRefusedOrders): left there, a
+// later run of the profile would import it again behind the connector's
+// back. Only a file still in place is moved (Masofon renames an imported one
+// to ….MASOFON2.BAK); the history copy stays where it is.
+func (s *Sender) moveRefused(check *ImportCheck, dir string, orderNum int64) {
+	src := filepath.Join(dir, "IMOVEIN.doc")
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	refused := filepath.Join(dir, "refused")
+	if err := os.MkdirAll(refused, 0o755); err != nil {
+		s.log.Warn(fmt.Sprintf("order %d refused by the importer; not moved aside: %v", orderNum, err))
+		return
+	}
+	dst := filepath.Join(refused, fmt.Sprintf("IMOVEIN_%d.doc", orderNum))
+	if _, err := os.Stat(dst); err == nil {
+		s.log.Warn(fmt.Sprintf("order %d refused by the importer; not moved aside: %s already exists", orderNum, dst))
+		return
+	}
+	if err := os.Rename(src, dst); err != nil {
+		s.log.Warn(fmt.Sprintf("order %d refused by the importer; not moved aside: %v", orderNum, err))
+		return
+	}
+	check.MovedTo = dst
+	s.log.Warn(fmt.Sprintf("order %d refused by the importer: %s moved to %s so no later run imports it", orderNum, src, dst))
+}
+
+// headerDocumentCode is the code written in IMOVEIN line 4: the request's
+// documentId (DIG-1295), else today's rule — ORDER 30 for the literal shekel
+// currency, else 32; QUOATE 40; RETURN 74. Hashavshevet reads it as a
+// Hashavshevet-6 code and translates it per company (DocumentsDefV6).
+func headerDocumentCode(req OrderRequest) int {
+	if req.DocumentID != 0 {
+		return req.DocumentID
+	}
+	switch req.DocumentType {
+	case "ORDER":
+		if req.Currency == `ש"ח` {
+			return 30
+		}
+		return 32
+	case "QUOATE":
+		return 40
+	case "RETURN":
+		return 74
+	}
+	return 0
+}
+
+// confirmImport reads the import log rows written since mark (taken before the
+// importer started) and looks for the order's document. markErr != nil means
+// the log could not be read before the run: the check is unchecked.
+func (s *Sender) confirmImport(ctx context.Context, r importLogReader, mark int64, markErr error, ourFile, bat string, orderNum int64, asmahta2 string) *ImportCheck {
+	if r == nil || markErr != nil {
+		detail := "no database to read the import log from"
+		if r != nil {
+			detail = "import log not readable before the import: " + sqlErrorClass(markErr)
+		}
+		return &ImportCheck{Result: OrderImportUnchecked, Detail: detail, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
+	}
+	reference := orderNum // line 8 is the order number unless asmahta2 is sent
+	if a := strings.TrimSpace(asmahta2); a != "" {
+		if n, err := strconv.ParseInt(a, 10, 64); err == nil {
+			reference = n
+		}
+	}
+	cctx, cancel := context.WithTimeout(ctx, importLogTimeout)
+	defer cancel()
+	check, err := checkImport(cctx, r, mark, ourFile, bat, orderNum, reference)
+	if err != nil {
+		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: %v", orderNum, err))
+	}
+	return &check
 }
 
 func orderResult(orderNum int64, writtenFiles []string, account accountInfo) *OrderResult {
@@ -359,12 +549,18 @@ func (s *Sender) batRunner() func(context.Context, string) (int, string, error) 
 	if s.runBat != nil {
 		return s.runBat
 	}
+	if s.cfg.OrderImportTimeout() > 0 {
+		return runBatFileTree // a timeout must kill has.exe too
+	}
 	return runBatFile
 }
 
 func (s *Sender) hasExeRunner() func(context.Context, string, string, string) (int, string, error) {
 	if s.runHasExe != nil {
 		return s.runHasExe
+	}
+	if s.cfg.OrderImportTimeout() > 0 {
+		return runImporterTree
 	}
 	return runImporter
 }
@@ -443,26 +639,11 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 		discount = 99.99
 	}
 
-	// Document type → Hasavshevet header DocumentID code (today's rule; the
-	// request's document fields replace it below).
-	var headerDocID, wareHouse int
+	// Document type → Hasavshevet header DocumentID code (headerDocumentCode).
+	headerDocID, wareHouse := headerDocumentCode(req), 0
 	switch req.DocumentType {
-	case "ORDER":
+	case "ORDER", "QUOATE", "RETURN":
 		wareHouse = defaultWarehouse
-		if req.Currency == `ש"ח` {
-			headerDocID = 30
-		} else {
-			headerDocID = 32
-		}
-	case "QUOATE":
-		headerDocID = 40
-		wareHouse = defaultWarehouse
-	case "RETURN":
-		headerDocID = 74
-		wareHouse = defaultWarehouse
-	}
-	if req.DocumentID != 0 {
-		headerDocID = req.DocumentID
 	}
 	if req.Warehouse != 0 {
 		wareHouse = req.Warehouse

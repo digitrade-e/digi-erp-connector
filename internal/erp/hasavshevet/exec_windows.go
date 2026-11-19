@@ -4,9 +4,50 @@ package hasavshevet
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
+
+// treeCancel kills the started process and every process it started
+// (taskkill /T /F), falling back to killing the process alone. taskkill is
+// run from System32 by full path: the service runs as LocalSystem, and a
+// PATH lookup could pick up someone else's taskkill.exe.
+func treeCancel(cmd *exec.Cmd) func() error {
+	return func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		root := os.Getenv("SystemRoot")
+		if root == "" {
+			root = `C:\Windows`
+		}
+		kill := exec.Command(filepath.Join(root, "System32", "taskkill.exe"), "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+		if err := kill.Run(); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+}
+
+// runBatFileTree is runBatFile for a run with a timeout
+// (hasImportTimeoutSeconds): when ctx ends the BAT's whole process tree is
+// killed, has.exe included, and the output pipe is let go after
+// receiptBatWaitDelay.
+func runBatFileTree(ctx context.Context, batPath string) (int, string, error) {
+	return runCommandCancel(ctx, receiptBatWaitDelay, treeCancel, filepath.Dir(batPath), "cmd.exe", "/C", batPath)
+}
+
+// runImporterTree is runImporter for a run with a timeout, as runBatFileTree.
+func runImporterTree(ctx context.Context, hasExePath, paramFile, workDir string) (int, string, error) {
+	args := []string{}
+	if strings.TrimSpace(paramFile) != "" {
+		args = append(args, paramFile)
+	}
+	return runCommandCancel(ctx, receiptBatWaitDelay, treeCancel, workDir, hasExePath, args...)
+}
 
 // runImporter executes has.exe with the given parameter file in workDir.
 // Returns the process exit code, combined stdout+stderr output, and any exec error.

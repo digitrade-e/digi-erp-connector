@@ -104,6 +104,25 @@ domain's SYSTEM. `importer.allowWritable` accepts it as a warning, once a human 
 accepted the risk. `discover` lists who can change each candidate
 (`importerWriters`).
 
+**The BAT's Masofon profile.** A Masofon BAT carries no import parameters: `has.exe`
+reads the command from the line named after the BAT in `masofon.ini` (beside the BAT,
+else beside has.exe). `discover` reads that file (never a `.PRJ`, which holds a
+database password), reports it as `masofon` (`ini`, `profile`, `commands`: company,
+import type, data file, PRM, user, duplicate guard; `errDataPath`) and checks it
+against what the connector writes (`<sendOrderDir>\IMOVEIN.doc` / `IMOVEIN.prm`):
+
+| Code | Kind | Meaning |
+|---|---|---|
+| `masofon_profile_missing` | defect | no `[commands]` line for the BAT's file name: it imports nothing (a copied or renamed BAT) |
+| `masofon_data_file_mismatch` | defect | the profile reads another file: orders are written and never imported, without an error |
+| `masofon_prm_mismatch` | defect | the profile reads another PRM than the connector's |
+| `masofon_not_fixed_length` | defect | the profile does not read a fixed-length file |
+| `masofon_import_type` | defect / note | not type 6 (stock documents); type 118 (drafts, not issued) is a note |
+| `masofon_shared_input` | defect | another profile reads the connector's file or folder: the two race, and the importer writes temp files into that folder |
+| `masofon_dash_in_path` | defect | the file or PRM path holds `-`: has.exe splits the command on `-` |
+| `masofon_duplicate_guard_off` | note | `DISQUALIFICATIONOFDUPLICATION` is not `YES`: Hashavshevet does not refuse a resend (the tenant's choice) |
+| `masofon_ini_unreadable` | note | `masofon.ini` was not found or not read |
+
 **`db.host` must be this machine or its LAN.** `apply` and `discover` log in there
 with the client's administrator credential, and the machine reaches the internet. A
 name is resolved on the machine, and an address that is not loopback, private or

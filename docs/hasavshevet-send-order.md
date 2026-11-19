@@ -571,6 +571,79 @@ Not here (other tickets): a pre-send lookup of the number in Hashavshevet's
 - **Order number mutex**: `OrderNumberStore.Next()` holds a `sync.Mutex`
   for the read-increment-write cycle. Safe under concurrent HTTP requests.
 - **Queue capacity**: defaults to 64. Returns `503 QUEUE_FULL` when exceeded.
+- **Importer timeout** (`hasImportTimeoutSeconds`, opt-in): unset, a run that
+  never ends blocks every later order and receipt (the shared import lock).
+  Set (30–3600), the run's whole process tree is killed when it passes —
+  cmd.exe **and** has.exe, so no has.exe keeps reading the IMOVEIN.doc the next
+  order rewrites — and the order's import check says `timedOut`. The order
+  stays `done` (its files were written): confirm it in Hashavshevet before any
+  resend.
+
+---
+
+## Import confirmation (ImportLog)
+
+The importer's exit code carries nothing: the Masofon BAT ends with a bare
+`EXIT`, and a refused file is not an error exit
+([research](../research/reverse-engineering/hasavshevet-importer.md)). What
+does record a run is Hashavshevet's table `dbo.ImportLog` in the company
+database: the file read, the profile (BAT name), `&Status=Success|Failed`, and
+the range of `dbo.Stock` IDs created (`FirstStockID`, `LastStockID`).
+
+For a model (b) order (`hasBatFile` / `hasExePath`), with the connector's
+database configured:
+
+1. Before the importer runs: `MAX(ID)` of `ImportLog` (the mark).
+2. After it: the rows with `ID` above the mark (≤ 50), and of those the last one
+   whose `FileName` is `<sendOrderDir>\IMOVEIN.doc` (case-insensitive).
+3. On `Success`: the `Stock` rows in its range whose `DocNumber` is the order
+   number (line 3), or whose `Reference` is line 8 (`asmahta2`, else the order
+   number) — a document type with automatic numbering replaces `DocNumber`
+   when it is issued.
+
+All three are fixed, parameterised read statements on the connector's
+read-only login (`db_datareader` reads `ImportLog` and `Stock`), each bounded
+to 15 s. The result is stored as `DataDir\orders\imports\<n>.json` — beside
+the order index, never in its entries, so an older build never reads it — and
+answered as `import` by `GET /api/sendOrder/{jobId}`, also after a restart:
+
+| `result` | Meaning |
+|---|---|
+| `imported` | A run for this file ended Success and created the document: `stockIds`, `documentId` (the company's own type — the code sent in line 4 is translated per company), `stockStatus` (1 issued, 0 not issued), `matchedBy` (`docNumber` / `reference`) |
+| `logged_no_document` | Success, but no document in the run's range carries the number |
+| `failed` | A run for this file was logged with another status (`logStatus`) |
+| `not_logged` | No run for this file was logged after the mark. A refused Masofon run is not always logged — its `<bat>.err.….LOG` in the profile's `ErrDataPath` says why; also the sign of a Masofon profile whose data file is not the connector's |
+| `unchecked` | No database, no `ImportLog`, or a read failed (`detail`; the driver's text goes to `server.log` only) |
+
+`profile` names the BAT that logged the run; a `detail` warns when it is not
+the configured `hasBatFile` (another integration reads the connector's file).
+The check is a **report**: it never changes the order's `status`, its index
+entry or a resend's behaviour. Model (a) and typed folders run no importer and
+get no check (yet).
+
+**The run's own log (`runLog`).** Every Masofon run leaves
+`<bat>.ok|err.DMY-dd.mm.yy.HMS-hh.mm.ss.LOG` in `masofon.ini`'s `ErrDataPath`
+(`.ok` only when a command ran and nothing failed). With `hasBatFile`, the newest
+log of the BAT written since the importer started is attached: `ok`, `noInput`
+(the run found no input file — the profile reads another file), `summary` (its
+last line) and up to 20 error lines (`value | message | row`; messages carry
+Hashavshevet's `Stock.NNN` codes). A refused run is not always in `ImportLog`;
+the log then decides: an error log → `failed`, `noInput` → `not_logged` with a
+pointer to `discover`'s `masofon_data_file_mismatch`. Error lines also go to
+`server.log`.
+
+**A refused file stays and is retried.** Hashavshevet renames an imported file
+`….MASOFON2.BAK` and leaves a refused one in place, so every later run of the
+profile tries it again. With `hasMoveRefusedOrders` (opt-in) a `failed` order's
+`IMOVEIN.doc` is moved to `sendOrderDir\refused\IMOVEIN_<n>.doc` (`movedTo`);
+the history copy stays. Off, the file stays until the next order overwrites it.
+
+**Pre-check (`hasOrderPrecheck`, opt-in).** One refused line fails the
+importer's whole file. With the switch on, a NEW order is checked against the
+company database before it gets a number — the document code (translated
+through `DocumentsDefV6`), the account, every item — and what Hashavshevet
+would refuse is a `400 VALIDATION_ERROR` naming the field. Repeats are never
+checked; a database that cannot be read lets the order through.
 
 ---
 
@@ -582,6 +655,7 @@ Every `ProcessOrder` call emits structured log lines:
 [INFO]  processing order orderNumber=1000295 historyId=HID-001 userExtId=CUST001
 [OK]    order complete orderNumber=1000295 files=[..., ...]
 [INFO]  has.exe exit=0 durationMs=312 output="" orderNumber=1000295
+[INFO]  import check orderNumber=1000295 result=imported logStatus="Success" profile="digi.bat" stockIds=[1786355] matchedBy="docNumber" detail=""
 ```
 
 Failures:

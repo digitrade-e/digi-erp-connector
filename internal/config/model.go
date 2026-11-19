@@ -163,6 +163,34 @@ type Config struct {
 	// The BAT is executed from its own directory so relative paths inside it
 	// (e.g. -p"digi.bat") resolve correctly.
 	HasBatFile string `yaml:"hasBatFile"`
+	// HasImportTimeoutSeconds caps one run of the order importer (hasBatFile
+	// or hasExePath): when it passes, the importer's whole process tree is
+	// killed (cmd.exe and has.exe) and the next order can go. 0 (the default)
+	// = no cap, today's behaviour: a run that never ends — a message box under
+	// the service account — then blocks every later order and receipt. When
+	// set, 30–3600. Killing has.exe can interrupt an import mid-way: pick a
+	// value well above the box's slowest run and confirm the order in
+	// Hashavshevet (the order status's import check) before resending it.
+	// research/reverse-engineering/hasavshevet-importer.md P5.
+	HasImportTimeoutSeconds int `yaml:"hasImportTimeoutSeconds,omitempty"`
+	// HasMoveRefusedOrders (opt-in, P3): when the order importer refused the
+	// order (its import check is failed), move the IMOVEIN.doc it left in
+	// sendOrderDir to sendOrderDir\refused\IMOVEIN_<n>.doc, so no later run of
+	// the Masofon profile imports it again behind the connector's back (a
+	// refused file is retried by every run). Needs an order importer
+	// (hasBatFile or hasExePath); refused with sendOrderPickupDir. Whether a
+	// refused order may be retried by the ERP is the tenant's decision: off
+	// by default.
+	HasMoveRefusedOrders bool `yaml:"hasMoveRefusedOrders,omitempty"`
+	// HasOrderPrecheck (opt-in, P4): before a new order gets a number, check
+	// in the company database what Hashavshevet's importer would refuse — the
+	// account (when the order carries none), every item key, and the line-4
+	// document code (DocumentsDefV6 → DocumentsDef) — and answer 400
+	// VALIDATION_ERROR instead of a refused import later. A repeat of a known
+	// historyId is never checked. A database that cannot be read lets the order
+	// through (logged). Needs db.database. Refusing orders up front is the
+	// tenant's decision: off by default.
+	HasOrderPrecheck bool `yaml:"hasOrderPrecheck,omitempty"`
 	// SendOrderPickupDir switches orders to model (a) (DIG-1297): each order is
 	// published as ONE file, IMOVEIN_<n>.doc (TMP_IMOVEIN_<n>.doc for a
 	// return), into this folder, where the ERP's own scheduler imports it — on
@@ -246,6 +274,20 @@ func (c Config) OrderFormat() string {
 	return OrderFormatOfficial
 }
 
+// Bounds of hasImportTimeoutSeconds when it is set (0 = no cap).
+const (
+	MinImportTimeoutSeconds = 30
+	MaxImportTimeoutSeconds = 3600
+)
+
+// OrderImportTimeout is the cap on one run of the order importer; 0 = none.
+func (c Config) OrderImportTimeout() time.Duration {
+	if c.HasImportTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.HasImportTimeoutSeconds) * time.Second
+}
+
 // OrdersPickup reports whether orders are written for a scheduler to pick up
 // (model (a)): orders configured and a sendOrderPickupDir.
 func (c Config) OrdersPickup() bool {
@@ -282,6 +324,21 @@ func (c Config) validateOrderKeys() error {
 	default:
 		return fmt.Errorf("sendOrderFormat %q is not a layout this connector writes: use %q or %q",
 			strings.TrimSpace(c.SendOrderFormat), OrderFormatOfficial, OrderFormatLegacy)
+	}
+	if t := c.HasImportTimeoutSeconds; t != 0 && (t < MinImportTimeoutSeconds || t > MaxImportTimeoutSeconds) {
+		return fmt.Errorf("hasImportTimeoutSeconds %d is out of range: 0 (no cap) or %d-%d",
+			t, MinImportTimeoutSeconds, MaxImportTimeoutSeconds)
+	}
+	if c.HasMoveRefusedOrders {
+		if strings.TrimSpace(c.SendOrderPickupDir) != "" {
+			return errors.New("hasMoveRefusedOrders works with the connector's own importer (model (b)); it is refused with sendOrderPickupDir")
+		}
+		if strings.TrimSpace(c.HasBatFile) == "" && strings.TrimSpace(c.HasExePath) == "" {
+			return errors.New("hasMoveRefusedOrders needs an order importer: hasBatFile or hasExePath")
+		}
+	}
+	if c.HasOrderPrecheck && strings.TrimSpace(c.DB.Database) == "" {
+		return errors.New("hasOrderPrecheck needs the company database (db.database) to check orders against")
 	}
 	pickup := strings.TrimSpace(c.SendOrderPickupDir)
 	if pickup == "" {
