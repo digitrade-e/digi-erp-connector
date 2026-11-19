@@ -442,3 +442,76 @@ func TestLoadImportCheck_DerivesTheOutcome(t *testing.T) {
 		t.Fatalf("loaded = %+v; want outcome retry derived", c)
 	}
 }
+
+// Partial import (Masofon2's "יבוא (חלקי) על אף שגיאות", [general]
+// ImportWithErrors=YES): the good lines are imported, the refused dropped.
+
+func TestPartialImport_Profile(t *testing.T) {
+	on, err := ParseMasofonINI(win1255(t, strings.Replace(masofonFixture, "[general]\n", "[general]\nImportWithErrors=yes\n", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !on.PartialImportOn() {
+		t.Fatalf("ImportWithErrors=%q not read as on", on.ImportWithErrors)
+	}
+	got := map[string]bool{}
+	for _, f := range CheckMasofonProfile(on, `C:\Hash7\digi.bat`, `c:\digi\orders\IMOVEIN.doc`, `c:\digi\orders\IMOVEIN.prm`) {
+		got[f.Code] = f.Defect
+	}
+	if d, ok := got[MasofonPartialImportOn]; !ok || !d {
+		t.Errorf("findings %v; want the defect %s", got, MasofonPartialImportOn)
+	}
+	off, _ := ParseMasofonINI(win1255(t, masofonFixture))
+	for _, f := range CheckMasofonProfile(off, `C:\Hash7\digi.bat`, `c:\digi\orders\IMOVEIN.doc`, `c:\digi\orders\IMOVEIN.prm`) {
+		if f.Code == MasofonPartialImportOn {
+			t.Errorf("partial import reported with the key absent")
+		}
+	}
+}
+
+func TestPartialImport_RunLogSection(t *testing.T) {
+	const f = `c:\digi\orders\imovein.doc`
+	body := runBlock("digi.bat", "company_db -6 -"+f, refusedSection(f, itemRefusal, partialImportLine))
+	rl := parseRunLog(body).forFile("x", f, false)
+	if rl == nil || rl.Section != RunLogPartial || len(rl.Refusals) != 1 || rl.Refusals[0].Code != "Stock.002" {
+		t.Fatalf("partial section = %+v; want partial with the dropped line", rl)
+	}
+	whole := parseRunLog("[box_1.digi.bat] --->c\n[19/11/26 11:00:03] "+partialImportLine+"\n").forFile("x", f, false)
+	if c := (ImportCheck{Result: OrderImportNotLogged, RunLog: whole}); importOutcome(&c) != OrderOutcomePartial {
+		t.Errorf("a whole log saying partial: outcome %q", importOutcome(&c))
+	}
+}
+
+// ImportLog logs a partial run "partial": the document is found like a
+// success and reported partial.
+func TestPartialImport_ImportLog(t *testing.T) {
+	ours := `c:\digi\orders\imovein.doc`
+	log := &fakeImportLog{markID: 10,
+		runs:  []importLogRun{masofonRun(11, "digi.bat", ours, "partial", 700, 700)},
+		stock: []fakeStock{{id: 700, documentID: 11, status: 1, docNumber: 42}}}
+	c, err := checkImport(context.Background(), log, 10, ours, `C:\Hash7\digi.bat`, 42, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Result != OrderImportPartial || len(c.StockIDs) != 1 || c.StockIDs[0] != 700 || importOutcome(&c) != OrderOutcomePartial {
+		t.Fatalf("check = %+v; want partial with the document found", c)
+	}
+	log.stock = nil
+	if c, _ := checkImport(context.Background(), log, 10, ours, "", 42, 42); c.Result != OrderImportPartial {
+		t.Errorf("partial without the document = %+v; want still partial", c)
+	}
+}
+
+// End to end: a partial section is reported partial and never moved aside
+// (the good lines are in the books; a resend would duplicate them).
+func TestSender_PartialImportIsReportedAndNotMoved(t *testing.T) {
+	c, dir := runOrder(t, true, "err", func(f string) string {
+		return runBlock("digi.bat", "company_db -6 -"+f, refusedSection(f, itemRefusal, partialImportLine))
+	})
+	if c.Outcome != OrderOutcomePartial || c.Result != OrderImportPartial || c.MovedTo != "" || len(c.RunLog.Refusals) != 1 {
+		t.Fatalf("import check = %+v run log %+v; want partial, the dropped line listed, nothing moved", c, c.RunLog)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "IMOVEIN.doc")); err != nil {
+		t.Errorf("the file was moved: %v", err)
+	}
+}

@@ -457,8 +457,11 @@ func (s *Sender) attachRunLog(check *ImportCheck, bat, ourFile string, start tim
 	}
 	refusedSection := rl.Section == RunLogRefused || rl.Section == RunLogDuplicate || rl.Section == RunLogRetry
 	switch {
-	case check.Result == OrderImportImported || check.Result == OrderImportFailed:
+	case check.Result == OrderImportImported || check.Result == OrderImportFailed || check.Result == OrderImportPartial:
 		// ImportLog already decided; the log is detail.
+	case rl.Section == RunLogPartial:
+		check.Result = OrderImportPartial
+		check.Detail = joinDetail(check.Detail, "the Masofon run imported this order's file partially: the refused lines (runLog.refusals) were dropped")
 	case rl.Section == RunLogNoInput || (rl.Section == "" && rl.NoInput):
 		check.Result = OrderImportNotLogged
 		check.Detail = joinDetail(check.Detail, "the Masofon run found no input file: the profile's data file is not this connector's file (discover: masofon_data_file_mismatch)")

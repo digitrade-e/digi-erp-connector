@@ -46,7 +46,14 @@ const (
 	RunLogDuplicate = "duplicate" // only Stock.063: the document number was imported before
 	RunLogRetry     = "retry"     // refused for a reason that passes (RunLog.Transient)
 	RunLogNoInput   = "no_input"  // the command that reads our file found no file
+	// RunLogPartial: "חלק מהרשומות לא נקלט בהצלחה" — Masofon2's "partial import
+	// despite errors" ([general] ImportWithErrors=YES) imported the good lines
+	// and dropped the refused ones (the section's refusals).
+	RunLogPartial = "partial"
 )
+
+// partialImportLine is the line MLAYIN.HDS ends a partial import with.
+const partialImportLine = "חלק מהרשומות לא נקלט בהצלחה"
 
 // RunLogRefusal is one refusal line: the value Hashavshevet refused, its
 // message (with the Stock.NNN code when it has one) and the file's row.
@@ -126,6 +133,7 @@ type runLogSection struct {
 	pattern   bool // a "File Not Found" pattern, not a file read
 	noInput   bool
 	imported  bool
+	partial   bool // ended partialImportLine: the good lines were imported
 	transient bool
 	summary   string
 	errors    []string
@@ -196,6 +204,9 @@ func (s *runLogSection) add(line string) {
 	case strings.Contains(line, "הסתיימה בהצלחה"):
 		s.imported = true
 		s.summary = cutRunes(line, maxRunLogLineRune)
+	case strings.Contains(line, partialImportLine):
+		s.partial = true
+		s.summary = cutRunes(line, maxRunLogLineRune)
 	case strings.Contains(line, "קליטת") || strings.Contains(line, "נקלט"):
 		s.summary = cutRunes(line, maxRunLogLineRune)
 	case strings.Contains(line, "ERROR"):
@@ -240,6 +251,8 @@ func (s *runLogSection) outcome() string {
 	switch {
 	case s.transient:
 		return RunLogRetry
+	case s.partial:
+		return RunLogPartial // the refusals are the dropped lines
 	case len(s.refusals) > 0:
 		for _, r := range s.refusals {
 			if !isDuplicateCode(r.Code) {

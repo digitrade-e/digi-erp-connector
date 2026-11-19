@@ -68,7 +68,9 @@ type SendOrderStatusResponse struct {
 // OrderImportCheck is the import confirmation of one order. result is one of
 // imported, logged_no_document, failed, not_logged, unchecked.
 type OrderImportCheck struct {
-	// Outcome is the one verdict to act on: imported | duplicate (already in
+	// Outcome is the one verdict to act on: imported | partial (imported
+	// WITHOUT the refused lines in runLog.refusals: Masofon2's partial import
+	// is on; never resend the whole order) | duplicate (already in
 	// Hashavshevet, do not resend) | refused (runLog.refusals) | retry (refused
 	// for a passing reason, not imported) | not_run (the profile reads another
 	// file) | unknown. Absent on checks stored by an older connector.
@@ -99,8 +101,8 @@ type OrderImportRunLog struct {
 	// unfinished <bat>.err.
 	Live bool `json:"live,omitempty"`
 	// Section is what the log says about this order's own file: imported |
-	// refused | duplicate | retry | no_input; absent when the log has no
-	// file sections and was read whole.
+	// partial | refused | duplicate | retry | no_input; absent when the log
+	// has no file sections and was read whole.
 	Section  string                  `json:"section,omitempty"`
 	NoInput  bool                    `json:"noInput,omitempty"`
 	Summary  string                  `json:"summary,omitempty"`

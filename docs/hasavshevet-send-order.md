@@ -611,6 +611,7 @@ answered as `import` by `GET /api/sendOrder/{jobId}`, also after a restart:
 |---|---|
 | `imported` | A run for this file ended Success and created the document: `stockIds`, `documentId` (the company's own type — the code sent in line 4 is translated per company), `stockStatus` (1 issued, 0 not issued), `matchedBy` (`docNumber` / `reference`) |
 | `logged_no_document` | Success, but no document in the run's range carries the number |
+| `partial` | The run was logged `partial`: Masofon2's general setting "×××× (×××§×) ×¢× ××£ ×©×××××ª" (`[general] ImportWithErrors=YES`) imported the good lines and dropped the refused ones. The document is looked up like a success (`stockIds`) but lacks the refused lines |
 | `failed` | A run for this file was logged with another status (`logStatus`) |
 | `not_logged` | No run for this file was logged after the mark. A refused Masofon run is almost never logged — the run's own log says why (`runLog`, below); also the sign of a Masofon profile whose data file is not the connector's |
 | `unchecked` | No database, no `ImportLog`, or a read failed (`detail`; the driver's text goes to `server.log` only) |
@@ -627,6 +628,7 @@ order's own section of the run's log (below), in this order:
 | `outcome` | When | What to do |
 |---|---|---|
 | `imported` | `ImportLog` Success (with or without the document found), or the order's section says imported | done |
+| `partial` | `ImportLog` logged the run `partial`, or the order's section ends "×××§ ×××¨×©××××ª ×× × ×§×× ×××¦×××" â partial import is on (`discover`: `masofon_partial_import_on`) | the order is in Hashavshevet **without** the lines in `runLog.refusals`: send those lines as a new order once fixed; never resend the whole order |
 | `duplicate` | the section's only refusals are `Stock.063` "this document number was already imported" | already in Hashavshevet: do not send again |
 | `refused` | the section has refusal lines, or `ImportLog` logged the file Failed | show `runLog.refusals` (`code`, `message`, `row`, `value`); fix and send again |
 | `retry` | refused for a reason that passes: another station issuing (`Inv` semaphore), a second run of the BAT ("double click"), a reduce, a deadlock | not imported by this run; the file stays (never moved) |

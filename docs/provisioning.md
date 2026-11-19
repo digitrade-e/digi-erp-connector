@@ -120,6 +120,7 @@ against what the connector writes (`<sendOrderDir>\IMOVEIN.doc` / `IMOVEIN.prm`)
 | `masofon_import_type` | defect / note | not type 6 (stock documents); type 118 (drafts, not issued) is a note |
 | `masofon_shared_input` | defect | another profile reads the connector's file or folder: the two race, and the importer writes temp files into that folder |
 | `masofon_dash_in_path` | defect | the file or PRM path holds `-`: has.exe splits the command on `-` |
+| `masofon_partial_import_on` | defect | `[general] ImportWithErrors=YES` (Masofon2's general checkbox "×××× (×××§×) ×¢× ××£ ×©×××××ª", for every profile): an order with a refused line is imported without that line â the tenant's choice, reported `partial` by the order check |
 | `masofon_duplicate_guard_off` | note | `DISQUALIFICATIONOFDUPLICATION` is not `YES`: Hashavshevet does not refuse a resend (the tenant's choice) |
 | `masofon_ini_unreadable` | note | `masofon.ini` was not found or not read |
 | `masofon_run_log_dir_unreadable` | note | no run-log folder (no `ErrDataPath`, no `hasRunLogDir`) or the service cannot read it: an order's import check cannot say why it was refused |
