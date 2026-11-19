@@ -143,7 +143,10 @@ func (l *Link) command(st net.Conn) {
 	state, _ := l.cfg.Store.LoadState()
 	ans := linkproto.Answer{Box: state.Box, Started: l.cfg.Now().Unix()}
 	var stdout []byte
-	env, keyID, digest, refusal := l.verify(state, envFrame)
+	env, keyID, cert, digest, refusal := l.verify(state, envFrame)
+	if cert != nil {
+		env.By = "installer " + cert.Name // the certificate's name, which a team key signed; never the envelope's own by
+	}
 	if digest != "" {
 		ans.Nonce, ans.Env = env.Nonce, digest
 	}
@@ -157,6 +160,9 @@ func (l *Link) command(st net.Conn) {
 		_ = st.SetDeadline(time.Now().Add(CommandDeadline + time.Minute))
 		refusal = l.checkInput(env, stdin)
 		if refusal == "" {
+			refusal = l.checkInstaller(cert, env, stdin)
+		}
+		if refusal == "" {
 			refusal = l.checkUpgrade(env)
 		}
 		if refusal == "" {
@@ -168,9 +174,24 @@ func (l *Link) command(st net.Conn) {
 				stdin = plain
 			}
 		}
+		// An installer's apply marks the first setup done BEFORE it runs, and only a failed one takes the mark back
+		// (plan 090 review): a mark that cannot be written stops the apply, and one that cannot be taken back leaves the
+		// box closed to installers, never open.
+		installerApply := cert != nil && env.Command == "apply"
+		if refusal == "" && installerApply {
+			if err := l.cfg.Store.MarkInstallerSetupDone(); err != nil {
+				l.cfg.Log.Error("link: recording the installer's first setup before it runs", err)
+				refusal = "state_unreadable"
+			}
+		}
 		if refusal == "" {
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q by %q (key %s)", env.Command, env.ChangeSet, env.By, keyID))
-			stdout, ans.Exit = l.run(env, stdin)
+			stdout, ans.Exit = l.run(env, stdin, cert != nil)
+			if installerApply && ans.Exit != 0 {
+				if err := l.cfg.Store.ReopenInstallerSetup(); err != nil {
+					l.cfg.Log.Error("link: the installer's first setup failed, and the box stays closed to installers", err)
+				}
+			}
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q ended, exit %d, %d bytes", env.Command, env.ChangeSet, ans.Exit, len(stdout)))
 		}
 	}
@@ -197,36 +218,56 @@ func (l *Link) command(st net.Conn) {
 // verify checks the envelope alone, in order, and spends its nonce. digest is
 // set once the signature verified: refusals from there on are about this
 // envelope. Nothing from an unverified envelope is returned or logged.
-func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, keyID, digest, refusal string) {
+//
+// An envelope carrying a certificate is an installer's (plan 090 D1): the
+// certificate must verify with the compiled-in team keys, and the envelope with
+// the certified key. cert is then set, keyID is the installer's id, and the
+// caller applies checkInstaller. Without one it is a team key's, as before.
+func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, keyID string, cert *linkproto.InstallerCert, digest, refusal string) {
 	var s linkproto.Signed
 	if err := json.Unmarshal(envFrame, &s); err != nil {
-		return env, "", "", linkproto.CodeMalformed
+		return env, "", nil, "", linkproto.CodeMalformed
 	}
 	if state.Box == "" {
-		return env, "", "", linkproto.CodeBoxUnknown
+		return env, "", nil, "", linkproto.CodeBoxUnknown
 	}
 	minEpoch, err := l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
 	if err != nil {
-		return env, "", "", "state_unreadable"
+		return env, "", nil, "", "state_unreadable"
 	}
-	env, key, err := l.cfg.Team.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+	var key linkproto.TeamKey
+	if s.Cert != nil {
+		var c linkproto.InstallerCert
+		env, c, key, err = l.cfg.Team.VerifyInstallerEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+		if err == nil {
+			cert, keyID = &c, c.ID
+		}
+	} else {
+		env, key, err = l.cfg.Team.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+		keyID = key.ID
+	}
 	if err != nil {
-		return linkproto.Envelope{}, "", "", refusalCode(err)
+		return linkproto.Envelope{}, "", nil, "", refusalCode(err)
 	}
 	digest = linkproto.EnvelopeDigest(s)
 	if err := l.cfg.Store.UseNonce(env.Nonce, time.Unix(env.ExpiresAt, 0), l.cfg.Now()); err != nil {
-		return env, key.ID, digest, refusalCode(err) // replayed_nonce: this envelope reached the box before
+		return env, keyID, cert, digest, refusalCode(err) // replayed_nonce: this envelope reached the box before
 	}
-	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil {
+	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil { // an installer's: its certifier's
 		l.cfg.Log.Error("link: recording the key epoch", err)
 	}
+	if cert != nil {
+		if r := l.installerBinding(cert); r != "" {
+			return env, keyID, cert, digest, r // before admin_off and the rest: nothing about another's box
+		}
+	}
 	if !state.AdminOn() {
-		return env, key.ID, digest, "admin_off" // the client's off switch (link.yaml admin: false)
+		return env, keyID, cert, digest, "admin_off" // the client's off switch (link.yaml admin: false)
 	}
 	if state.UnknownKeys() {
-		return env, key.ID, digest, "state_unreadable" // link.yaml names a key we do not know: perhaps a misspelt off switch
+		return env, keyID, cert, digest, "state_unreadable" // link.yaml names a key we do not know: perhaps a misspelt off switch
 	}
-	return env, key.ID, digest, ""
+	return env, keyID, cert, digest, ""
 }
 
 // checkInput is what needs the stdin: its digest, then the command's argv.
@@ -280,11 +321,14 @@ func (l *Link) argv(env linkproto.Envelope) ([]string, error) {
 	return Argv(env)
 }
 
-func (l *Link) run(env linkproto.Envelope, stdin []byte) ([]byte, int) {
+func (l *Link) run(env linkproto.Envelope, stdin []byte, installer bool) ([]byte, int) {
 	if self, ok := selfCommands[env.Command]; ok {
 		return self(l, env, stdin)
 	}
 	argv, _ := Argv(env) // checked already
+	if installer && installerWrites[env.Command] {
+		argv = append(argv, "--installer") // provision's installer rules (plan 090 D3); never from the envelope
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), CommandDeadline)
 	defer cancel()
 	out, exit, err := l.cfg.Runner.Run(ctx, argv, stdin, linkproto.MaxPayload)

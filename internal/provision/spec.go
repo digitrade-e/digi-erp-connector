@@ -353,8 +353,19 @@ func (s Spec) validateDB() *Refusal {
 	if s.DB.Mode != "" {
 		return validateDBMode(s.DB)
 	}
+	if s.DB.adminless() {
+		if s.DB.RotateLogin {
+			return refuse(CodeSpecInvalid, "send db.user and db.password to rotate the login: a new password needs an administrator",
+				"db.rotateLogin is set, but no administrator came")
+		}
+		return validateDBSpec(s.DB, false, false)
+	}
 	return validateDBSpec(s.DB, true, true)
 }
+
+// adminless is least privilege with no administrator (plan 090 D5): the connector keeps the login this box already
+// knows (sql-setup made it), and nothing needs DDL. Without such a login apply refuses db_admin_required.
+func (d DBSpec) adminless() bool { return d.LeastPrivilege && d.User == "" && d.Password == "" }
 
 // validateDBSpec checks a database target and its credential. needUser and
 // needPassword: apply always has both; the db command keeps a login the box

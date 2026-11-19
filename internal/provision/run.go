@@ -35,7 +35,7 @@ const (
 // Usage is the command line, for a human.
 const Usage = `usage:
   digi-erp-connector-provision discover [--spec -]      read the box (stdin: optional {"db":{...}} to fingerprint the named database)
-  digi-erp-connector-provision apply [--check] --spec - make the connector match the spec on stdin; --check stops before the first write
+  digi-erp-connector-provision apply [--check] --spec - make the connector match the spec on stdin; --check stops before the first write (db.leastPrivilege with no db.user/password: the login sql-setup made)
   digi-erp-connector-provision options [--check] --spec - set config.yaml options only (image folders, query limits, ...); no credential on stdin
   digi-erp-connector-provision auth [--check] --spec -    set the API credential only (and, with rotateSecret, a new signing secret); no DB credential
   digi-erp-connector-provision daemon <restart|stop|start> [--assume-idle]   control the service (the order queue is asked first; start/restart end with the proof)
@@ -53,6 +53,7 @@ const Usage = `usage:
   digi-erp-connector-provision restore <changeSet> [--assume-idle] [--accept-unreadable=N]
   digi-erp-connector-provision state [--spec -]         read the box's state: services, order queue, counters, indexes, TLS, link.yaml, disk (read-only; stdin {} or empty)
   digi-erp-connector-provision logs --spec -            read a log's tail, redacted (stdin: {"source":"server|link|ui|events-daemon|events-link",...})
+  digi-erp-connector-provision sql-setup                 at this server's console, as an administrator: the client's IT types an SQL administrator once; it creates the connector's own login and the Hashavshevet procedures, and keeps nothing of the administrator
   digi-erp-connector-provision version
 Secrets travel on stdin only. The output is one JSON object; exit 0 ok, 1 refused, 2 usage.`
 
@@ -88,6 +89,11 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 			return []byte(Usage + "\n"), ExitUsage
 		}
 		result = map[string]string{"version": buildinfo.Version}
+	case "sql-setup": // plan 090 D5: a person at this machine's console, never over the link or WinRM
+		if len(rest) != 0 {
+			return []byte(Usage + "\n"), ExitUsage
+		}
+		return sqlSetupConsole(ctx, env)
 	// plan 086 C4: read-only diagnostics (logs.go, state.go)
 	case "logs":
 		var in LogsInput
@@ -130,6 +136,11 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		}
 		result, err = Discover(ctx, env, in)
 	case "apply":
+		// --installer comes last, from the link alone, for a command an installer signed (plan 090 D3).
+		installer := len(rest) > 0 && rest[len(rest)-1] == "--installer"
+		if installer {
+			rest = rest[:len(rest)-1]
+		}
 		check := len(rest) > 0 && rest[0] == "--check"
 		if check {
 			rest = rest[1:]
@@ -143,9 +154,12 @@ func Run(ctx context.Context, env Env, args []string, stdin io.Reader) (out []by
 		}
 		secrets = append(secrets, spec.secrets()...)
 		var res *ApplyResult
-		if check {
+		switch {
+		case installer:
+			res, err = ApplyAsInstaller(ctx, env, spec, check)
+		case check:
 			res, err = ApplyCheck(ctx, env, spec)
-		} else {
+		default:
 			res, err = Apply(ctx, env, spec)
 		}
 		result = res

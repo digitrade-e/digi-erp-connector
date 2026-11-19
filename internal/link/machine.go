@@ -33,7 +33,7 @@ type Machine struct {
 	LoadDaemon func() (config.Config, error)
 	Build      string
 	Log        Logger
-	HostFacts  func() (host, domain string, role int)
+	HostFacts  func() (host, domain string, role int, roleKnown bool)
 }
 
 // Protect gives the data directory the connector's protected DACL (SYSTEM and Administrators only) before the link
@@ -93,16 +93,33 @@ func (m Machine) Config() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	host, domain, role := "", "", 0
+	host, domain, role, roleKnown := "", "", 0, false
 	if m.HostFacts != nil {
-		host, domain, role = m.HostFacts()
+		host, domain, role, roleKnown = m.HostFacts()
 	}
 	return Config{
-		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
+		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain,
+		DomainRole: role, DomainRoleKnown: roleKnown, APICredentialSet: m.apiCredentialSet,
 		Daemon: watch, Proxy: proxy, Upgrade: UpgradeConfig{DataDir: m.DataDir, Protect: m.Protect},
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,
 	}, nil
+}
+
+// apiCredentialSet reads config.yaml for an API credential (plan 090 D3). No file is none; a file that cannot be read
+// or parsed counts as one, so an installer is refused rather than let in on a doubt.
+func (m Machine) apiCredentialSet() (bool, error) {
+	if m.LoadDaemon == nil {
+		return true, errors.New("link: config.yaml cannot be read here")
+	}
+	cfg, err := m.LoadDaemon()
+	if errors.Is(err, config.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	return strings.TrimSpace(cfg.Auth.Username) != "" || cfg.Auth.Password != "", nil
 }
 
 // Pair stores a pairing code for the service to redeem and returns the

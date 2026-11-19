@@ -6,10 +6,10 @@ import "os"
 
 func openEventSink(string) eventSink { return nil }
 
-// MachineFacts off Windows: the host name only.
-func MachineFacts() (string, string, int) {
-	host, _ := os.Hostname()
-	return host, "", 0
+// MachineFacts off Windows: the host name only, and no role (installers are refused: plan 090 D3).
+func MachineFacts() (host, domain string, role int, roleKnown bool) {
+	host, _ = os.Hostname()
+	return host, "", 0, false
 }
 
 // PlatformPreflight adds nothing off Windows: no elevation or OS check.

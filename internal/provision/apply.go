@@ -132,11 +132,58 @@ func ApplyCheck(ctx context.Context, env Env, s Spec) (*ApplyResult, error) {
 }
 
 func apply(ctx context.Context, env Env, s Spec, check bool) (*ApplyResult, error) {
+	return applyAs(ctx, env, s, check, false)
+}
+
+func applyAs(ctx context.Context, env Env, s Spec, check, installer bool) (*ApplyResult, error) {
 	res := &ApplyResult{ChangeSet: s.ChangeSet, Steps: []Step{}}
+	if !installer && s.DB.Mode == "" && s.DB.adminless() && strings.TrimSpace(s.DB.Host) == "" {
+		// plan 090 D5/D7: the team's apply on a box sql-setup prepared may name no server at all — the record's server,
+		// port, database, login and encryption, as an installer's first setup takes them (state shows no port and no
+		// encryption, so the team could not name them right). No record: an administrator is needed.
+		rec, ok, err := ReadSQLSetup(env.Sys.DataDir())
+		switch {
+		case err != nil:
+			return res, refuse(CodeDBAdminRequired, "have the client's IT run sql-setup on this server again", "%v", err)
+		case !ok:
+			return res, refuse(CodeDBAdminRequired, "have the client's IT run sql-setup on this server first, or name the server with an administrator",
+				"the spec names no server and sql-setup has not been run on this server")
+		}
+		d := s.DB // what a team apply that names no server may name besides: the database and the login, as recorded
+		if d.Port != 0 || d.Encrypt != nil || d.TrustServerCertificate != nil || d.AllowSa || d.RotateLogin {
+			return res, refuse(CodeSpecInvalid, "send only db.leastPrivilege (and db.database, db.login as sql-setup recorded them), or name the server",
+				"a db that names no server takes sql-setup's record: it may not set a port, encryption, sa or a rotation")
+		}
+		if s.ERP != "" && s.ERP != rec.ERP {
+			return res, refuse(CodeSpecInvalid, "send the ERP sql-setup set up ("+rec.ERP+"), or leave it out", "erp %q is not the one sql-setup set up", s.ERP)
+		}
+		if r := s.fillFromRecord(rec, CodeSpecInvalid); r != nil {
+			return res, r
+		}
+		// A box in service that logs in as the record's login with other settings (moved by the db command, the GUI or
+		// an apply that named its server) keeps them: the record is no truth over config.yaml, as sql-setup's own
+		// sql_setup_in_service says. The team names the server then. (Read before the run lock: a guard against a stale
+		// record, not a lock-step check; apply's own refusals still run under the lock.)
+		if cur, inService, err := connectorUses(env.Sys.DataDir(), rec.Login); err != nil {
+			return res, err
+		} else if inService && (!strings.EqualFold(cur.DB.Host, s.DB.Host) || cur.DB.Port != s.DB.Port ||
+			!strings.EqualFold(cur.DB.Database, s.DB.Database) || cur.DB.Encrypt != *s.DB.Encrypt ||
+			cur.DB.TrustServerCertificate != *s.DB.TrustServerCertificate) {
+			return res, refuse(CodeSpecInvalid, "name the server the connector uses ("+serverAddress(cur.DB.Host, cur.DB.Port)+", "+cur.DB.Database+"), with its encryption",
+				"the connector logs in as %s with other settings than sql-setup's record: the record would move it", rec.Login)
+		}
+	}
+	if s.DB.Mode == "" && s.DB.adminless() && s.DB.Login == "" {
+		// No administrator and no login named: the login sql-setup made, not DefaultLogin (plan 090 review).
+		if rec, ok, _ := ReadSQLSetup(env.Sys.DataDir()); ok && strings.EqualFold(rec.Host, strings.TrimSpace(s.DB.Host)) &&
+			rec.Port == s.DB.Port && strings.EqualFold(rec.Database, strings.TrimSpace(s.DB.Database)) {
+			s.DB.Login = rec.Login // only for the server and database sql-setup set up
+		}
+	}
 	if r := s.ValidateFor(LinkMode(env.Sys.DataDir()), SystemDirs()); r != nil {
 		return res, r
 	}
-	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check}
+	a := &applier{env: env, s: s, dir: env.Sys.DataDir(), res: res, check: check, installer: installer}
 	unlock, err := lockRuns(a.dir)
 	if err != nil {
 		return res, err
@@ -177,6 +224,9 @@ type applier struct {
 	dir   string
 	res   *ApplyResult
 	check bool // apply --check: stop before the first write
+	// installer: an installer's first setup (ApplyAsInstaller, plan 090 D3): refused, under the run lock, on a box
+	// whose config.yaml holds an API credential.
+	installer bool
 	// folderChecked are the folders a command checked as one it adds, moves
 	// or newly makes typed or bound (plan 087 review R1a), by folderKey: the
 	// others are only reported (reportWritableFolders).
@@ -231,6 +281,10 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.readCurrent(); err != nil {
 		return err
 	}
+	if a.installer && (strings.TrimSpace(a.cur.Auth.Username) != "" || a.cur.Auth.Password != "") {
+		return refuse(CodeInstallerConfigured, "ask the team: the box is set up, and from now on it is theirs",
+			"config.yaml holds an API credential: an installer sets up a fresh box only")
+	}
 	dbUser := strings.TrimSpace(a.s.DB.User)
 	if a.s.DB.LeastPrivilege {
 		dbUser = a.s.DB.login()
@@ -262,10 +316,18 @@ func (a *applier) run(ctx context.Context) error {
 	if err := a.idle(ctx, "before anything is written"); err != nil {
 		return err
 	}
-	var admin Database // nil on a box without a database: nothing is opened
-	if a.s.DB.None() {
+	var admin Database // nil on a box without a database, and with no administrator: nothing is opened as one
+	switch {
+	case a.s.DB.None():
 		a.loginPlan = loginNone
-	} else {
+	case a.s.DB.adminless(): // plan 090 D5: the login sql-setup made, kept; nothing needs DDL
+		if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
+			return r
+		}
+		if err := a.planLogin(ctx, nil); err != nil {
+			return adminRequired(err, a.s.DB.login())
+		}
+	default:
 		if r := checkDBHost(ctx, a.env, a.tgt.DB.Host); r != nil {
 			return r
 		}
@@ -704,7 +766,12 @@ func (a *applier) procedures(ctx context.Context, admin Database) error {
 		return nil
 	}
 	if admin == nil {
-		a.step("procedures", false, "not checked: no administrator was given")
+		detail := "not checked: no administrator was given"
+		if rec, ok, _ := ReadSQLSetup(a.dir); ok && a.s.DB.adminless() && strings.EqualFold(rec.Host, a.tgt.DB.Host) &&
+			rec.Port == a.tgt.DB.Port && strings.EqualFold(rec.Database, a.tgt.DB.Database) && rec.Login == a.s.DB.login() {
+			detail = "not checked: sql-setup set them up (" + rec.At + ")"
+		}
+		a.step("procedures", false, detail)
 		return nil
 	}
 	results, err := admin.EnsureProcedures(ctx)

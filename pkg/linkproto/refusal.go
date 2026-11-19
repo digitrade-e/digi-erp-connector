@@ -31,6 +31,17 @@ const (
 	CodePairExpired    = "pair_code_expired"
 	CodeReplay         = "replayed_nonce"
 	CodeCommandUnknown = "command_unknown"
+
+	// What a box answers an installer's command (plan 090 D3), after its certificate and signature verified.
+	CodeInstallerNotBound    = "installer_not_bound"     // the box was paired by another installer, or by the team
+	CodeInstallerNotAllowed  = "installer_not_allowed"   // a command an installer may not send
+	CodeInstallerInput       = "installer_input_refused" // an installer's command carries an input
+	CodeInstallerDC          = "installer_dc"            // the box is a domain controller: the team sets it up
+	CodeInstallerRoleUnknown = "installer_role_unknown"  // the box could not read its domain role: treated as a DC
+
+	// What a relay answers a box redeeming an installer's code it will not take (plan 090); the code stays unspent.
+	CodeInstallerBuildTooOld = "installer_build_too_old" // this build is older than the relay's installer minimum
+	CodeInstallerRevoked     = "installer_revoked"       // the installer who made the code was revoked
 )
 
 func refuse(code string) error { return &Refusal{Code: code} }
