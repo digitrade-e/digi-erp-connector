@@ -149,8 +149,28 @@ func applyAs(ctx context.Context, env Env, s Spec, check, installer bool) (*Appl
 			return res, refuse(CodeDBAdminRequired, "have the client's IT run sql-setup on this server first, or name the server with an administrator",
 				"the spec names no server and sql-setup has not been run on this server")
 		}
+		d := s.DB // what a team apply that names no server may name besides: the database and the login, as recorded
+		if d.Port != 0 || d.Encrypt != nil || d.TrustServerCertificate != nil || d.AllowSa || d.RotateLogin {
+			return res, refuse(CodeSpecInvalid, "send only db.leastPrivilege (and db.database, db.login as sql-setup recorded them), or name the server",
+				"a db that names no server takes sql-setup's record: it may not set a port, encryption, sa or a rotation")
+		}
+		if s.ERP != "" && s.ERP != rec.ERP {
+			return res, refuse(CodeSpecInvalid, "send the ERP sql-setup set up ("+rec.ERP+"), or leave it out", "erp %q is not the one sql-setup set up", s.ERP)
+		}
 		if r := s.fillFromRecord(rec, CodeSpecInvalid); r != nil {
 			return res, r
+		}
+		// A box in service that logs in as the record's login with other settings (moved by the db command, the GUI or
+		// an apply that named its server) keeps them: the record is no truth over config.yaml, as sql-setup's own
+		// sql_setup_in_service says. The team names the server then. (Read before the run lock: a guard against a stale
+		// record, not a lock-step check; apply's own refusals still run under the lock.)
+		if cur, inService, err := connectorUses(env.Sys.DataDir(), rec.Login); err != nil {
+			return res, err
+		} else if inService && (!strings.EqualFold(cur.DB.Host, s.DB.Host) || cur.DB.Port != s.DB.Port ||
+			!strings.EqualFold(cur.DB.Database, s.DB.Database) || cur.DB.Encrypt != *s.DB.Encrypt ||
+			cur.DB.TrustServerCertificate != *s.DB.TrustServerCertificate) {
+			return res, refuse(CodeSpecInvalid, "name the server the connector uses ("+serverAddress(cur.DB.Host, cur.DB.Port)+", "+cur.DB.Database+"), with its encryption",
+				"the connector logs in as %s with other settings than sql-setup's record: the record would move it", rec.Login)
 		}
 	}
 	if s.DB.Mode == "" && s.DB.adminless() && s.DB.Login == "" {

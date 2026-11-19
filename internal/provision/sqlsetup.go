@@ -380,7 +380,7 @@ func (s *Spec) fillFromSQLSetup(rec SQLSetupRecord) *Refusal {
 }
 
 // fillFromRecord is fillFromSQLSetup with the refusal's code: an installer's (installer_not_allowed) or the team's
-// apply that names no server (spec_invalid, plan 090 D7). An ERP other than the record's is refused too.
+// apply that names no server (spec_invalid, plan 090 D7; applyAs refuses the other db fields and another ERP first).
 func (s *Spec) fillFromRecord(rec SQLSetupRecord, code string) *Refusal {
 	if s.DB.Database != "" && s.DB.Database != rec.Database {
 		return refuse(code, "send the database sql-setup recorded ("+rec.Database+"), or leave it out",
@@ -389,9 +389,6 @@ func (s *Spec) fillFromRecord(rec SQLSetupRecord, code string) *Refusal {
 	if s.DB.Login != "" && s.DB.Login != rec.Login {
 		return refuse(code, "send the login sql-setup made ("+rec.Login+"), or leave it out",
 			"db.login %q is not the one sql-setup made", s.DB.Login)
-	}
-	if s.ERP != "" && !strings.EqualFold(s.ERP, string(rec.ERP)) {
-		return refuse(code, "send the ERP sql-setup set up ("+string(rec.ERP)+"), or leave it out", "erp %q is not the one sql-setup set up", s.ERP)
 	}
 	s.ERP = rec.ERP
 	enc, trust := rec.Encrypt, rec.TrustServerCertificate

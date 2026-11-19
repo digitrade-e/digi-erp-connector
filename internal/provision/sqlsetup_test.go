@@ -636,9 +636,46 @@ func TestATeamApplyThatNamesNoServerTakesTheRecord(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	s3 := s
-	s3.ERP = "sap"
-	if _, err := Apply(context.Background(), env, s3); refusalCode(err) != CodeSpecInvalid {
-		t.Errorf("another ERP: %v", err)
+	yes := true
+	for name, mut := range map[string]func(*Spec){
+		"another ERP":            func(x *Spec) { x.ERP = "sap" },
+		"the ERP in other cases": func(x *Spec) { x.ERP = "HASAVSHEVET" },
+		"a port":                 func(x *Spec) { x.DB.Port = 1433 },
+		"encryption":             func(x *Spec) { x.DB.Encrypt = &yes },
+		"trust":                  func(x *Spec) { x.DB.TrustServerCertificate = &yes },
+		"allowSa":                func(x *Spec) { x.DB.AllowSa = true },
+		"rotateLogin":            func(x *Spec) { x.DB.RotateLogin = true },
+	} {
+		x := s
+		mut(&x)
+		if _, err := Apply(context.Background(), env, x); refusalCode(err) != CodeSpecInvalid {
+			t.Errorf("%s with no server: %v", name, err)
+		}
+	}
+}
+
+// A box in service that logs in as the record's login with other settings keeps them: a team apply that names no
+// server is refused, never the record written over config.yaml (the second review's MAJOR 1).
+func TestATeamApplyThatNamesNoServerKeepsABoxInService(t *testing.T) {
+	sys, fdb := freshLinkedBox(t)
+	env := testEnv(sys, fdb)
+	if _, err := SQLSetup(context.Background(), env, sqlSetupInput()); err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	inService := installerSpec()
+	inService.ERP = "hasavshevet"
+	inService.DB = DBSpec{Host: `127.0.0.1\WIZSOFT`, Database: "erp_db", LeastPrivilege: true, Login: testBoxLogin, Encrypt: &yes, TrustServerCertificate: &yes}
+	if _, err := Apply(context.Background(), env, inService); err != nil {
+		t.Fatalf("the box goes into service with encryption on: %v", err)
+	}
+	noServer := installerSpec()
+	noServer.ERP = "hasavshevet"
+	noServer.DB = DBSpec{LeastPrivilege: true}
+	if _, err := Apply(context.Background(), env, noServer); refusalCode(err) != CodeSpecInvalid {
+		t.Fatalf("the record over a box in service with other settings: %v", err)
+	}
+	if cfg, _ := readConfig(t, sys.dir); !cfg.DB.Encrypt || !cfg.DB.TrustServerCertificate {
+		t.Fatalf("config.yaml lost its encryption: %+v", cfg.DB)
 	}
 }

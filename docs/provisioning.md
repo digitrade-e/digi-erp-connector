@@ -325,8 +325,12 @@ no password that logs in as that login is `db_admin_required`, with nothing writ
 
 `"db": {"leastPrivilege": true}` with **no `host` either** (plan 090 D7) takes everything from the record: the
 server, its port, the database, the login and its encryption settings, which `state` does not show, so the team could
-not name them right. A `database`, `login` or `erp` that differs from the record is `spec_invalid`, never replaced.
-With no record it is `db_admin_required`. That is how the team sets up a box the client's IT prepared with `sql-setup`
+not name them right. It may name only `database` and `login` besides, as recorded: any other db field (a port,
+encryption, `allowSa`, `rotateLogin`), or a `database`, `login` or `erp` that differs from the record, is
+`spec_invalid`, never dropped or replaced. With no record it is `db_admin_required`. On a box in service that logs in
+as the record's login with other settings (the `db` command, the GUI, or an apply that named its server moved it), it is
+`spec_invalid` too: the record is no truth over `config.yaml`, as `sql-setup`'s own `sql_setup_in_service` says, and the
+team names the server then. That is how the team sets up a box the client's IT prepared with `sql-setup`
 (a domain controller an installer handed over, or a box the team paired) with no administrator and no `secrets push`.
 
 ### An installer's first setup (`apply --installer`)
