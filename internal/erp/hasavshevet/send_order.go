@@ -395,16 +395,22 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 				s.cfg.HasImportTimeoutSeconds, orderNum), nil)
 		}
 
-		check = s.confirmImport(ctx, logReader, mark, markErr, filepath.Join(dir, "IMOVEIN.doc"), bat, orderNum, req.Asmahta2)
+		ourFile := filepath.Join(dir, "IMOVEIN.doc")
+		check = s.confirmImport(ctx, logReader, mark, markErr, ourFile, bat, orderNum, req.Asmahta2)
 		check.TimedOut = timedOut
 		if bat != "" {
-			s.attachRunLog(check, bat, start, orderNum)
+			if timedOut {
+				s.clearStoppedRunMarker(check, bat, start, orderNum)
+			}
+			s.attachRunLog(check, bat, ourFile, start, orderNum)
 		}
-		s.log.Info(fmt.Sprintf("import check orderNumber=%d result=%s logStatus=%q profile=%q stockIds=%v matchedBy=%q detail=%q",
-			orderNum, check.Result, check.LogStatus, check.Profile, check.StockIDs, check.MatchedBy, check.Detail))
-		// A passing refusal (RunLog.Transient) is retried by the profile's
-		// next run: never moved aside.
-		if s.cfg.HasMoveRefusedOrders && check.Result == OrderImportFailed && (check.RunLog == nil || !check.RunLog.Transient) {
+		check.Outcome = importOutcome(check)
+		s.log.Info(fmt.Sprintf("import check orderNumber=%d outcome=%s result=%s logStatus=%q profile=%q stockIds=%v matchedBy=%q detail=%q",
+			orderNum, check.Outcome, check.Result, check.LogStatus, check.Profile, check.StockIDs, check.MatchedBy, check.Detail))
+		// Only a real refusal of the order's own file is moved aside: never
+		// one that passes (retry), a duplicate (already imported) or an
+		// outcome nothing confirms (P14).
+		if s.cfg.HasMoveRefusedOrders && check.Outcome == OrderOutcomeRefused {
 			s.moveRefused(check, dir, orderNum)
 		}
 	}
@@ -415,44 +421,82 @@ func (s *Sender) processOrder(ctx context.Context, req OrderRequest, orderNum in
 	return res, nil
 }
 
-// attachRunLog adds the run's own log (masofon.ini's ErrDataPath,
-// <bat>.ok|err.…LOG) to the check (P3) and lets it decide what the import
-// log could not: a refused run is not always in ImportLog.
-func (s *Sender) attachRunLog(check *ImportCheck, bat string, start time.Time, orderNum int64) {
-	iniDir := filepath.Dir(bat)
-	ini, path, err := ReadMasofonINI(iniDir)
-	if err != nil && strings.TrimSpace(s.cfg.HasExePath) != "" {
-		ini, path, err = ReadMasofonINI(filepath.Dir(s.cfg.HasExePath))
+// attachRunLog adds what the Masofon run logged about the order's own file
+// (P3, P9–P12): the section for ourFile in the run that read it, in
+// hasRunLogDir or masofon.ini's ErrDataPath, plus the system-error lines
+// DataImpExpLogs got during the run. It lets the log decide what ImportLog
+// could not: a refusal is almost never in ImportLog.
+func (s *Sender) attachRunLog(check *ImportCheck, bat, ourFile string, start time.Time, orderNum int64) {
+	dirs := ResolveRunLogDirs(s.cfg)
+	if dirs.LogDir == "" {
+		why := "masofon.ini has no ErrDataPath"
+		if dirs.INIErr != nil {
+			why = fmt.Sprintf("%s not readable (%v)", dirs.INI, dirs.INIErr)
+		}
+		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: %s and no hasRunLogDir is set; no run log", orderNum, why))
 	}
+	rl, err := FindRunLog(dirs.LogDir, bat, ourFile, start)
 	if err != nil {
-		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: %s not readable (%v); no run log", orderNum, path, err))
-		return
+		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: run log in %q not readable: %v", orderNum, dirs.LogDir, err))
+		rl = nil
 	}
-	rl, err := FindRunLog(ini.ErrDataPath, bat, start)
-	if err != nil {
-		s.log.Warn(fmt.Sprintf("import check orderNumber=%d: run log in %q not readable: %v", orderNum, ini.ErrDataPath, err))
-		return
+	if check.Result != OrderImportImported && (rl == nil || rl.Section != RunLogImported) {
+		lines, err := SystemErrorLines(dirs.HasDir, bat, start, time.Now())
+		if err != nil {
+			s.log.Warn(fmt.Sprintf("import check orderNumber=%d: importer error log not readable: %v", orderNum, err))
+		}
+		rl = attachSystemErrors(rl, lines)
 	}
 	if rl == nil {
 		return
 	}
 	check.RunLog = rl
-	if len(rl.Errors) > 0 {
-		s.log.Warn(fmt.Sprintf("import run log orderNumber=%d %s: %s", orderNum, rl.File, strings.Join(rl.Errors, " || ")))
+	if len(rl.Errors) > 0 || len(rl.SystemErrors) > 0 {
+		s.log.Warn(fmt.Sprintf("import run log orderNumber=%d %s section=%q: %s", orderNum, rl.File, rl.Section,
+			strings.Join(append(append([]string{}, rl.Errors...), rl.SystemErrors...), " || ")))
 	}
+	refusedSection := rl.Section == RunLogRefused || rl.Section == RunLogDuplicate || rl.Section == RunLogRetry
 	switch {
 	case check.Result == OrderImportImported || check.Result == OrderImportFailed:
 		// ImportLog already decided; the log is detail.
-	case rl.NoInput:
+	case rl.Section == RunLogNoInput || (rl.Section == "" && rl.NoInput):
 		check.Result = OrderImportNotLogged
 		check.Detail = joinDetail(check.Detail, "the Masofon run found no input file: the profile's data file is not this connector's file (discover: masofon_data_file_mismatch)")
-	case !rl.OK:
+	case refusedSection || (rl.Section == "" && rl.File != "" && !rl.OK && len(rl.Errors) > 0):
 		check.Result = OrderImportFailed
-		check.Detail = joinDetail(check.Detail, "the Masofon run log is an error log: see runLog")
+		check.Detail = joinDetail(check.Detail, "the Masofon run refused this order's file: see runLog")
+	case rl.Section == RunLogImported:
+		check.Detail = joinDetail(check.Detail, "the Masofon run log shows this order's file imported")
+	}
+	if rl.Live {
+		check.Detail = joinDetail(check.Detail, "the run was stopped before it finished its log: runLog is the unfinished "+filepath.Base(rl.File))
 	}
 	if rl.Transient && check.Result != OrderImportImported {
-		check.Detail = joinDetail(check.Detail, "refused for a passing reason (another station issuing, a second run, a deadlock): the profile's next run imports the file again")
+		check.Detail = joinDetail(check.Detail, "refused for a passing reason (another station issuing, a second run, a deadlock): this run did not import it")
 	}
+}
+
+// clearStoppedRunMarker removes the <bat>.IsWorking a run killed at
+// hasImportTimeoutSeconds leaves in the BAT's folder (FAST_IMP.HDS creates
+// it on start and deletes it on exit): left there, the profile's next run —
+// the next order's — would be refused as a "double click". Only a marker
+// created since this run started is removed: an older one is not ours.
+func (s *Sender) clearStoppedRunMarker(check *ImportCheck, bat string, start time.Time, orderNum int64) {
+	marker := filepath.Join(filepath.Dir(bat), strings.ReplaceAll(filepath.Base(bat), " ", "_")+".IsWorking")
+	st, err := os.Stat(marker)
+	if err != nil {
+		return
+	}
+	if fileCreatedAt(st).Before(start.Add(-runLogSlack)) {
+		s.log.Warn(fmt.Sprintf("order %d: %s is older than this run; left in place", orderNum, marker))
+		return
+	}
+	if err := os.Remove(marker); err != nil {
+		s.log.Warn(fmt.Sprintf("order %d: the stopped run's %s could not be removed: %v; the profile's next run will be refused once", orderNum, marker, err))
+		return
+	}
+	check.Detail = joinDetail(check.Detail, "the stopped run's "+filepath.Base(marker)+" was removed so the next run is not refused")
+	s.log.Warn(fmt.Sprintf("order %d: removed the stopped run's %s", orderNum, marker))
 }
 
 // moveRefused moves a refused IMOVEIN.doc out of sendOrderDir into

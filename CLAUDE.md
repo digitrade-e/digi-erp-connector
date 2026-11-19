@@ -171,9 +171,15 @@ the importer's exit code carries nothing (Masofon's BAT ends with a bare `EXIT`)
 `DataDir\orders\imports\<n>.json`, never in the index entry (old builds strict-decode it), never changing `status`.
 Driver errors go to the log only. `hasImportTimeoutSeconds` is opt-in (0 = no cap); a cap kills the **process tree**
 (`treeCancel`, System32 taskkill by full path) — killing cmd.exe alone leaves has.exe reading the shared IMOVEIN.doc.
-`masofon.go`: the BAT's profile is the `[commands]` line named after the BAT (split on `-`), checked by `discover`
-(`masofon_*` codes) and read for `ErrDataPath`, whose `<bat>.ok|err.…LOG` is attached as `runLog` (a refused run is
-not always in ImportLog). Never read a `.PRJ` (it holds a DB password). `hasMoveRefusedOrders` and `hasOrderPrecheck`
+`masofon.go`: the BAT's profile is the `[commands]` line named after the BAT (split on `-`; a folder-less file is in
+`[general] DataPath<type>`), checked by `discover` (`masofon_*` codes). `runlog.go` (research
+`hasavshevet-run-logs.md`): a run log has one **section per input file** (a wildcard run holds many orders), so `.ok` /
+`.err` is the run's, never the order's — read only the section for our `IMOVEIN.doc`, from the earliest log since
+the run started that has it (folder: `hasRunLogDir`, else `ErrDataPath`), the unfinished `<bat>.err` of a stopped run,
+and `DataImpExpLogs\WizImportError*.log` lines of the run's window (a double click is refused only there). A refusal
+is almost never in ImportLog. `importOutcome` gives the one verdict (`outcome`: imported / duplicate (`Stock.063`) /
+refused / retry / not_run / unknown); only `refused` is moved aside. A run killed at the timeout leaves
+`<bat>.IsWorking` (the next run would be refused): removed only when created since that run started. Never read a `.PRJ` (it holds a DB password). `hasMoveRefusedOrders` and `hasOrderPrecheck`
 are **opt-in** (tenant decisions: whether the ERP may retry a refused order, whether orders are refused up front);
 the pre-check runs only for a new order inside `validateNew`, never for a repeat, and fails open on a DB error.
 

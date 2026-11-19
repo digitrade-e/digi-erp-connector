@@ -108,7 +108,7 @@ accepted the risk. `discover` lists who can change each candidate
 reads the command from the line named after the BAT in `masofon.ini` (beside the BAT,
 else beside has.exe). `discover` reads that file (never a `.PRJ`, which holds a
 database password), reports it as `masofon` (`ini`, `profile`, `commands`: company,
-import type, data file, PRM, user, duplicate guard; `errDataPath`) and checks it
+import type, data file, PRM, user, duplicate guard; `errDataPath`; `runLogDir`, the folder the order check reads run logs from: `hasRunLogDir`, else `errDataPath`) and checks it
 against what the connector writes (`<sendOrderDir>\IMOVEIN.doc` / `IMOVEIN.prm`):
 
 | Code | Kind | Meaning |
@@ -122,6 +122,8 @@ against what the connector writes (`<sendOrderDir>\IMOVEIN.doc` / `IMOVEIN.prm`)
 | `masofon_dash_in_path` | defect | the file or PRM path holds `-`: has.exe splits the command on `-` |
 | `masofon_duplicate_guard_off` | note | `DISQUALIFICATIONOFDUPLICATION` is not `YES`: Hashavshevet does not refuse a resend (the tenant's choice) |
 | `masofon_ini_unreadable` | note | `masofon.ini` was not found or not read |
+| `masofon_run_log_dir_unreadable` | note | no run-log folder (no `ErrDataPath`, no `hasRunLogDir`) or the service cannot read it: an order's import check cannot say why it was refused |
+| `masofon_run_log_dir_override` | note | `hasRunLogDir` is set and differs from `masofon.ini`'s `ErrDataPath` |
 
 **`db.host` must be this machine or its LAN.** `apply` and `discover` log in there
 with the client's administrator credential, and the machine reaches the internet. A

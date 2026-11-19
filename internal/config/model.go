@@ -182,6 +182,14 @@ type Config struct {
 	// refused order may be retried by the ERP is the tenant's decision: off
 	// by default.
 	HasMoveRefusedOrders bool `yaml:"hasMoveRefusedOrders,omitempty"`
+	// HasRunLogDir is the folder where the Masofon runs leave their logs
+	// (<bat>.ok|err.DMY-….LOG): Masofon2's "error-log folder". Empty (the
+	// default) = masofon.ini's [general] ErrDataPath, read on every order
+	// from beside the BAT, else beside has.exe. Set it when the service
+	// cannot read masofon.ini or the logs are elsewhere. Absolute; needs an
+	// order importer (hasBatFile or hasExePath); refused with
+	// sendOrderPickupDir. research/reverse-engineering/hasavshevet-run-logs.md P9.
+	HasRunLogDir string `yaml:"hasRunLogDir,omitempty"`
 	// HasOrderPrecheck (opt-in, P4): before a new order gets a number, check
 	// in the company database what Hashavshevet's importer would refuse — the
 	// account (when the order carries none), every item key, and the line-4
@@ -335,6 +343,17 @@ func (c Config) validateOrderKeys() error {
 		}
 		if strings.TrimSpace(c.HasBatFile) == "" && strings.TrimSpace(c.HasExePath) == "" {
 			return errors.New("hasMoveRefusedOrders needs an order importer: hasBatFile or hasExePath")
+		}
+	}
+	if dir := strings.TrimSpace(c.HasRunLogDir); dir != "" {
+		if strings.TrimSpace(c.SendOrderPickupDir) != "" {
+			return errors.New("hasRunLogDir works with the connector's own importer (model (b)); it is refused with sendOrderPickupDir")
+		}
+		if strings.TrimSpace(c.HasBatFile) == "" && strings.TrimSpace(c.HasExePath) == "" {
+			return errors.New("hasRunLogDir needs an order importer: hasBatFile or hasExePath")
+		}
+		if !filepath.IsAbs(dir) {
+			return fmt.Errorf("hasRunLogDir %q must be an absolute path", dir)
 		}
 	}
 	if c.HasOrderPrecheck && strings.TrimSpace(c.DB.Database) == "" {

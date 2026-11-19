@@ -48,11 +48,35 @@ const (
 	OrderImportUnchecked = "unchecked"
 )
 
+// Import outcomes: one verdict for the backend from ImportLog (P1) and the
+// order's own section of the Masofon run log (P10), research/reverse-
+// engineering/hasavshevet-run-logs.md P13.
+const (
+	// OrderOutcomeImported: Hashavshevet took the order's file.
+	OrderOutcomeImported = "imported"
+	// OrderOutcomeDuplicate: refused as already imported (Stock.063): the
+	// order is in Hashavshevet; do not send it again.
+	OrderOutcomeDuplicate = "duplicate"
+	// OrderOutcomeRefused: refused; runLog.refusals say why.
+	OrderOutcomeRefused = "refused"
+	// OrderOutcomeRetry: refused for a reason that passes (another station
+	// issuing, a second run, a reduce, a deadlock): not imported by this run.
+	OrderOutcomeRetry = "retry"
+	// OrderOutcomeNotRun: the profile found no input file: it reads another
+	// file than the connector's (setup).
+	OrderOutcomeNotRun = "not_run"
+	// OrderOutcomeUnknown: nothing says (no database, no log, a stopped run).
+	OrderOutcomeUnknown = "unknown"
+)
+
 // ImportCheck is what the connector learned from Hashavshevet's import log
 // after running the importer for one order. It is stored beside the order
 // index (DataDir/orders/imports/<n>.json), never inside it.
 type ImportCheck struct {
-	Result string `json:"result"`
+	// Outcome is the one verdict to act on (OrderOutcome*); Result and RunLog
+	// are its evidence.
+	Outcome string `json:"outcome,omitempty"`
+	Result  string `json:"result"`
 	// Detail is a short reason for a result other than imported.
 	Detail string `json:"detail,omitempty"`
 	// Profile is the Masofon profile (BAT name) the logged run used.
@@ -300,6 +324,9 @@ func loadImportCheck(dir string, number int64) *ImportCheck {
 	if json.Unmarshal(b, &c) != nil || c.Result == "" {
 		return nil
 	}
+	if c.Outcome == "" { // stored by a connector before outcome existed
+		c.Outcome = importOutcome(&c)
+	}
 	return &c
 }
 
@@ -308,6 +335,47 @@ func joinDetail(a, b string) string {
 		return b
 	}
 	return a + "; " + b
+}
+
+// importOutcome decides the check's one verdict (P13). ImportLog's Success
+// is the strongest evidence; a refusal is almost never in ImportLog, so the
+// run log's section for the order's file decides the rest; a log read whole
+// (no sections) is trusted only for what it says outright.
+func importOutcome(c *ImportCheck) string {
+	switch c.Result {
+	case OrderImportImported, OrderImportLoggedNoDocument:
+		return OrderOutcomeImported
+	}
+	if rl := c.RunLog; rl != nil {
+		switch rl.Section {
+		case RunLogImported:
+			if c.Result == OrderImportFailed {
+				return OrderOutcomeRefused // ImportLog logged the file Failed
+			}
+			return OrderOutcomeImported
+		case RunLogDuplicate:
+			return OrderOutcomeDuplicate
+		case RunLogRefused:
+			return OrderOutcomeRefused
+		case RunLogRetry:
+			return OrderOutcomeRetry
+		case RunLogNoInput:
+			return OrderOutcomeNotRun
+		case "":
+			switch {
+			case rl.Transient:
+				return OrderOutcomeRetry
+			case rl.NoInput:
+				return OrderOutcomeNotRun
+			case rl.File != "" && !rl.OK && !rl.Live && len(rl.Errors) > 0:
+				return OrderOutcomeRefused
+			}
+		}
+	}
+	if c.Result == OrderImportFailed {
+		return OrderOutcomeRefused
+	}
+	return OrderOutcomeUnknown
 }
 
 // sqlErrorClass names a database error without echoing driver text (it can

@@ -36,12 +36,20 @@ func NewSendOrderStatusHandler(queue *hasavshevet.OrderQueue) http.HandlerFunc {
 		}
 		if c := result.Import; c != nil {
 			resp.Import = &dto.OrderImportCheck{
-				Result: c.Result, Detail: c.Detail, Profile: c.Profile, LogStatus: c.LogStatus,
+				Outcome: c.Outcome, Result: c.Result, Detail: c.Detail, Profile: c.Profile, LogStatus: c.LogStatus,
 				StockIDs: c.StockIDs, DocumentID: c.DocumentID, StockStatus: c.StockStatus,
 				MatchedBy: c.MatchedBy, TimedOut: c.TimedOut, CheckedAt: c.CheckedAt, MovedTo: c.MovedTo,
 			}
 			if rl := c.RunLog; rl != nil {
-				resp.Import.RunLog = &dto.OrderImportRunLog{File: rl.File, OK: rl.OK, NoInput: rl.NoInput, Summary: rl.Summary, Errors: rl.Errors, Transient: rl.Transient}
+				out := &dto.OrderImportRunLog{
+					File: rl.File, OK: rl.OK, Live: rl.Live, Section: rl.Section, NoInput: rl.NoInput,
+					Summary: rl.Summary, Errors: rl.Errors, Transient: rl.Transient,
+					SystemError: rl.SystemError, SystemErrors: rl.SystemErrors, OtherFiles: rl.OtherFiles,
+				}
+				for _, r := range rl.Refusals {
+					out.Refusals = append(out.Refusals, dto.OrderImportRunRefusal{Value: r.Value, Code: r.Code, Message: r.Message, Row: r.Row})
+				}
+				resp.Import.RunLog = out
 			}
 		}
 		respond.JSON(w, http.StatusOK, resp)
