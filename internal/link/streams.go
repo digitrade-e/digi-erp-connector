@@ -159,6 +159,10 @@ func (l *Link) command(st net.Conn) {
 		if refusal == "" {
 			refusal = l.checkUpgrade(env)
 		}
+		shell := env.Command == linkproto.CommandShell
+		if refusal == "" && shell {
+			refusal = l.checkShell(env)
+		}
 		if refusal == "" {
 			if env.Sealed {
 				plain, err := linkproto.Open(l.cfg.Keys, stdin)
@@ -168,11 +172,26 @@ func (l *Link) command(st net.Conn) {
 				stdin = plain
 			}
 		}
+		if refusal == "" && shell && len(stdin) > MaxShellScript {
+			refusal = CodeShellScriptTooLarge
+		}
+		unlock := func() {}
+		if refusal == "" && shell {
+			var u func()
+			if u, refusal = l.lockShell(); refusal == "" {
+				unlock = u
+			}
+		}
 		if refusal == "" {
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q by %q (key %s)", env.Command, env.ChangeSet, env.By, keyID))
-			stdout, ans.Exit = l.run(env, stdin)
+			if shell {
+				stdout, ans.Exit = l.runShell(env, keyID, stdin)
+			} else {
+				stdout, ans.Exit = l.run(env, stdin)
+			}
 			l.cfg.Log.Info(fmt.Sprintf("link: command %q change-set %q ended, exit %d, %d bytes", env.Command, env.ChangeSet, ans.Exit, len(stdout)))
 		}
+		unlock()
 	}
 	if refusal != "" {
 		ans.Refusal = refusal
@@ -205,11 +224,18 @@ func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, key
 	if state.Box == "" {
 		return env, "", "", linkproto.CodeBoxUnknown
 	}
-	minEpoch, err := l.cfg.Store.MinEpochStrict(CompiledMinEpoch)
+	// Plan 094: a shell key is verified against the shell keyring and its own floor, every other key against the team
+	// keyring; neither keyring runs the other's commands (checked once the signature verified, below).
+	shellKey := l.cfg.Shell.Has(s.Key)
+	keyring, floor, compiled := l.cfg.Team, l.cfg.Store.MinEpochStrict, CompiledMinEpoch
+	if shellKey {
+		keyring, floor, compiled = l.cfg.Shell, l.cfg.Store.MinShellEpochStrict, CompiledMinShellEpoch
+	}
+	minEpoch, err := floor(compiled)
 	if err != nil {
 		return env, "", "", "state_unreadable"
 	}
-	env, key, err := l.cfg.Team.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
+	env, key, err := keyring.VerifyEnvelope(s, l.cfg.Now(), state.Box, minEpoch)
 	if err != nil {
 		return linkproto.Envelope{}, "", "", refusalCode(err)
 	}
@@ -217,8 +243,18 @@ func (l *Link) verify(state State, envFrame []byte) (env linkproto.Envelope, key
 	if err := l.cfg.Store.UseNonce(env.Nonce, time.Unix(env.ExpiresAt, 0), l.cfg.Now()); err != nil {
 		return env, key.ID, digest, refusalCode(err) // replayed_nonce: this envelope reached the box before
 	}
-	if err := l.cfg.Store.RaiseMinEpoch(key.Epoch, CompiledMinEpoch); err != nil {
+	raise := l.cfg.Store.RaiseMinEpoch
+	if shellKey {
+		raise = l.cfg.Store.RaiseMinShellEpoch
+	}
+	if err := raise(key.Epoch, compiled); err != nil {
 		l.cfg.Log.Error("link: recording the key epoch", err)
+	}
+	switch {
+	case shellKey && env.Command != linkproto.CommandShell:
+		return env, key.ID, digest, CodeShellKeyWrongCommand
+	case !shellKey && env.Command == linkproto.CommandShell:
+		return env, key.ID, digest, CodeShellKeyRequired
 	}
 	if !state.AdminOn() {
 		return env, key.ID, digest, "admin_off" // the client's off switch (link.yaml admin: false)

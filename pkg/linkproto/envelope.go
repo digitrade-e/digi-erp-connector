@@ -31,6 +31,12 @@ type TeamKey struct {
 // Keyring is the set of team keys a verifier trusts.
 type Keyring []TeamKey
 
+// Has says whether the keyring holds the key id.
+func (kr Keyring) Has(id string) bool {
+	_, ok := kr.find(id)
+	return ok
+}
+
 func (kr Keyring) find(id string) (TeamKey, bool) {
 	for _, k := range kr {
 		if k.ID == id {
@@ -61,6 +67,24 @@ type Envelope struct {
 	ExpiresAt   int64    `json:"exp"`
 	ChangeSet   string   `json:"changeSet,omitempty"`
 	By          string   `json:"by,omitempty"` // the person, as digi-mcp knows them; not authenticated
+	// ReplyKey (plan 094) is a one-shot X25519 public key, base64, the box seals the whole answer of a shell command to:
+	// the relay sees neither the script (sealed stdin) nor its output. Only the shell carries it.
+	ReplyKey string `json:"replyKey,omitempty"`
+}
+
+// CommandShell is the remote shell (plan 094): a PowerShell script, sealed in, its answer sealed out to ReplyKey,
+// signed by a shell key only — never by a team key.
+const CommandShell = "shell"
+
+// ParseReplyKey reads an envelope's ReplyKey.
+func ParseReplyKey(s string) ([32]byte, error) {
+	var k [32]byte
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(b) != len(k) {
+		return k, refuse(CodeMalformed)
+	}
+	copy(k[:], b)
+	return k, nil
 }
 
 // AdminRequest is a signed call to the relay's own operations: pairing and the
@@ -163,6 +187,13 @@ func (kr Keyring) VerifyEnvelope(s Signed, now time.Time, box string, minEpoch i
 		return Envelope{}, TeamKey{}, refuse(CodeMalformed)
 	case e.Box != box:
 		return Envelope{}, TeamKey{}, refuse(CodeWrongBox)
+	case e.ReplyKey != "" && e.Command != CommandShell: // plan 094: only the shell's answer is sealed out
+		return Envelope{}, TeamKey{}, refuse(CodeMalformed)
+	}
+	if e.ReplyKey != "" {
+		if _, err := ParseReplyKey(e.ReplyKey); err != nil {
+			return Envelope{}, TeamKey{}, err
+		}
 	}
 	if err := checkTimes(e.IssuedAt, e.ExpiresAt, now); err != nil {
 		return Envelope{}, TeamKey{}, err

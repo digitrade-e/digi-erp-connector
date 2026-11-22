@@ -73,6 +73,8 @@ const (
 	// secretPolicyFloors is the seq floor per policy scope key (plan 088 review m3, m4), kept apart from
 	// link\policy.json so that a policy file deleted, lost or unreadable never reopens a replay.
 	secretPolicyFloors = "link_policy_floors"
+	// secretMinShellEpoch is the shell keys' own floor (plan 094), apart from the team keys'.
+	secretMinShellEpoch = "link_min_shell_epoch"
 )
 
 // Store keeps the link's state under one directory.
@@ -167,7 +169,21 @@ func (s *Store) MinEpoch(compiled int) int {
 // MinEpochStrict is MinEpoch that fails closed: a floor that cannot be read is an error, never the compiled one —
 // a downgrade could otherwise bring a retired key back (review 2026-11-15). No floor stored yet is the compiled one.
 func (s *Store) MinEpochStrict(compiled int) (int, error) {
-	b, err := s.Secrets.Get(secretMinEpoch)
+	return s.floorStrict(secretMinEpoch, compiled)
+}
+
+// MinShellEpochStrict is the shell keys' floor (plan 094), fail-closed like the team keys'.
+func (s *Store) MinShellEpochStrict(compiled int) (int, error) {
+	return s.floorStrict(secretMinShellEpoch, compiled)
+}
+
+// RaiseMinShellEpoch records a shell-key epoch if it is higher than the stored one.
+func (s *Store) RaiseMinShellEpoch(epoch, compiled int) error {
+	return s.raiseFloor(secretMinShellEpoch, epoch, compiled)
+}
+
+func (s *Store) floorStrict(secret string, compiled int) (int, error) {
+	b, err := s.Secrets.Get(secret)
 	if errors.Is(err, ErrNoSecret) {
 		return compiled, nil
 	}
@@ -183,10 +199,15 @@ func (s *Store) MinEpochStrict(compiled int) (int, error) {
 
 // RaiseMinEpoch records epoch if it is higher than the stored one.
 func (s *Store) RaiseMinEpoch(epoch, compiled int) error {
-	if epoch <= s.MinEpoch(compiled) {
+	return s.raiseFloor(secretMinEpoch, epoch, compiled)
+}
+
+func (s *Store) raiseFloor(secret string, epoch, compiled int) error {
+	cur, err := s.floorStrict(secret, compiled)
+	if err == nil && epoch <= cur {
 		return nil
 	}
-	return s.Secrets.Set(secretMinEpoch, []byte(fmt.Sprint(epoch)))
+	return s.Secrets.Set(secret, []byte(fmt.Sprint(epoch)))
 }
 
 // nonceKeep is how long past its expiry a nonce is remembered, in seconds.
