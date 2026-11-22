@@ -8,7 +8,8 @@ connector's API can then listen on `127.0.0.1` only.
 this server                                           Digitrade (Google Cloud)
 digi-erp-connector-link ── wss://link.digitrade-admin.org ──► relay ◄── ERP-manager, the shop: /c/<box>/api/...
   ├─ data streams  → 127.0.0.1:<apiListen> (the connector)            ◄── digi-mcp: signed commands
-  └─ command streams → digi-erp-connector-provision.exe <fixed command>
+  ├─ command streams → digi-erp-connector-provision.exe <fixed command>
+  └─ shell (plan 094) → powershell.exe, only where an administrator here turned it on, never on a domain controller
 ```
 
 ## What it is
@@ -32,7 +33,11 @@ release (the relay cannot add or change one). The link checks the signature, the
 is for this box, that it has not expired and was not seen before, and the digest of its input. Then it runs **only
 `digi-erp-connector-provision.exe`**, with one of: `version`, `discover`, `apply` (and `--check`), `options` (and
 `--check`), `verify`, `restore <change-set>`; or answers `hashes` itself (the digests of the installed executables).
-There is no shell and no other program. Every answer is signed by this server's key.
+No other program runs — **except the remote shell** (plan 094, below), which is off unless an administrator on this
+server turns it on. Every answer is signed by this server's key.
+
+> **Until plan 094 this page said "There is no shell and no other program".** That was true of every release before
+> the shell, and it is no longer true of a server where `digi-erp-connector-link shell on` was run.
 
 From v1.0.29 (Digitrade plan 086) also, each a fixed `provision` command line
 ([provisioning.md](provisioning.md)):
@@ -64,6 +69,33 @@ From v1.0.31 (Digitrade plan 088) the link also takes **upgrade policies**: not 
 same team key, on which the box upgrades itself in its own maintenance window and checks it is healthy afterwards —
 [§ Managed auto-update](#managed-auto-update-plan-088-v1031).
 
+## The remote shell (plan 094)
+
+Digitrade's support can run **any PowerShell script on this server, as LocalSystem**, without logging in to it — to
+read the importer's BAT files, its `masofon.ini`, the scheduled tasks and folders it uses, its logs, or to fix what
+they find. It is a full shell: nothing restricts what a script does. So it is **off unless an administrator on this
+server turns it on**, and it is built so that turning it on is the only way in:
+
+- **Off by default.** `digi-erp-connector-link shell on` (an administrator, on this server) turns it on and records who
+  and when in `link\shell.yaml`; `shell off` turns it off; `shell status` says which. No command from Digitrade can
+  write that file. `admin: false` in `link.yaml` refuses it as it refuses every command.
+- **Never on a domain controller.** The link refuses the shell on a server whose domain role is a domain controller
+  (`shell_refused_dc`), whatever the setting: LocalSystem there would be the whole domain.
+- **Its own key.** A shell command must be signed by a **shell key**, compiled into this release apart from the team
+  key, with its own generation floor: the team key (which signs every other command) cannot run the shell, and a shell
+  key runs nothing but the shell. Its private half is held by one person at Digitrade, on their own machine, never in a
+  shared store; a spare one is kept offline, so a lost key is retired by the next release.
+- **Sealed both ways.** The script arrives sealed to this server's key, and the whole answer (what the script printed,
+  its errors, its exit code) leaves sealed to a key made for that one command: the relay, or anything between, reads
+  neither.
+- **Bounded.** A script is at most 64 KiB; it runs for at most 5 minutes, after which it and every process it started
+  are ended (a Windows job object); what it prints is kept up to 640 KiB. It never runs beside a provisioning run or an
+  upgrade. A scheduled task or a service a script registers is not ended with it.
+- **Logged before it runs.** `link\shell.log` gets a line when a script starts (the command's nonce, the script's
+  SHA-256 and size, the key that signed it, who sent it) and when it ends (its exit code, the answer's SHA-256 and
+  size); the Event Log (Application, `digi-erp-connector-link`) gets the command line as for every command. The
+  script's text and its output are not written to this server's logs.
+
 ## For the client's IT
 
 - **State:** `link.yaml` in `%ProgramData%\digi-erp-connector\` — the relay, this box's id once paired, the proxy.
@@ -78,6 +110,9 @@ same team key, on which the box upgrades itself in its own maintenance window an
   lost**.
 - **Turn remote commands off:** set `admin: false` in `link.yaml`. Data keeps flowing (the shop's sync and orders);
   every command is refused and logged.
+- **The remote shell** is off unless you turn it on: `digi-erp-connector-link shell on|off|status`
+  (as an administrator). With it on, Digitrade can run any PowerShell script here as LocalSystem; each run is in
+  `link\shell.log` and the Event Log. It never runs on a domain controller. [§ The remote shell](#the-remote-shell-plan-094).
 - **Every command** is logged to `link.log` (same folder) and to the Windows **Event Log** (Application, source
   `digi-erp-connector-link`): what ran, for which change set, by whom, and how it ended.
 - **Remove it:** uninstall the connector, or stop and delete the service; its key goes with the data directory.

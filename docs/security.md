@@ -22,6 +22,27 @@ Assume:
 Out of scope: a hostile local administrator, physical access, and SQL Server's own
 hardening.
 
+**The remote shell (plan 094).** Where a local administrator turned it on
+(`digi-erp-connector-link shell on`), whoever holds a shell private key can run
+any PowerShell script on the server as LocalSystem — that is the feature, not a
+flaw. What bounds it:
+
+- the shell keys are a keyring of their own, compiled in, with their own
+  generation floor; the team key cannot run the shell and a shell key runs
+  nothing else, so the team key's custody (a store several people can read) does
+  not reach the shell;
+- it is off by default, turned on only at the server, and refused outright on a
+  domain controller;
+- the script and the answer are sealed end to end (the relay is blind);
+- each run is journalled on the server before it starts.
+
+What it does not bound: a shell key's holder — or anything running as them on
+their machine — can do anything LocalSystem can on every server that opted in;
+text a script reads (a file, a log line) can carry instructions to whoever reads
+the answer; and anyone able to publish a release of this repository could compile
+in a key of their own, as they could already ship any code. Turn the shell off
+(`shell off`, or `admin: false` in `link.yaml`) whenever it is not needed.
+
 ## Authentication
 
 Full detail in [authentication.md](authentication.md). In short: there is **one**
@@ -223,6 +244,9 @@ Ready-made scripts: `scripts/sql/least-privilege-read-node.sql` and
 exactly two tables — Accounts and Rates — and nothing else.
 
 ## Known limitations
+
+- The remote shell (plan 094), where turned on, is full LocalSystem control: see
+  the threat model above.
 
 - No per-route authorisation: a valid token grants everything.
 - TLS is available but off by default — configure it whenever apiListen is not
