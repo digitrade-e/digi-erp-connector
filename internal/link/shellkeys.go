@@ -22,8 +22,13 @@ var shellKeys = []struct {
 	Epoch int
 	Pub   string // base64 Ed25519 public key
 }{
-	{ID: "shell-1", Epoch: 1, Pub: ""}, // TODO(plan 094): Ilya's shell-1 public half
-	{ID: "shell-2", Epoch: 2, Pub: ""}, // TODO(plan 094): Ilya's shell-2 public half (the offline spare)
+	// shell-1: made by Ilya on 2026-11-22 in his own terminal; its private half is digi-mcp's local keychain slot
+	// link/prod/shell-1 only (never a shared store).
+	{ID: "shell-1", Epoch: 1, Pub: "q13mDiBzz9cr/hFDGd7NP9mW/lb0s1BYH05taN3wU3M="},
+	// shell-2: not made yet (no offline medium on 2026-11-22). Until it is, a lost or leaked shell-1 has no spare: the
+	// brake is each box's own `digi-erp-connector-link shell off` (or link.yaml admin: false), then a release that
+	// raises CompiledMinShellEpoch with a new key.
+	{ID: "shell-2", Epoch: 2, Pub: ""}, // TODO(plan 094): the offline spare's public half
 }
 
 // CompiledMinShellEpoch is the lowest shell-key epoch this release accepts.
