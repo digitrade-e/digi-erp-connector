@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/digitrade-e/digi-erp-connector/internal/buildinfo"
 	"github.com/digitrade-e/digi-erp-connector/internal/config"
@@ -25,13 +27,16 @@ const usage = `digi-erp-connector-link — the connector's outbound link to Digi
   digi-erp-connector-link pair <CODE>   store a pairing code from Digitrade; prints the fingerprint to read back to them
   digi-erp-connector-link fingerprint   print this server's key fingerprint
   digi-erp-connector-link status        print the relay, the box id and whether commands are on
+  digi-erp-connector-link shell on|off|status   the remote shell (plan 094): off unless an administrator here turns it on
   digi-erp-connector-link version       print the build
   digi-erp-connector-link preflight     check this server can reach Digitrade, the way the service will (setup runs it)
   digi-erp-connector-link run           run in the foreground (the service does this itself)
   digi-erp-connector-link upgrade-run <ticket>   the upgrade runner the link starts itself (plan 086); not for a person
 
 link.yaml in the data directory holds the state; "admin: false" there turns remote commands off, "autoUpgrade: false"
-the managed auto-update (plan 088).`
+the managed auto-update (plan 088). link\shell.yaml holds the remote shell's opt-in: only "shell on" here writes it,
+never a command from Digitrade. With it on, Digitrade's shell key can run any PowerShell script on this server as
+LocalSystem, logged in link\shell.log and the Application event log; it is refused on a domain controller.`
 
 func main() {
 	if runAsService() {
@@ -49,7 +54,7 @@ func main() {
 		os.Exit(link.RunUpgrade(paths.DataDir(), args[1]))
 	}
 	switch args[0] {
-	case "fingerprint", "pair", "status": // they make or read the box's keys: the data directory is protected first
+	case "fingerprint", "pair", "status", "shell": // they make or read the box's state: the data directory is protected first
 		exitOn(m.Protect())
 	}
 	switch args[0] {
@@ -81,6 +86,12 @@ func main() {
 		}
 		fmt.Printf("relay:       %s\nbox:         %s\ncommands:    %s\nauto-update: %s\nfingerprint: %s\n", st.RelayURL(), box, onOff(st.AdminOn()),
 			autoOnOff(st.AutoUpgradeOn()), k.Public().Fingerprint())
+	case "shell":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(2)
+		}
+		exitOn(shellCommand(m.Store(), args[1]))
 	case "preflight":
 		// Writes nothing: no keys, no link.yaml. Exit 0 ready, 3 with warnings, 1 a STOP.
 		st, err := m.Store().LoadState()
@@ -147,4 +158,41 @@ func exitOn(err error) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// shellCommand turns the remote shell (plan 094) on or off for this server, or says whether it is on. It is the only
+// writer of link\shell.yaml: a person at the server, as an administrator (the data directory admits no one else).
+func shellCommand(store *link.Store, op string) error {
+	switch op {
+	case "status":
+		o, err := store.LoadShellOptIn()
+		if err != nil {
+			fmt.Printf("shell: off (link\\shell.yaml does not parse: %v)\n", err)
+			return nil
+		}
+		if !o.Enabled {
+			fmt.Println("shell: off")
+			return nil
+		}
+		fmt.Printf("shell: ON since %s, turned on by %s\n", o.EnabledAt, o.EnabledBy)
+		return nil
+	case "on":
+		who := "unknown"
+		if u, err := user.Current(); err == nil {
+			who = u.Username
+		}
+		if err := store.SaveShellOptIn(link.ShellOptIn{Enabled: true, EnabledBy: who, EnabledAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			return err
+		}
+		fmt.Printf("shell: ON, turned on by %s. Digitrade's shell key can now run any PowerShell script on this server as\n"+
+			"LocalSystem (never on a domain controller); every run is logged in link\\shell.log. Turn it off with: shell off\n", who)
+		return nil
+	case "off":
+		if err := store.SaveShellOptIn(link.ShellOptIn{Enabled: false}); err != nil {
+			return err
+		}
+		fmt.Println("shell: off")
+		return nil
+	}
+	return fmt.Errorf("shell takes on, off or status, not %q", op)
 }
