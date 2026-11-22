@@ -34,3 +34,7 @@ func publicFromPrivate(priv *[32]byte) ([32]byte, error) {
 	copy(pub[:], p)
 	return pub, nil
 }
+
+// X25519Public is the public half of an X25519 private key: digi-mcp keeps the one-shot reply key's private half, the
+// envelope carries this (plan 094).
+func X25519Public(priv *[32]byte) ([32]byte, error) { return publicFromPrivate(priv) }

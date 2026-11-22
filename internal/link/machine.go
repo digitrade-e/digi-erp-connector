@@ -79,6 +79,10 @@ func (m Machine) Config() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	shell, err := ShellKeyring()
+	if err != nil {
+		return Config{}, err
+	}
 	// The daemon's address is read per data stream (plan 086 C5), not here: a config.yaml written later — by an apply
 	// over this very link on a fresh install, or one that moves the port — reaches the data path without a restart.
 	// On Windows a stream goes only to a socket the connector's service owns (review B1), and the certificate is
@@ -98,7 +102,7 @@ func (m Machine) Config() (Config, error) {
 		host, domain, role = m.HostFacts()
 	}
 	return Config{
-		Store: store, Keys: keys, Team: team, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
+		Store: store, Keys: keys, Team: team, Shell: shell, ShellExec: defaultShellExec, Build: m.Build, Host: host, Domain: domain, DomainRole: role,
 		Daemon: watch, Proxy: proxy, Upgrade: UpgradeConfig{DataDir: m.DataDir, Protect: m.Protect},
 		HTTPClient: hc, Runner: ExecRunner{Path: filepath.Join(m.InstallDir, "digi-erp-connector-provision.exe")},
 		InstallDir: m.InstallDir, Log: m.Log,

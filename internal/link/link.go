@@ -29,9 +29,13 @@ type Logger interface {
 
 // Config wires one link.
 type Config struct {
-	Store      *Store
-	Keys       linkproto.BoxKeys
-	Team       linkproto.Keyring
+	Store *Store
+	Keys  linkproto.BoxKeys
+	Team  linkproto.Keyring
+	// Shell is the shell keyring (plan 094), apart from Team: only it signs the shell, and it signs nothing else.
+	Shell linkproto.Keyring
+	// ShellExec runs a shell script; nil on a platform without one (the shell is refused not_supported).
+	ShellExec  ShellExecFunc
 	Build      string
 	Host       string
 	Domain     string

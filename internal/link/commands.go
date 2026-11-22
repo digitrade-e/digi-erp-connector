@@ -14,8 +14,9 @@ import (
 
 // The fixed command set (plan 083 §3.2, digi-mcp's L25): an envelope names one
 // of these, and the link runs digi-erp-connector-provision.exe with exactly
-// these arguments, its stdin from the envelope. There is no shell and no other
-// program. A test pins the set.
+// these arguments, its stdin from the envelope. No other program — except the
+// remote shell (plan 094), which the link answers itself (selfCommands), signed
+// by a shell key only, where the client opted in. A test pins the set.
 var commands = map[string]func(args []string) ([]string, bool){
 	"version":       fixed("version"),
 	"discover":      fixed("discover", "--spec", "-"),
@@ -36,6 +37,9 @@ const CommandHashes = "hashes"
 // exit code.
 var selfCommands = map[string]func(l *Link, env linkproto.Envelope, stdin []byte) ([]byte, int){
 	CommandHashes: func(l *Link, _ linkproto.Envelope, _ []byte) ([]byte, int) { return Hashes(l.cfg.InstallDir), 0 },
+	// The shell (plan 094) is run by command() itself — it needs the signer's key id and provision's lock — never
+	// through this table; the entry is here so it takes no args and is not refused as an unknown command.
+	linkproto.CommandShell: func(*Link, linkproto.Envelope, []byte) ([]byte, int) { return nil, -1 },
 }
 
 var changeSetShape = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
@@ -124,7 +128,9 @@ var sealedOnlyBase = map[string]bool{
 }
 
 // MustBeSealed reports whether command's stdin must arrive sealed whatever it holds.
-func MustBeSealed(command string) bool { return sealedOnly086[command] || sealedOnlyBase[command] }
+func MustBeSealed(command string) bool {
+	return sealedOnly086[command] || sealedOnlyBase[command] || command == linkproto.CommandShell // plan 094: a script reads secrets
+}
 
 // MustBeSealedInput reports whether this command with this stdin must arrive sealed: always for MustBeSealed's, and for
 // any other whenever its stdin holds a password field with a value (discover's db.password; review m5). It guards

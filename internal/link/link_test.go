@@ -616,7 +616,7 @@ func TestTheFixedCommandSet(t *testing.T) {
 		self = append(self, name)
 	}
 	slices.Sort(self)
-	if strings.Join(self, " ") != "hashes link-status upgrade upgrade-result" {
+	if strings.Join(self, " ") != "hashes link-status shell upgrade upgrade-result" { // shell: plan 094
 		t.Errorf("the link answers %v itself", self)
 	}
 }
