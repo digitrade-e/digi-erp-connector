@@ -29,7 +29,8 @@ time is the last line's time). Content:
 ```
 [<computer>.<bat>] ---><command line>              one block per command of the profile (';' in [commands])
 [dd/mm/yy hh:mm:ss] <input file>:                  one section per file the command read (wildcards expanded)
-[dd/mm/yy hh:mm:ss] קליטת תנועות מלאי הסתיימה בהצלחה    that file imported
+[dd/mm/yy hh:mm:ss] קליטת תנועות מלאי הסתיימה בהצלחה    that file imported (stock documents)
+[dd/mm/yy hh:mm:ss] יבוא תנועות לקובץ הקופה הסתיים בהצלחה  that file imported (receipts, KUPAIN; BFL 2026-11-24)
 [dd/mm/yy hh:mm:ss] =============================
    — or, per refusal —
 [dd/mm/yy hh:mm:ss] <value>\t<code and message>\t<row>\t     e.g. "123\tStock.063 מסמך בספרור זה כבר נקלט בעבר\t1"
@@ -119,7 +120,7 @@ Parse a log into **command blocks** (`[...] --->`) and **file sections** (`<path
 
 | Section | Outcome |
 |---|---|
-| ends with "הסתיימה בהצלחה" and has no refusal line | `imported` |
+| ends with "הסתיימה בהצלחה" (stock) or "הסתיים בהצלחה" (receipts) and has no refusal line | `imported` |
 | refusal lines (tab-separated) | `refused`, with each line as `{value, code, message, row}` (`code` = `Stock.NNN` when present) |
 | only `Stock.063` refusals | `duplicate` (already in Hashavshevet; not a new failure) |
 | `File Not Found(SetDsn)` for a pattern that matches our file | `no_input` (the file was not there when the BAT ran) |

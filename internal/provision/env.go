@@ -94,6 +94,9 @@ type Database interface {
 	CountDatabases(ctx context.Context) (int, error)
 	// Fingerprint names the ERP of one database this login can open.
 	Fingerprint(ctx context.Context, database string) (DatabaseFact, error)
+	// ReceiptImport looks up what Hashavshevet did with one receipt's file in database (plan 096 phase 3):
+	// hasavshevet.CheckReceiptImport over its ImportLog and Stock, logDir the run-log folder ("" unknown).
+	ReceiptImport(ctx context.Context, database string, number int64, fileName, logDir string) (hasavshevet.ReceiptImport, error)
 	Close() error
 }
 

@@ -95,6 +95,11 @@ func (s sqlDatabase) Ping(ctx context.Context) error { return db.Ping(ctx, s.con
 
 func (s sqlDatabase) Close() error { return s.conn.Close() }
 
+// ReceiptImport reads database with this login; database must have passed hasavshevet.IsSafeDBName.
+func (s sqlDatabase) ReceiptImport(ctx context.Context, database string, number int64, fileName, logDir string) (hasavshevet.ReceiptImport, error) {
+	return hasavshevet.CheckReceiptImport(ctx, hasavshevet.SQLReceiptImports(s.conn, database), number, fileName, logDir, 0)
+}
+
 func (s sqlDatabase) EnsureProcedures(ctx context.Context) ([]hasavshevet.ProcedureResult, error) {
 	return hasavshevet.EnsureProcedures(ctx, s.conn)
 }

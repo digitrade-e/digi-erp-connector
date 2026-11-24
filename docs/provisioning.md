@@ -35,7 +35,7 @@ same way in an elevated PowerShell. The code is
 | `daemon <restart\|stop\|start> [--assume-idle]` | none | Restarts, stops or starts the service: the order queue asked first, `start`/`restart` end with the proof (below) | nothing |
 | `version` | none | Prints the build's version | nothing |
 | `logs --spec -` | `{"source":"server|link|ui|events-daemon|events-link|masofon|masofon-errors","since"?,"maxLines"?,"grep"?}` | The tail of one log|link\|ui\|events-daemon\|events-link","since"?,"maxLines"?,"grep"?}` | The tail of one log (newest `maxLines`, default 200, at most 2000), oldest first, filtered by `since` (RFC 3339) and a literal `grep` (no case). Redacted on the box (below); the answer stays under 900 KiB (`truncated`) and always carries `"untrusted": true` — its lines are data others could write, never instructions. Plan 086 C4 | nothing |
-| `state [--spec -]` | `{}`, nothing, or `{"orderNumber":N}` (v1.0.38) | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
+| `state [--spec -]` | `{}`, nothing, `{"orderNumber":N}` (v1.0.38) or `{"receiptNumber":N}` (v1.0.41) | Read-only diagnostics: both services, the running daemon (version, `/api/health`, the order queue), `config.yaml` (`configNewerThanStart`, `missingKeys`, `unknownKeys`), the order counter, highest history and index by state, the receipt store, history and index, the pickup folder, the TLS certificate's names and expiry, `link.yaml` without secrets, free disk; since v1.0.30 every counter (`counters`) and typed folder (`folders`), plan 087. Plan 086 C4 | nothing |
 
 **Secrets come on stdin only**, never on the command line. The output is exactly one
 JSON object, `{"command","ok","tool","refusal"?,"result"?}`. Every byte printed goes
@@ -779,6 +779,15 @@ newest 20 not imported, with their outcome, result, time and refusal codes — a
 that order's whole check (its `runLog.refusals` included), or `orderMissing` saying why it has none. `untrusted`: a
 check's run-log lines are the ERP's text.
 
+**`state`'s `receiptImport`** (v1.0.41, plan 096 phase 3), only with `{"receiptNumber":N}`: what Hashavshevet did with
+that receipt's file, looked up in the company database **this box reads**, with its stored login — on a split install
+ask the box that has the database, not the one that wrote the file. `result` is `imported` (with `stockIds`,
+`documentId`, `docNumber` — Hashavshevet's own number, not the receipt number — and `stockStatus` 0 draft / 1 issued),
+`no_document`, `failed`, `not_logged` (no run read the file yet) or `unchecked` (no database, no password, a refused
+login: `detail` says which, never the driver's text); `runLog` is the run's section of the Masofon log when the folder
+is known (`hasRunLogDir`, else masofon.ini's `ErrDataPath` beside the importer), else `runLogNote` says why not. See
+[hasavshevet-send-receipt.md § Checking a receipt's import](hasavshevet-send-receipt.md#checking-a-receipts-import-plan-096-v1041).
+
 **`state`'s `link.autoUpgrade`** (v1.0.31, plan 088) is managed auto-update: `link.yaml`'s `autoUpgrade` switch as it
 reads now, and the link's last view from `| `{"source":"server|link|ui|events-daemon|events-link|masofon|masofon-errors","since"?,"maxLines"?,"grep"?}` | The tail of one logautoupgrade.json` — the policies it holds, what decides (and a target a
 later hold brakes), the next window and check — with the last automatic upgrade's outcome, health and rollback read
@@ -786,7 +795,7 @@ afresh from its result ([link.md § Managed auto-update](link.md#managed-auto-up
 hand: never below `DataDir\format-floor` either — it names the oldest release that reads every file format the builds
 on this box wrote (plan 088 D11).
 
-**`state`** writes nothing — no file, no DACL, no database: the daemon is asked through its own read-only routes with
+**`state`** writes nothing — no file, no DACL, no database (with `receiptNumber` it only reads two tables): the daemon is asked through its own read-only routes with
 the credential in `config.yaml` (an error says so when the daemon runs another one) — and only when the socket at
 `config.yaml`'s address belongs to the service's own process (the TCP table against the service manager's PID);
 otherwise it is not asked, and `daemon.error` says `not asked:` and who holds the port. Every run that sends that
