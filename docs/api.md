@@ -202,6 +202,7 @@ Every code the API can return, with its status. Codes are stable; branch on thes
 | `QUEUE_UNAVAILABLE` | 503 | Order queue not running — the ERP is not Hasavshevet, or startup failed. |
 | `ERP_NOT_SUPPORTED` | 400 | Configured `erp` has no price/stock implementation path. |
 | `PRICE_STOCK_FAILED` | 500 | The ERP price/stock call failed. |
+| `PRICE_STOCK_TOO_LARGE` | 400 | SAP: more than 2000 SKUs or 50 warehouses in one request (`docs/price-and-stock.md`). |
 | `ORDERS_NOT_CONFIGURED` | 501 | This connector cannot send orders: it needs `erp: hasavshevet` and a `sendOrderDir`. Expected on a read-only node - see [deployment-topologies.md](deployment-topologies.md). |
 | `RECEIPTS_NOT_CONFIGURED` | 503 | This connector does not write receipts: it needs `erp: hasavshevet` and a `sendReceiptDir`. Nothing was read or written. |
 | `RECEIPT_NUMBER_STORE_UNAVAILABLE` | 503 | The receipt number store is not seeded (`cutover-seed -receipt-seed N`), unreadable, exhausted, or was moved back. Never falls back to 1. |
