@@ -373,6 +373,8 @@ type fakeDB struct {
 	opened     []string // user names
 	loginCalls int
 	databases  []DatabaseFact
+	// receiptAsked records "database|fileName|logDir" per ReceiptImport.
+	receiptAsked []string
 }
 
 // login is the server's password for a least-privilege login, and whether
@@ -412,7 +414,13 @@ func (f *fakeDB) open(cfg config.Config, password string) (Database, error) {
 }
 
 func (c fakeConn) Ping(context.Context) error { return nil }
-func (c fakeConn) Close() error               { return nil }
+func (c fakeConn) ReceiptImport(_ context.Context, database string, number int64, fileName, logDir string) (hasavshevet.ReceiptImport, error) {
+	c.db.mu.Lock()
+	defer c.db.mu.Unlock()
+	c.db.receiptAsked = append(c.db.receiptAsked, database+"|"+fileName+"|"+logDir)
+	return hasavshevet.ReceiptImport{ReceiptNumber: number, FileName: fileName, Result: hasavshevet.ReceiptImportImported}, nil
+}
+func (c fakeConn) Close() error { return nil }
 func (c fakeConn) EnsureProcedures(context.Context) ([]hasavshevet.ProcedureResult, error) {
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()

@@ -52,6 +52,20 @@ const (
 	RunLogPartial = "partial"
 )
 
+// successLines end a file's section when it imported: the stock import's
+// "קליטת תנועות מלאי הסתיימה בהצלחה" and the receipt (kupa) import's
+// "יבוא תנועות לקובץ הקופה הסתיים בהצלחה" (masculine; read on BFL 2026-11-24).
+var successLines = []string{"הסתיימה בהצלחה", "הסתיים בהצלחה"}
+
+func isSuccessLine(line string) bool {
+	for _, s := range successLines {
+		if strings.Contains(line, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // partialImportLine is the line MLAYIN.HDS ends a partial import with.
 const partialImportLine = "חלק מהרשומות לא נקלט בהצלחה"
 
@@ -201,7 +215,7 @@ func (s *runLogSection) add(line string) {
 		if len(s.errors) < maxRunLogErrors {
 			s.errors = append(s.errors, cutRunes(strings.Join(strings.Fields(strings.ReplaceAll(line, "\t", " | ")), " "), maxRunLogLineRune))
 		}
-	case strings.Contains(line, "הסתיימה בהצלחה"):
+	case isSuccessLine(line):
 		s.imported = true
 		s.summary = cutRunes(line, maxRunLogLineRune)
 	case strings.Contains(line, partialImportLine):

@@ -202,7 +202,7 @@ ORDER BY ID`, maxStockHits, r.dbName)
 
 var (
 	logStatusRe  = regexp.MustCompile(`&Status=([A-Za-z]+)`)
-	stockRangeRe = regexp.MustCompile(`FirstStockID=(\d+)&LastStockID=(\d+)`)
+	stockRangeRe = regexp.MustCompile(`FirstStockID=(\d+)[&.]LastStockID=(\d+)`)
 )
 
 // parseImportLogRun reads a row's profile (the BAT name before the first

@@ -198,6 +198,34 @@ The backend records `written` regardless of `import`, and logs at error for
   `config.yaml` at install: `hasBatFile` → a receipt BAT, `hasExePath` → a
   receipt parameter file).
 
+## Checking a receipt's import (plan 096, v1.0.41)
+
+`import` above is only the runner's exit code, and in model (a) — BFL's, where Hashavshevet's own scheduled task
+imports `KUPAIN_*.doc` every few minutes — it stays `not_run`. What actually happened is answered by
+`state {"receiptNumber": N}` on the box that **reads the company database** (on BFL that is the read box, not the
+write box that wrote the file: the write box has no database login). It looks up:
+
+1. `dbo.ImportLog`: the runs among the newest 300,000 rows (the table is indexed on `ID` only) whose `FileName` ends
+   in the receipt's file name (`KUPAIN_{n}.doc`, or the receipt folder's name pattern) — the newest wins, `runs` counts
+   them. A receipt run is logged with an empty `&Status=` and its range as `FirstStockID=…​.LastStockID=…` (a dot,
+   where order runs have `&`).
+2. `dbo.Stock` in that range: `documentId` (31 for BFL's receipts), `docNumber` (Hashavshevet's own; the receipt
+   number is in the card-payment line, `CreditPays.DocNum`) and `stockStatus` — **0 draft (temporary receipt), 1
+   issued**.
+3. The run's section of `<ErrDataPath>\<profile>.ok|err.DMY-….LOG`. A receipt run ends its section with
+   "יבוא תנועות לקובץ הקופה הסתיים בהצלחה" (masculine, where the stock import writes "…הסתיימה בהצלחה"); every run
+   also reads the bare `kupain.doc` first and logs it as an empty input file — another section, not the receipt's.
+
+| `result` | Meaning |
+|---|---|
+| `imported` | A run read the file and the document is in Stock. `stockStatus` 0: still a draft for the bookkeeper to issue or delete. |
+| `no_document` | A run read the file but no document is in its range (deleted since, or the run logged none) and the run log does not say it was refused. |
+| `failed` | A run logged another status than Success, or its run-log section refused the file (`runLog.refusals`). |
+| `not_logged` | No run read the file yet: the task has not run since it was written, or it reads another folder or name. |
+| `unchecked` | No database on this box, no stored password, a refused login or a read error — `detail` says which. |
+
+Nothing is stored and nothing acted on; digi-mcp's `connector_state` asks it.
+
 ## Numbering and the seed
 
 The receipt number (F3, nine digits) comes from

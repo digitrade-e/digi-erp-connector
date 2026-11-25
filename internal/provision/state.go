@@ -39,6 +39,8 @@ import (
 // StateInput is `state --spec -`'s stdin: {} or, for one order's import check in full, {"orderNumber": N}.
 type StateInput struct {
 	OrderNumber int64 `json:"orderNumber,omitempty"`
+	// ReceiptNumber (plan 096 phase 3) looks up that receipt's import in the database this box reads.
+	ReceiptNumber int64 `json:"receiptNumber,omitempty"`
 }
 
 // StateResult is what state answers.
@@ -52,7 +54,10 @@ type StateResult struct {
 	// orderNumber that order's whole check (state_imports.go). Absent when the box keeps none and none was asked.
 	Imports  *StateImports `json:"imports,omitempty"`
 	Receipts StateReceipts `json:"receipts"`
-	Pickup   *StatePickup  `json:"pickup,omitempty"`
+	// ReceiptImport (plan 096 phase 3) is receiptNumber's import, looked up in this box's database: present only
+	// when asked.
+	ReceiptImport *StateReceiptImport `json:"receiptImport,omitempty"`
+	Pickup        *StatePickup        `json:"pickup,omitempty"`
 	// Counters (plan 087) are every counter the daemon would build from
 	// config.yaml — today's two under their implicit keys while none is
 	// configured — read from their stores, with the index and history
@@ -331,6 +336,9 @@ func State(ctx context.Context, env Env, in StateInput) (*StateResult, error) {
 	if in.OrderNumber < 0 {
 		return nil, refuse(CodeSpecInvalid, "orderNumber is an order number, 1 or more (or left out)", "orderNumber %d", in.OrderNumber)
 	}
+	if in.ReceiptNumber < 0 {
+		return nil, refuse(CodeSpecInvalid, "receiptNumber is a receipt number, 1 or more (or left out)", "receiptNumber %d", in.ReceiptNumber)
+	}
 	sys := env.Sys
 	dir := sys.DataDir()
 	res := &StateResult{Version: buildinfo.Version}
@@ -375,6 +383,9 @@ func State(ctx context.Context, env Env, in StateInput) (*StateResult, error) {
 		res.Imports = imp
 	}
 	res.Receipts = receiptState(dir, cfg)
+	if in.ReceiptNumber > 0 {
+		res.ReceiptImport = stateReceiptImport(ctx, env, cfg, in.ReceiptNumber)
+	}
 	if cfg != nil && strings.TrimSpace(cfg.SendOrderPickupDir) != "" {
 		res.Pickup = pickupState(cfg.SendOrderPickupDir)
 	}
