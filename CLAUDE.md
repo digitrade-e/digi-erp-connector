@@ -16,7 +16,7 @@ Three binaries:
 - **`digi-erp-connector`** — Windows-only native UI (`walk` library) for config management and service control
 - **`digi-erp-connector-provision`** — headless discover / apply / options / verify / restore, and (plan 086) auth / db / service / firewall-remove / daemon / receipts / orders / receipt-seed, and (plan 087) counters / documents / folder-acl, JSON in and out, secrets on stdin only; what digi-mcp runs over WinRM (Digitrade plan 068) or through the link's fixed command set (`internal/link/commands.go`; `docs/provisioning.md`, `docs/link.md`)
 
-**Supported ERPs:** Hasavshevet (complete), SAP (price/stock query implemented), Priority (not implemented)
+**Supported ERPs:** Hasavshevet (complete), SAP (price/stock: engine `sap-pricing-v2`, `docs/price-and-stock.md`), Priority (not implemented)
 **Primary target OS:** Windows. Linux supported for daemon only.
 
 ## Project structure
@@ -41,6 +41,9 @@ cmd/
                           docs/order-cutover-proof.md; never released)
   connector-rehearsal/  ← DIG-1304 operator tool: counter/index/receipt store
                           across an upgrade or downgrade (internal/rehearsal)
+  sap-price-check/      ← operator tool: the SAP engine against the prices SAP put
+                          on a client's own UI-entered order lines (sap.Check);
+                          read-only, counts only; never released
 
 internal/
   api/
@@ -77,7 +80,9 @@ internal/
                           counters.go + document_rule.go = named counters and
                           the documentRule (plan 087)
   buildinfo/            ← Version, stamped by the release build (-X)
-  erp/sap/              ← SAP B1 price/stock query
+  erp/sap/              ← SAP B1 price/stock: load.go reads (bound, NOLOCK),
+                          pricing.go / stock.go decide (SAP's documented order;
+                          pure, table-tested), check.go proves it on live data
   files/                ← Path traversal prevention
   logger/               ← LoggerService interface
   platform/

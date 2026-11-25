@@ -63,19 +63,68 @@ instead of going through this endpoint.
 
 ## SAP Business One
 
-One query, no stored procedures, nothing installed. It is a single large CTE that
-resolves, in order:
+No stored procedures, nothing installed, read-only (`WITH (NOLOCK)`, every value
+bound). Engine `sap-pricing-v2` (`internal/erp/sap`): small queries read the
+ingredients (`load.go`) and plain Go decides (`pricing.go`, `stock.go`), so every
+rule is unit-tested. Each item's `details.engine` names it.
 
-- the customer's assigned price list, walking price-list inheritance
-- special prices per business partner (`OSPP`) and per discount group
-- quantity/volume discounts
-- BOM component pricing where an item is assembled
-- on-hand stock from `OITW` per warehouse
+**How a price is decided** — SAP Business One's documented order, checked against
+the prices SAP itself put on a live 10.0 company's order lines:
 
-It is read-only and lives in `internal/erp/sap/price_stock.go`. It is the largest
-single piece of SQL in the repo and, honestly, the least tested code here — see
-[development.md](development.md#coverage-honestly). Treat changes to it with
-care and verify against a real SAP database.
+1. a **specific blanket agreement** (`OOAT` Type `S`, approved, not cancelled,
+   items method, in force, open line): its unit price less its line discount;
+2. the business partner's **special price** (`OSPP` CardCode = the BP, `Valid` =
+   `Y`, inside its dates; the `SPP1` period covering the date and, in it, the
+   `SPP2` volume break for the quantity). `OSPP.Price` is already the price after
+   discount. Nothing else applies on top. It counts on whichever list it was built
+   from (v1 dropped a special price based on another list);
+3. otherwise the BP's **price list** price (`ITM1`; SAP keeps derived lists'
+   prices there already factored and rounded), replaced by the list's **period and
+   volume discount** when one is valid. Those rows are stored in `OSPP` with
+   CardCode `*<list number>`: verified on data, not documented;
+4. on top of that base, the **discount groups** (`OEDG`/`EDG1`) of every level
+   that applies — the BP (`S`), its BP group (`C`), all BPs (`A`) — **pooled** and
+   combined by the BP's effective-discount rule `OCRD.DiscRel`: `L` lowest (SAP's
+   default when blank), `H` highest, `A` average, `S` total (≤ 100), `M`
+   multiplied. A group counts only when `ValidFor` = `Y` (REFDB: "Active"; v1 also
+   applied inactive groups) and the date is inside its optional dates. Lines match
+   on item (`4`), item group (`52`), manufacturer (`43`) or item property (`8`).
+   `DiscType` `P` (pay for / get free) is free goods, never a price. `OCRD.NoDiscount`
+   = `Y` turns groups off.
+
+Prices are for one unit (the catalogue price). Manual line or header discounts a
+user types in SAP are not an engine output. `OCRD.EffecPrice` other than `D`
+(lowest / highest of all sources) is not implemented: every customer of the first SAP client
+is `D`.
+
+**Stock** comes from `OITW` for every requested warehouse (v1 read the first only):
+`stockByWarehouse` is on hand, `details.freeStockByWarehouse` is on hand minus
+committed (SAP's own "Available" also adds what is on order: `onOrder`). A **sales BOM** (`OITT` TreeType `S`) counts whole kits: the fewest any
+inventory component makes, ITT1 quantity per kit taken into account. v1 took the
+smallest component on hand: on the first SAP client it overstated 5 kits needing 2+ units of
+a part. Text, resource and non-inventory lines never limit a kit.
+
+**Wire compatibility.** Every v1 key is still sent with the same meaning
+(`priceListPrice`, `osppPrice`, `osppDiscount`, `bpGroupDiscount`, `promoDiscount`,
+`manufacturerDiscount`, `finalPrice`; details `cardCode`, `priceList`, `currency`,
+`priceSource`, `warehouseCode`, `osppDiscount`, `bpGroupDiscountType`, `oedgType`,
+`manufacturerName`, `onOrder`, `commited`). `priceSource` keeps v1's labels and adds
+`Period and volume discount` and `Blanket agreement`. New keys: prices
+`periodVolumePrice`, `blanketAgreementPrice`; details `engine`, `discountRules`,
+`specialPriceRule`, `itemActive` (SAP refuses an inactive item on a document),
+`freeStock`, `freeStockByWarehouse`, `blanketAgreement`. More than 2000 SKUs or 50
+warehouses is `400 PRICE_STOCK_TOO_LARGE` (v1 hit SQL Server's 2100-parameter cap
+and answered 500).
+
+**Prove it on a client before go-live:** `go run ./cmd/sap-price-check -database
+<company DB> [-user <login>]` (password in `SAP_CHECK_PASSWORD`; no `-user` =
+Windows authentication). It prices the order lines users entered in the SAP client
+through this engine and compares with SAP's own result line by line. SAP records
+where each line's price came from (`RDR1.SpecPrice`), so lines a user priced by
+hand are left out. Read-only; it prints counts only. On the first SAP client (2026-11-25)
+the last 30 days gave 402 of 403 lines equal (source, base, discount and final).
+Over a year it gave 97–99%, the rest being rules and prices edited since. v1 scored
+the same there: that client barely uses the cases v1 got wrong.
 
 ## Priority
 

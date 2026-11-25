@@ -60,11 +60,15 @@ validates that a real `queries.json` parses.
 
 ### Coverage, honestly
 
-The order pipeline (`erp/hasavshevet/send_order.go`) and the SAP price/stock query
-are the largest and least covered code in the repo. The IMOVEIN byte layout and
-order numbering are tested; `ProcessOrder` end-to-end is not, and `erp/sap` has no
-tests at all. If you touch either, that is the gap to close — ideally by comparing
-generated output against known-good captured files.
+The order pipeline (`erp/hasavshevet/send_order.go`) is the largest and least
+covered code in the repo. The IMOVEIN byte layout and order numbering are tested;
+`ProcessOrder` end-to-end is not. If you touch it, that is the gap to close —
+ideally by comparing generated output against known-good captured files.
+
+`erp/sap` (engine `sap-pricing-v2`) decides in plain Go, and every rule is a table
+test (`pricing_test.go`, `stock_test.go`). The loaders' SQL is not run in CI: prove
+a change against a real SAP database with `cmd/sap-price-check`
+([price-and-stock.md](price-and-stock.md#sap-business-one)), read-only.
 
 ## CI
 

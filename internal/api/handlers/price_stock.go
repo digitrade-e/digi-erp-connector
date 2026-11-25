@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"time"
 
@@ -58,6 +59,12 @@ func NewPriceAndStockHandler(cfg config.Config, dbConn *sql.DB) http.HandlerFunc
 			return
 		}
 
+		if errors.Is(err, sap.ErrTooManySKUs) || errors.Is(err, sap.ErrTooManyWarehouses) {
+			// A request fault, not an ERP failure: past these limits SQL Server's 2100-parameter cap
+			// failed the query (500 before v2).
+			respond.Error(w, http.StatusBadRequest, err.Error(), "PRICE_STOCK_TOO_LARGE", nil)
+			return
+		}
 		if err != nil {
 			respond.Error(w, http.StatusInternalServerError, "Failed to load price and stock", "PRICE_STOCK_FAILED", nil)
 			return

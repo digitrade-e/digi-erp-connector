@@ -89,7 +89,7 @@ internal/
   queries/               THE data-access model: store, binder, runner
   erp/
     hasavshevet/         order pipeline (IMOVEIN, queue, order numbers), price/stock procs
-    sap/                 SAP B1 price/stock (one large CTE)
+    sap/                 SAP B1 price/stock: loaders + pricing / kit-stock rules in Go, and the check behind cmd/sap-price-check
     types.go             the ERP-neutral price/stock request and result
   auth/                  HS256 sign/verify for /auth/token, no deps
   config/                config model + atomic YAML load/save
