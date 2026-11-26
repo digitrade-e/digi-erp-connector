@@ -27,8 +27,10 @@ const (
 	MaxWarehouses = 50
 )
 
-// ErrTooManySKUs and ErrTooManyWarehouses are request faults (the handler answers 400).
+// ErrTooManySKUs and ErrTooManyWarehouses are request faults (the handler answers 400), and so is
+// every error wrapping ErrInvalidRequest (no customer, no warehouse, a date that is not one).
 var (
+	ErrInvalidRequest    = errors.New("invalid price and stock request")
 	ErrTooManySKUs       = fmt.Errorf("at most %d SKUs per request", MaxSKUs)
 	ErrTooManyWarehouses = fmt.Errorf("at most %d warehouses per request", MaxWarehouses)
 )
@@ -76,11 +78,11 @@ func normalize(req erp.PriceStockRequest, now time.Time) (request, error) {
 	}
 	in.cardCode = strings.TrimSpace(req.UserExtID)
 	if in.cardCode == "" {
-		return in, errors.New("userExtId is required")
+		return in, fmt.Errorf("%w: userExtId is required", ErrInvalidRequest)
 	}
 	in.warehouses = uniqueInOrder(req.Warehouses)
 	if len(in.warehouses) == 0 {
-		return in, errors.New("warehouse is required")
+		return in, fmt.Errorf("%w: warehouse is required", ErrInvalidRequest)
 	}
 	if len(in.warehouses) > MaxWarehouses {
 		return in, ErrTooManyWarehouses
@@ -92,7 +94,7 @@ func normalize(req erp.PriceStockRequest, now time.Time) (request, error) {
 		}
 		t, err := time.Parse("2006-01-02", d)
 		if err != nil {
-			return in, errors.New("date must be YYYY-MM-DD")
+			return in, fmt.Errorf("%w: date must be YYYY-MM-DD", ErrInvalidRequest)
 		}
 		in.day = t
 	}

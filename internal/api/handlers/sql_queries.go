@@ -16,7 +16,11 @@ import (
 // query-string params (URL wins), string values are type-inferred unless the
 // parameter name is a forced-string (skuArray/warehouse/sku/syncKey), and the
 // stored SQL runs with every value bound as a named parameter.
-func NewRunSavedQueryHandler(store *queries.Store, runner *queries.Runner) http.HandlerFunc {
+//
+// A saved query whose text is an engine directive ("-- digi-engine: <name>", queries.EngineName) is
+// answered by that engine from engines, with the same merged parameters and the same response; an
+// engine this connector does not have is a 400, never SQL.
+func NewRunSavedQueryHandler(store *queries.Store, runner *queries.Runner, engines map[string]SavedQueryEngine) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if runner == nil {
 			respond.Error(w, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
@@ -43,6 +47,11 @@ func NewRunSavedQueryHandler(store *queries.Store, runner *queries.Runner) http.
 			if s, isStr := v.(string); isStr && !queries.IsForcedString(k) {
 				merged[k] = queries.InferStringValue(s)
 			}
+		}
+
+		if engineName, isEngine := queries.EngineName(def.SQL); isEngine {
+			runEngine(w, r, name, engines[engineName], engineName, merged, runner.MaxRows())
+			return
 		}
 
 		result, err := runner.Run(r.Context(), def.SQL, merged)

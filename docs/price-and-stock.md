@@ -130,6 +130,27 @@ the last 30 days gave 402 of 403 lines equal (source, base, discount and final).
 Over a year it gave 97–99%, the rest being rules and prices edited since. v1 scored
 the same there: that client barely uses the cases v1 got wrong.
 
+### The SAP engine as a saved query
+
+Nothing calls `/api/priceAndStockHandler`: the B2B reads live prices through saved
+queries (`GET /api/sqlqueries/{name}`, mapped in ERP-manager). A saved query whose text
+is `-- digi-engine: sap-price-stock` (saved-queries.md § Engine queries) runs this engine
+and answers **the rows of v1's saved query `GetPricesAndStock`**, so a data mapping written
+for v1 keeps working once the query's text is replaced:
+
+- parameters: `skuArray` (`A,B` or `["A","B"]`), `warehouse` (same forms), `syncKey` or
+  `userExtId` (the CardCode), `dateString` or `date` (`YYYY-MM-DD`, today when absent).
+  v1's `priceList` is not read: the engine prices on the business partner's own list, as
+  SAP does, and reports it in `priceList`;
+- one row per SKU and requested warehouse, in SKU order. v1's columns keep their meaning:
+  `sku`, `cardCode`, `priceList`, `currency`, `priceListPrice`, `osppPrice`,
+  `osppDiscount`, `promoDiscount`, `warehouseCode`, `stock`, `onOrder`, `commited`,
+  `priceSource`, `finalPrice`. `onOrder` and `commited` are filled on the first warehouse's
+  row only. New columns: `bpGroupDiscount`, `bpGroupDiscountType`, `oedgType`,
+  `manufacturerDiscount`, `periodVolumePrice`, `blanketAgreementPrice`, `freeStock`,
+  `itemActive`, `discountRules`, `engine`;
+- SKUs with no price on the customer's list and unknown customers give no rows, as in v1.
+
 ## Priority
 
 `internal/erp/sap` declares `ErrNotImplemented` for a future Priority

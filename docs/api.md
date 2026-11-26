@@ -154,6 +154,7 @@ table and recovery: [hasavshevet-send-receipt.md](hasavshevet-send-receipt.md).
 ## Price & stock
 
 `POST /api/priceAndStockHandler` → routed by config `erp` to Hasavshevet (`GPRICE_Bulk` + `GetOnHandStockForSkus`) or SAP B1 (12s timeout).
+On SAP the same engine also answers a saved query whose text is `-- digi-engine: sap-price-stock` ([saved-queries.md](saved-queries.md#engine-queries-internalqueriesenginego)).
 
 ### Value formatting (all query routes)
 
