@@ -25,7 +25,7 @@ func newQueryMux(t *testing.T) (*http.ServeMux, *queries.Store) {
 	mux.Handle("GET /api/custom_sql/{name}", NewGetCustomSQLHandler(store))
 	mux.Handle("PATCH /api/custom_sql/{name}", NewUpdateCustomSQLHandler(store))
 	mux.Handle("DELETE /api/custom_sql/{name}", NewDeleteCustomSQLHandler(store))
-	mux.Handle("GET /api/sqlqueries/{name}", NewRunSavedQueryHandler(store, nil))
+	mux.Handle("GET /api/sqlqueries/{name}", NewRunSavedQueryHandler(store, nil, nil))
 	return mux, store
 }
 

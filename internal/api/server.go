@@ -163,7 +163,7 @@ func NewServer(cfg config.Config, deps ServerDeps) (*http.Server, error) {
 	getQueryHandler := handlers.NewGetCustomSQLHandler(deps.QueryStore)
 	updateQueryHandler := handlers.NewUpdateCustomSQLHandler(deps.QueryStore)
 	deleteQueryHandler := handlers.NewDeleteCustomSQLHandler(deps.QueryStore)
-	runQueryHandler := handlers.NewRunSavedQueryHandler(deps.QueryStore, queryRunner)
+	runQueryHandler := handlers.NewRunSavedQueryHandler(deps.QueryStore, queryRunner, handlers.SavedQueryEngines(cfg, deps.DB))
 
 	mux.Handle("GET /api/health", wrap(healthHandler))
 

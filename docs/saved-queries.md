@@ -70,6 +70,22 @@ Everything binds via `sql.Named()` — never string concatenation.
   `EXEC proc`, `WITH`, `OUTPUT`) runs via Query and returns rows
 - DB errors are never leaked: generic `500 DB_ERROR`
 
+## Engine queries (internal/queries/engine.go)
+
+A saved query whose whole text is one line, `-- digi-engine: <name>`, is answered by
+that connector engine instead of SQL, with the same merged parameters and the same
+response (`rows`, `value`, `recordsets`, `rowCount`). Being a comment, the text is
+harmless SQL, so nothing that stores or lists queries needs to know about it. SQL with
+the directive inside, or anything after it, stays SQL. Engines:
+
+| Name | Connector | What |
+|---|---|---|
+| `sap-price-stock` | `erp: sap` only | the SAP price-and-stock engine (`sap-pricing-v2`) as v1's `GetPricesAndStock` rows: [price-and-stock.md](price-and-stock.md#the-sap-engine-as-a-saved-query) |
+
+A name this connector does not offer is `400 ENGINE_NOT_SUPPORTED`. A request fault is
+`400 ENGINE_BAD_REQUEST` or `400 PRICE_STOCK_TOO_LARGE`. Timeout, row cap and errors
+follow the table above; the engine has its own 12 s timeout.
+
 ## Trust model
 
 Saved queries are **trusted** — they are managed by the authenticated backend

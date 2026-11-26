@@ -61,6 +61,14 @@ func NewRunner(db *sql.DB, timeout time.Duration, maxRows int) *Runner {
 	return &Runner{db: db, timeout: timeout, maxRows: maxRows}
 }
 
+// MaxRows is the most rows one answer may carry; an engine answering a saved query keeps to it too.
+func (r *Runner) MaxRows() int {
+	if r == nil || r.maxRows <= 0 {
+		return DefaultMaxRows
+	}
+	return r.maxRows
+}
+
 // Run executes query with the given parameters and collects all recordsets.
 func (r *Runner) Run(ctx context.Context, query string, params map[string]any) (*Result, error) {
 	if r == nil || r.db == nil {
