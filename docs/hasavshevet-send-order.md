@@ -208,9 +208,12 @@ goldens' bytes and hashes as before (omitempty, the DIG-1291 index).
   is reserved; the writer checks again for every other caller
   (`ValidateLineNotes`, `line_note.go`). The B2B shop caps the input at the same
   20 characters, so a buyer never meets the 400.
-- Counted as written, like the header texts: line breaks become `". "` (two
-  characters), single quotes are dropped, one Windows-1255 byte per character. Only
-  spaces, or a tab / NUL / other control character, is refused.
+- **Characters (v1.0.44):** only Hebrew letters (א–ת), Latin letters, digits, a space
+  and `. , - / ( ) + :`. A line break, a quote, a tab, `% & | ^ < > ! ; \`, niqqud or an
+  emoji is refused (naming the character), never stripped or converted: operators
+  report that such characters in a free text break the importer's BAT run
+  (Digitrade, 2026-11-26). Counted after the edge spaces are trimmed; every admitted
+  character is one Windows-1255 byte. Only spaces is refused too.
 - `sendOrderFormat: legacy` has no field 71 (width 0): any note is refused there
   (`ValidateLegacyFit`), never dropped.
 
