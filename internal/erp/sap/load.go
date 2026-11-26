@@ -267,7 +267,7 @@ WHERE V.CardCode IN (@cardCode, @listCard)
 // in matchRules.
 func loadDiscountRules(ctx context.Context, q querier, c *customer) ([]discountRule, error) {
 	rows, err := q.QueryContext(ctx, `
-SELECT E.Type, E.ValidFor, E.ValidForm, E.ValidTo,
+SELECT E.AbsEntry, E.Type, E.ValidFor, E.ValidForm, E.ValidTo,
        CAST(X.ObjType AS nvarchar(20)), CAST(X.ObjKey AS nvarchar(50)), X.DiscType, X.Discount
 FROM OEDG AS E WITH (NOLOCK)
 INNER JOIN EDG1 AS X WITH (NOLOCK) ON X.AbsEntry = E.AbsEntry
@@ -282,14 +282,15 @@ WHERE (E.Type = 'S' AND E.ObjCode = @cardCode)
 	var out []discountRule
 	for rows.Next() {
 		var (
+			group                                      int
 			level, validFor, objType, objKey, discType sql.NullString
 			from, to                                   sql.NullTime
 			discount                                   sql.NullFloat64
 		)
-		if err := rows.Scan(&level, &validFor, &from, &to, &objType, &objKey, &discType, &discount); err != nil {
+		if err := rows.Scan(&group, &level, &validFor, &from, &to, &objType, &objKey, &discType, &discount); err != nil {
 			return nil, err
 		}
-		out = append(out, discountRule{Level: level.String, Active: validFor.String == "Y", From: timePtr(from), To: timePtr(to),
+		out = append(out, discountRule{Group: group, Level: level.String, Active: validFor.String == "Y", From: timePtr(from), To: timePtr(to),
 			ObjType: strings.TrimSpace(objType.String), ObjKey: objKey.String, DiscType: discType.String, Discount: discount.Float64})
 	}
 	return out, rows.Err()

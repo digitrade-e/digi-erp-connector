@@ -89,6 +89,40 @@ func TestPriceItem_DiscountGroupsPoolAcrossLevels(t *testing.T) {
 	}
 }
 
+func TestPriceItem_ItemLineOverridesItsGroupsOtherLines(t *testing.T) {
+	// Measured on a company copy (digi-brain erp/sap-b1/pricing.md, open-questions #8): one discount
+	// group with an item line of 10% and an item-group line of 20% gave 10% under all five
+	// effective-discount rules. The rule does not combine an item line with its own group's lines.
+	sameGroup := func(objType, key string, pct float64) discountRule {
+		r := rule(levelPartner, objType, key, pct)
+		r.Group = 41
+		return r
+	}
+	rules := []discountRule{sameGroup(ruleItemGroup, "105", 20), sameGroup(ruleItem, "A1", 10)}
+	for _, mode := range []string{"L", "H", "A", "S", "M"} {
+		p := priceItem(customer{DiscRel: mode}, baseItem(), nil, nil, rules, nil, day("2026-11-25"), 1)
+		if p.GroupDiscount == nil || !near(*p.GroupDiscount, 10) || !near(*p.Final, 90) || p.RulesMatched != 1 {
+			t.Errorf("mode %s: got discount %v final %v rules %d, want 10 / 90 / 1", mode, p.GroupDiscount, p.Final, p.RulesMatched)
+		}
+	}
+	// The item line of another group does not silence this group's item-group line: the levels still
+	// pool (TestPriceItem_DiscountGroupsPoolAcrossLevels), and so do two groups of one level.
+	other := rule(levelAll, ruleItem, "A1", 10)
+	other.Group = 7
+	group := rule(levelPartner, ruleItemGroup, "105", 20)
+	group.Group = 41
+	p := priceItem(customer{DiscRel: "M"}, baseItem(), nil, nil, []discountRule{group, other}, nil, day("2026-11-25"), 1)
+	if p.GroupDiscount == nil || !near(*p.GroupDiscount, 28) || p.RulesMatched != 2 {
+		t.Errorf("two groups: got discount %v rules %d, want 28 / 2", p.GroupDiscount, p.RulesMatched)
+	}
+	// An item line for another item does not silence the group.
+	notOurs := sameGroup(ruleItem, "A2", 5)
+	p = priceItem(customer{DiscRel: "L"}, baseItem(), nil, nil, []discountRule{sameGroup(ruleItemGroup, "105", 20), notOurs}, nil, day("2026-11-25"), 1)
+	if p.GroupDiscount == nil || !near(*p.GroupDiscount, 20) {
+		t.Errorf("other item's line: got discount %v, want 20", p.GroupDiscount)
+	}
+}
+
 func TestPriceItem_AllBPRulesAloneKeepV1Label(t *testing.T) {
 	p := priceItem(customer{DiscRel: "L"}, baseItem(), nil, nil, []discountRule{rule(levelAll, ruleItem, "A1", 15)}, nil, day("2026-11-25"), 1)
 	if p.Source != sourcePromo || !near(*p.Final, 85) {

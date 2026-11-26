@@ -90,7 +90,11 @@ the prices SAP itself put on a live 10.0 company's order lines:
    applied inactive groups) and the date is inside its optional dates. Lines match
    on item (`4`), item group (`52`), manufacturer (`43`) or item property (`8`).
    `DiscType` `P` (pay for / get free) is free goods, never a price. `OCRD.NoDiscount`
-   = `Y` turns groups off.
+   = `Y` turns groups off. **Inside one group an item line overrides the group's
+   other lines**: measured on a company copy, an item line of 10% beside an
+   item-group line of 20% in the same group gave 10% under all five rules (before
+   this, the engine pooled them and answered 20 / 15 / 30 / 28% under H / A / S / M).
+   Lines of different groups, and so of different levels, still pool.
 
 Prices are for one unit (the catalogue price). Manual line or header discounts a
 user types in SAP are not an engine output. `OCRD.EffecPrice` other than `D`

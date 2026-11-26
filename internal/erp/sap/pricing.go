@@ -12,6 +12,8 @@ package sap
 //     (OSPP CardCode = "*<list>") when one is valid, and on top of it
 //  4. the discount groups (OEDG/EDG1) of every level that applies — the BP itself (S), its BP group
 //     (C) and all BPs (A) — pooled and combined by the BP's effective-discount rule (OCRD.DiscRel).
+//     Inside one group an item line overrides the group's other lines (measured on a company copy:
+//     an item line of 10% beside an item-group line of 20% in one group gave 10% under every rule).
 //
 // Manual line and header discounts a user types are not an engine output and are never guessed.
 
@@ -108,6 +110,7 @@ type volumeBreak struct {
 }
 
 type discountRule struct {
+	Group    int    // OEDG.AbsEntry: the discount group the line belongs to
 	Level    string // OEDG.Type
 	Active   bool   // OEDG.ValidFor = 'Y': the group's Active box; the dates are optional limits
 	From, To *time.Time
@@ -253,6 +256,32 @@ func matchRules(it item, rules []discountRule, day time.Time) []discountRule {
 			continue
 		}
 		out = append(out, r)
+	}
+	return itemLinesOverrideTheirGroup(out)
+}
+
+// itemLinesOverrideTheirGroup keeps, in every discount group that has a matched item line, only its
+// item lines: SAP does not combine an item line with the item-group, manufacturer or property lines
+// of its own group. Lines of different groups, and so of different levels, still pool.
+func itemLinesOverrideTheirGroup(matched []discountRule) []discountRule {
+	type groupKey struct {
+		level string
+		group int
+	}
+	hasItem := map[groupKey]bool{}
+	for _, r := range matched {
+		if r.ObjType == ruleItem {
+			hasItem[groupKey{r.Level, r.Group}] = true
+		}
+	}
+	if len(hasItem) == 0 {
+		return matched
+	}
+	out := matched[:0:0]
+	for _, r := range matched {
+		if r.ObjType == ruleItem || !hasItem[groupKey{r.Level, r.Group}] {
+			out = append(out, r)
+		}
 	}
 	return out
 }
