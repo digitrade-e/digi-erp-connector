@@ -458,3 +458,11 @@ Branch `feat/v1.0.32-followups` from v1.0.31 (775d937); a security review comes 
 - The legacy layout has no field 71 (width 0): `ValidateLegacyFit` refuses any note rather than drop it.
 - `OrderLineItem.Note` is `omitempty`: a request with no notes writes the goldens' bytes and hashes as before (DIG-1291).
 - Tests: `hasavshevet/line_note_test.go`, `handlers/send_order_line_note_test.go`.
+
+## 2026-11-26 — v1.0.44: a line note takes only safe characters (DIG-1551)
+
+- `lineNoteAllowed`: Hebrew letters, Latin letters, digits, space and `. , - / ( ) + :`. Anything else (line break,
+  quotes, tab, `% & | ^ < > ! ; \`, niqqud, emoji) is a 400 `details[i]/note` naming the character, never stripped or
+  converted. Why: operators of Hashavshevet's importer report that a line break or a special character in a free text
+  breaks its BAT run (Digitrade, 2026-11-26). v1.0.43 converted line breaks to ". " and dropped quotes; no tenant had
+  sent a note yet, so nothing changes for anyone.
