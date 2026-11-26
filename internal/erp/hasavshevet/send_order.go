@@ -94,6 +94,12 @@ type OrderLineItem struct {
 	SinglePrice   float64
 	TotalPrice    float64
 	Discount      float64
+	// Note (DIG-1551) is the buyer's note on this line → IMOVEIN line71
+	// (פרטים בתנועה, 20 characters). "" = none: the field stays blank, as
+	// before. Never cut: ValidateLineNotes refuses one that does not fit.
+	// omitempty keeps a request without notes hashing as it did before them
+	// (orderRequestHash, the DIG-1291 index).
+	Note string `json:",omitempty"`
 }
 
 // OrderResult is returned by ProcessOrder on success.
@@ -745,6 +751,7 @@ func buildIMOVEIN(orderNum int64, account accountInfo, req OrderRequest, rate fl
 			Price:       fmt.Sprintf("%.2f", d.OriginalPrice),
 			DiscountPrc: fmt.Sprintf("%.2f", d.Discount),
 			Unit:        "יח'",
+			Details:     lineNoteValue(d.Note),
 		})
 	}
 
@@ -887,6 +894,9 @@ func validateOrderRequest(req OrderRequest) error {
 		return err
 	}
 	if err := ValidateHeader(req.Header); err != nil {
+		return err
+	}
+	if err := ValidateLineNotes(req.Details); err != nil {
 		return err
 	}
 

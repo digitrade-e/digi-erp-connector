@@ -446,3 +446,15 @@ Branch `feat/v1.0.32-followups` from v1.0.31 (775d937); a security review comes 
   - `acceptUnreadable` stays in folder-acl's input (digi-mcp may send it) but accepts nothing, since no index is read.
   - Test `TestFolderACL_LockdownLetsRecoverDeliverAReservedReceipt` runs the chain with the daemon's real
     `FolderGuard` (over the fake's writers) and receipt writer: refused → lock-down → start → delivered and `written`.
+
+## 2026-11-26 — DIG-1551: a note per order line → IMOVEIN line71
+
+- `details[i].note` on `POST /api/sendOrder` (and v2) is written to IMOVEIN **line71, פרטים בתנועה** (20 characters)
+  of that line's record (`hasavshevet/line_note.go`, `stockMove.Details`). First caller: Groopy's B2B shop, whose
+  buyers and reps write a note on a cart line.
+- **Never cut** (Digitrade decision 2026-11-26): a note that does not fit is `400 VALIDATION_ERROR` `details[i]/note`,
+  checked by the route before a number is reserved and again by the writer (`ValidateLineNotes`). Counted as written,
+  like the header texts (line breaks ". " = two, quotes dropped); spaces only or a control character is refused.
+- The legacy layout has no field 71 (width 0): `ValidateLegacyFit` refuses any note rather than drop it.
+- `OrderLineItem.Note` is `omitempty`: a request with no notes writes the goldens' bytes and hashes as before (DIG-1291).
+- Tests: `hasavshevet/line_note_test.go`, `handlers/send_order_line_note_test.go`.

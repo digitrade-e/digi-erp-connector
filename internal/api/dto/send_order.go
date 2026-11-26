@@ -116,6 +116,10 @@ type SendOrderLineItem struct {
 	SinglePrice   *float64 `json:"singlePrice"`
 	TotalPrice    *float64 `json:"totalPrice"`
 	Discount      *float64 `json:"discount"`
+	// Note (DIG-1551) is the line's note → IMOVEIN line71 (פרטים בתנועה), at
+	// most 20 characters as written. Optional: absent / "" leaves the field
+	// blank, as before; one that does not fit is a 400, never cut.
+	Note string `json:"note"`
 }
 
 type SendOrderMeta struct {

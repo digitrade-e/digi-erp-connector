@@ -171,7 +171,20 @@ func newSendOrderHandler(queue *hasavshevet.OrderQueue, ordersConfigured bool, v
 				SinglePrice:   *d.SinglePrice,
 				TotalPrice:    *d.TotalPrice,
 				Discount:      *d.Discount,
+				Note:          d.Note,
 			})
+		}
+
+		// Line notes (DIG-1551): checked before anything is reserved, so one
+		// that does not fit field 71 is a 400 and never a number given away.
+		if err := hasavshevet.ValidateLineNotes(details); err != nil {
+			var fe *hasavshevet.FieldError
+			if errors.As(err, &fe) {
+				respond.Error(w, http.StatusBadRequest, fe.Error(), "VALIDATION_ERROR", map[string]any{"field": fe.Field})
+				return
+			}
+			respond.Error(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR", nil)
+			return
 		}
 
 		orderReq := hasavshevet.OrderRequest{

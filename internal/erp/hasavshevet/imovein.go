@@ -241,6 +241,7 @@ type stockMove struct {
 	Price       string // originalPrice (line24)
 	DiscountPrc string
 	Unit        string
+	Details     string // line71 פרטים בתנועה: the line's note (DIG-1551), "" = blank
 }
 
 // generateDOC generates the IMOVEIN.doc binary content (Windows-1255 encoded).
@@ -332,7 +333,7 @@ func buildDOCRecord(h stockHeader, m stockMove) []byte {
 	buf.Write(w("", f["line68"]))
 	buf.Write(w("", f["line69"]))
 	buf.Write(w("", f["line70"]))
-	buf.Write(w("", f["line71"]))
+	buf.Write(w(m.Details, f["line71"])) // פרטים בתנועה / the line's note (DIG-1551)
 	buf.Write(w("", f["line72"]))
 	buf.Write(w("", f["line73"]))
 	buf.Write(w("", f["line74"]))

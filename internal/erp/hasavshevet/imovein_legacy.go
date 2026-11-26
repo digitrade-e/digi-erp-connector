@@ -278,6 +278,13 @@ func ValidateLegacyFit(req OrderRequest) error {
 			}
 		}
 	}
+	// The line note (DIG-1551) goes to field 71, which the legacy layout does
+	// not carry (width 0): refused, never dropped.
+	for i, d := range req.Details {
+		if d.Note != "" {
+			return &FieldError{Field: lineNoteField(i), Reason: "the legacy IMOVEIN layout has no field 71 (פרטים בתנועה); a line note cannot be written"}
+		}
+	}
 	for i, m := range moves {
 		for _, c := range []struct {
 			name string

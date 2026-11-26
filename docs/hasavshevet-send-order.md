@@ -192,6 +192,28 @@ with which value (BFL: delivery note → `extraSum2` = 99, self pickup →
   otherwise the order is written without them and only the missing echo says
   so.
 
+### Line notes (DIG-1551)
+
+Each line of `details` may carry a `note`: the buyer's note on that line, written
+to IMOVEIN **line71, פרטים בתנועה** (20 characters) of that line's record. Every
+other field of the record is unchanged; a request with no notes writes exactly the
+goldens' bytes and hashes as before (omitempty, the DIG-1291 index).
+
+| Request field | IMOVEIN | Accepted | Absent / `""` |
+|---|---|---|---|
+| `details[i].note` | line71, 20 chars | text, ≤ 20 characters as written | blank, as before |
+
+- **Never cut** (decision 2026-11-26): a note that does not fit is `400
+  VALIDATION_ERROR`, `details.field` `details[<i>]/note`, checked before a number
+  is reserved; the writer checks again for every other caller
+  (`ValidateLineNotes`, `line_note.go`). The B2B shop caps the input at the same
+  20 characters, so a buyer never meets the 400.
+- Counted as written, like the header texts: line breaks become `". "` (two
+  characters), single quotes are dropped, one Windows-1255 byte per character. Only
+  spaces, or a tab / NUL / other control character, is refused.
+- `sendOrderFormat: legacy` has no field 71 (width 0): any note is refused there
+  (`ValidateLegacyFit`), never dropped.
+
 ### The legacy layout (DIG-1297) — `sendOrderFormat: legacy`
 
 The old Digitrade app writes IMOVEIN in a layout of its own, and a Hashavshevet
